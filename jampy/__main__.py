@@ -267,7 +267,7 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
     engine.mixer.clear()
     backing_path = session.project.backing_tracks_dir / track.backing_track
     if backing_path.exists():
-        engine.mixer.add_source("backing", backing_path)
+        engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
 
 
 def _run_session_loop(session: Session, engine: AudioEngine) -> None:
