@@ -26,16 +26,19 @@ class ProjectScreen(Screen):
         with Vertical(id="project-content"):
             yield TrackListWidget(project.setlist, id="project-tracklist")
             yield Label("")
-            yield Label("Add Backing Track (enter full path):")
+            yield Label("Backing track path:")
             yield Input(placeholder="/path/to/song.mp3", id="input-backing-track")
-            yield Label("")
-            yield Label("Instrument for session:")
-            yield Input(placeholder="acoustic guitar", id="input-instrument")
-        with Horizontal(id="project-actions"):
             yield Button("Add Track", id="btn-add-track", variant="primary")
+            yield Label("")
+            yield Label("Instrument to record:")
+            yield Input(placeholder="acoustic guitar", id="input-instrument")
             yield Button("Start Session", id="btn-start-session", variant="success")
+        with Horizontal(id="project-actions"):
             yield Button("Back", id="btn-back", variant="default")
         yield Footer()
+
+    def on_mount(self) -> None:
+        self.query_one("#input-backing-track", Input).focus()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         project: Project = self.app.project

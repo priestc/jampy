@@ -67,6 +67,21 @@ Screen {
 #project-content {
     height: 1fr;
     padding: 1 2;
+    overflow-y: auto;
+}
+
+#project-tracklist {
+    height: auto;
+    max-height: 15;
+}
+
+#project-content Input {
+    margin: 0 0 1 0;
+}
+
+#project-content Button {
+    width: auto;
+    margin: 0 0 1 0;
 }
 
 #project-actions {
