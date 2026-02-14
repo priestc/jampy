@@ -113,6 +113,7 @@ class AudioEngine:
             device=(self.input_device, self.output_device),
             channels=(self.input_channels, self.output_channels),
             dtype="float32",
+            latency="low",
             callback=self._callback,
         )
         self._stream.start()
