@@ -13,6 +13,14 @@ VALID_BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 
 
 @dataclass
+class Instrument:
+    """An instrument input configuration."""
+    name: str
+    device: str  # device name or index
+    input_number: int
+
+
+@dataclass
 class StudioConfig:
     sample_rate: int = 48000
     buffer_size: int = 512
@@ -21,6 +29,7 @@ class StudioConfig:
     input_channels: int = 1
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
+    instruments: list[Instrument] = field(default_factory=list)
 
     def validate(self) -> list[str]:
         errors: list[str] = []
@@ -34,6 +43,12 @@ class StudioConfig:
             errors.append("Output channels must be >= 1")
         return errors
 
+    def get_instrument(self, name: str) -> Instrument | None:
+        for inst in self.instruments:
+            if inst.name.lower() == name.lower():
+                return inst
+        return None
+
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
         path.write_text(json.dumps(asdict(self), indent=2))
 
@@ -42,7 +57,9 @@ class StudioConfig:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text())
-        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+        instruments = [Instrument(**i) for i in data.pop("instruments", [])]
+        filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**filtered, instruments=instruments)
 
     @classmethod
     def exists(cls, path: Path = DEFAULT_CONFIG_PATH) -> bool:

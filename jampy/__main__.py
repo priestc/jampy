@@ -1,11 +1,283 @@
-"""Entry point for Jam.py."""
+"""Entry point for Jam.py CLI."""
 
-from .app import JamPyApp
+from __future__ import annotations
+
+import sys
+import select
+import termios
+import tty
+from pathlib import Path
+
+import click
+
+from .config import (
+    DEFAULT_CONFIG_PATH,
+    StudioConfig,
+    Instrument,
+    VALID_SAMPLE_RATES,
+    VALID_BUFFER_SIZES,
+)
+from .project import Project, Setlist, TrackEntry
+from .audio.formats import get_duration
+from .session import Session, SessionState
+from .utils import format_duration
 
 
+@click.group()
 def main() -> None:
-    app = JamPyApp()
-    app.run()
+    """Jam.py - Music Recording Session Manager."""
+
+
+@main.command()
+def studio_setup() -> None:
+    """Interactive wizard to configure studio audio settings."""
+    click.echo("=== Studio Setup ===\n")
+
+    # Query available audio devices
+    devices = []
+    try:
+        import sounddevice as sd
+        devices = sd.query_devices()
+        click.echo("Available audio devices:")
+        for i, d in enumerate(devices):
+            ins = d["max_input_channels"]
+            outs = d["max_output_channels"]
+            click.echo(f"  [{i}] {d['name']}  (in={ins}, out={outs})")
+        click.echo()
+    except Exception:
+        click.echo("Could not query audio devices (sounddevice unavailable).\n")
+
+    # Sample rate
+    sr_choices = [str(r) for r in VALID_SAMPLE_RATES]
+    sample_rate = click.prompt(
+        "Sample rate",
+        type=click.Choice(sr_choices),
+        default="48000",
+    )
+
+    # Buffer size
+    buf_choices = [str(b) for b in VALID_BUFFER_SIZES]
+    buffer_size = click.prompt(
+        "Buffer size",
+        type=click.Choice(buf_choices),
+        default="512",
+    )
+
+    # Input / output device
+    input_device = click.prompt("Input device index", type=int, default=0)
+    output_device = click.prompt("Output device index", type=int, default=0)
+
+    # Instruments
+    instruments: list[Instrument] = []
+    click.echo("\n--- Instrument Setup ---")
+    while True:
+        if not click.confirm("Add an instrument?", default=bool(not instruments)):
+            break
+        name = click.prompt("  Instrument name")
+        device = click.prompt("  Device name or index", default=str(input_device))
+        input_number = click.prompt("  Input number (channel)", type=int, default=1)
+        instruments.append(Instrument(name=name, device=device, input_number=input_number))
+        click.echo(f"  Added '{name}'.\n")
+
+    config = StudioConfig(
+        sample_rate=int(sample_rate),
+        buffer_size=int(buffer_size),
+        input_device=input_device,
+        output_device=output_device,
+        instruments=instruments,
+    )
+
+    errors = config.validate()
+    if errors:
+        for e in errors:
+            click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    config.save()
+    click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
+    if instruments:
+        click.echo("Instruments:")
+        for inst in instruments:
+            click.echo(f"  - {inst.name} (device={inst.device}, input={inst.input_number})")
+
+
+@main.command()
+def new_project() -> None:
+    """Create a new recording project."""
+    config = StudioConfig.load()
+    projects_dir = Path(config.projects_dir)
+
+    name = click.prompt("Project name")
+    project = Project.create_new(projects_dir, name)
+    click.echo(f"Created project: {project.path}")
+    click.echo("  backing_tracks/")
+    click.echo("  completed_takes/")
+    click.echo("  sessions/")
+    click.echo("  setlist.json")
+
+
+@main.command()
+def update_setlist() -> None:
+    """Scan backing_tracks/ and update setlist.json in the current directory."""
+    cwd = Path.cwd()
+    setlist_path = cwd / "setlist.json"
+    backing_dir = cwd / "backing_tracks"
+
+    if not setlist_path.exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    if not backing_dir.exists():
+        click.echo("Error: No backing_tracks/ directory found.", err=True)
+        raise SystemExit(1)
+
+    # Load existing setlist
+    project = Project.open(cwd)
+    existing_files = {t.backing_track for t in project.setlist.tracks}
+
+    # Scan for audio files
+    audio_exts = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus"}
+    found_files = {
+        f.name for f in backing_dir.iterdir()
+        if f.is_file() and f.suffix.lower() in audio_exts
+    }
+
+    # Add new tracks
+    added = 0
+    for fname in sorted(found_files - existing_files):
+        fpath = backing_dir / fname
+        try:
+            duration = get_duration(fpath)
+        except Exception:
+            duration = 0.0
+        track = TrackEntry(
+            name=fpath.stem,
+            backing_track=fname,
+            duration_seconds=duration,
+        )
+        project.setlist.add_track(track)
+        click.echo(f"  + {fname} ({format_duration(duration)})")
+        added += 1
+
+    # Remove tracks whose files no longer exist
+    removed = 0
+    kept_tracks = []
+    for track in project.setlist.tracks:
+        if track.backing_track in found_files:
+            kept_tracks.append(track)
+        else:
+            click.echo(f"  - {track.backing_track} (removed)")
+            removed += 1
+    project.setlist.tracks = kept_tracks
+
+    project.save_setlist()
+    click.echo(f"\nSetlist updated: {added} added, {removed} removed, {len(kept_tracks)} total.")
+
+
+@main.command()
+@click.argument("instrument")
+def start_session(instrument: str) -> None:
+    """Start a recording session for INSTRUMENT."""
+    # Load config and validate instrument
+    config = StudioConfig.load()
+    inst = config.get_instrument(instrument)
+    if inst is None:
+        available = [i.name for i in config.instruments]
+        click.echo(f"Error: Unknown instrument '{instrument}'.", err=True)
+        if available:
+            click.echo(f"Available: {', '.join(available)}", err=True)
+        raise SystemExit(1)
+
+    # Check we're in a project directory
+    cwd = Path.cwd()
+    if not (cwd / "setlist.json").exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    project = Project.open(cwd)
+    if not project.setlist.tracks:
+        click.echo("Error: Setlist is empty. Run 'jampy update-setlist' first.", err=True)
+        raise SystemExit(1)
+
+    session = Session(project=project, instrument=inst.name)
+    session.start()
+
+    click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
+    click.echo(f"Tracks: {len(project.setlist.tracks)}")
+    click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track  [q]uit\n")
+
+    _run_session_loop(session)
+
+
+def _run_session_loop(session: Session) -> None:
+    """Interactive single-key recording loop."""
+    _show_status(session)
+
+    # Set terminal to raw mode for single-key input
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while session.state != SessionState.ENDED:
+            # Wait for keypress
+            if select.select([sys.stdin], [], [], 0.5)[0]:
+                key = sys.stdin.read(1).lower()
+                _handle_key(session, key)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+    # Session ended
+    log_path = session.save_log()
+    click.echo(f"\nSession ended.")
+    if log_path:
+        click.echo(f"Log saved to {log_path}")
+
+
+def _handle_key(session: Session, key: str) -> None:
+    """Process a single keypress."""
+    if key == "q":
+        session.end_session()
+        return
+
+    if key == "r" and session.state == SessionState.WAITING:
+        session.start_recording()
+        _show_status(session)
+
+    elif key == "b" and session.state == SessionState.PLAYING:
+        session.back_to_start()
+        click.echo("  >> Back to start")
+
+    elif key == "e" and session.state == SessionState.PLAYING:
+        session.song_end()
+        _show_status(session)
+
+    elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
+        session.next_track()
+        _show_status(session)
+
+
+def _show_status(session: Session) -> None:
+    """Print current session status."""
+    track = session.current_track
+    state = session.state.name
+    idx = session.current_track_index + 1
+    total = len(session.project.setlist.tracks)
+
+    if track:
+        dur = format_duration(track.duration_seconds)
+        click.echo(f"[{idx}/{total}] {track.name} ({dur}) — {state}")
+    else:
+        click.echo(f"[{idx}/{total}] — {state}")
+
+    if session.state == SessionState.WAITING:
+        click.echo("  Press [r] to record")
+    elif session.state == SessionState.PLAYING:
+        click.echo("  Recording... [b]ack [e]nd song [q]uit")
+    elif session.state == SessionState.BETWEEN_TRACKS:
+        if session.has_more_tracks:
+            click.echo("  Press [n] for next track, [q] to quit")
+        else:
+            click.echo("  Last track done! Press [q] to finish")
 
 
 if __name__ == "__main__":
