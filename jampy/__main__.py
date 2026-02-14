@@ -7,8 +7,12 @@ import select
 import termios
 import tty
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
+
+if TYPE_CHECKING:
+    from .audio.engine import AudioEngine
 
 from .config import (
     DEFAULT_CONFIG_PATH,
@@ -20,7 +24,7 @@ from .config import (
 from .project import Project, Setlist, TrackEntry
 from .audio.formats import get_duration
 from .session import Session, SessionState
-from .utils import format_duration
+from .utils import format_duration, take_filename, next_take_number
 
 
 @click.group()
@@ -199,6 +203,19 @@ def start_session(instrument: str) -> None:
         click.echo("Error: Setlist is empty. Run 'jampy update-setlist' first.", err=True)
         raise SystemExit(1)
 
+    # Import AudioEngine here to avoid top-level sounddevice import
+    # (allows non-audio commands to work without PortAudio)
+    from .audio.engine import AudioEngine
+
+    engine = AudioEngine(
+        sample_rate=config.sample_rate,
+        buffer_size=config.buffer_size,
+        input_device=config.input_device,
+        output_device=config.output_device,
+        input_channels=config.input_channels,
+        output_channels=config.output_channels,
+    )
+
     session = Session(project=project, instrument=inst.name)
     session.start()
 
@@ -206,11 +223,39 @@ def start_session(instrument: str) -> None:
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
     click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track  [q]uit\n")
 
-    _run_session_loop(session)
+    # Start the audio stream (opens devices, callback runs continuously)
+    engine.start()
+    try:
+        _run_session_loop(session, engine)
+    finally:
+        engine.stop()
 
 
-def _run_session_loop(session: Session) -> None:
+def _load_backing_track(session: Session, engine: AudioEngine) -> None:
+    """Load the current track's backing file into the mixer."""
+    track = session.current_track
+    if not track:
+        return
+    engine.mixer.clear()
+    backing_path = session.project.backing_tracks_dir / track.backing_track
+    if backing_path.exists():
+        engine.mixer.add_source("backing", backing_path)
+
+
+def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     """Interactive single-key recording loop."""
+    # Load the first backing track into the mixer
+    _load_backing_track(session, engine)
+
+    # When the backing track finishes, auto-trigger song_end
+    def on_song_end() -> None:
+        if session.state == SessionState.PLAYING:
+            engine.stop_recording()
+            session.song_end(engine.mixer.position)
+            _show_status(session)
+
+    engine.set_on_song_end(on_song_end)
+
     _show_status(session)
 
     # Set terminal to raw mode for single-key input
@@ -222,7 +267,7 @@ def _run_session_loop(session: Session) -> None:
             # Wait for keypress
             if select.select([sys.stdin], [], [], 0.5)[0]:
                 key = sys.stdin.read(1).lower()
-                _handle_key(session, key)
+                _handle_key(session, engine, key)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
@@ -233,26 +278,60 @@ def _run_session_loop(session: Session) -> None:
         click.echo(f"Log saved to {log_path}")
 
 
-def _handle_key(session: Session, key: str) -> None:
+def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
     """Process a single keypress."""
     if key == "q":
+        engine.stop_recording()
+        engine.mixer.set_playing(False)
         session.end_session()
         return
 
     if key == "r" and session.state == SessionState.WAITING:
-        session.start_recording()
+        # Determine take filename and start recording
+        track = session.current_track
+        if track and session.session_dir:
+            take_num = next_take_number(
+                session.project.completed_takes_dir, track.name, session.instrument
+            )
+            fname = take_filename(track.name, session.instrument, take_num, "flac")
+            rec_path = session.session_dir / fname
+            engine.start_recording(rec_path)
+
+        # Reset mixer to beginning and start playback
+        engine.mixer.reset()
+        engine.mixer.set_playing(True)
+
+        session.start_recording(engine.mixer.position)
         _show_status(session)
 
     elif key == "b" and session.state == SessionState.PLAYING:
-        session.back_to_start()
+        # Restart from beginning — stop current recording, reset mixer, start new recording
+        engine.stop_recording()
+        engine.mixer.reset()
+
+        track = session.current_track
+        if track and session.session_dir:
+            take_num = next_take_number(
+                session.project.completed_takes_dir, track.name, session.instrument
+            )
+            fname = take_filename(track.name, session.instrument, take_num, "flac")
+            rec_path = session.session_dir / fname
+            engine.start_recording(rec_path)
+
+        session.back_to_start(engine.mixer.position)
         click.echo("  >> Back to start")
 
     elif key == "e" and session.state == SessionState.PLAYING:
-        session.song_end()
+        # End the current song — stop recording and playback
+        engine.stop_recording()
+        engine.mixer.set_playing(False)
+        session.song_end(engine.mixer.position)
         _show_status(session)
 
     elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
         session.next_track()
+        if session.state == SessionState.WAITING:
+            _load_backing_track(session, engine)
         _show_status(session)
 
 
