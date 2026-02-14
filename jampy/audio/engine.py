@@ -71,24 +71,30 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
-        # Record input
+        # Capture mono input
+        if indata.shape[1] > 1:
+            mono = indata[:, 0:1].copy()
+        else:
+            mono = indata.copy()
+
+        # Record input to disk
         if self.recorder:
-            # Take first channel if multi-channel input
-            if indata.shape[1] > 1:
-                mono = indata[:, 0:1].copy()
-            else:
-                mono = indata.copy()
             self.recorder.write(mono)
 
-            # Update peak level for VU meter
-            self._peak_level = float(np.max(np.abs(mono)))
+        # Update peak level for VU meter
+        self._peak_level = float(np.max(np.abs(mono)))
 
-        # Playback output
+        # Playback output: mix backing track + input monitoring
         mix = self.mixer.read(frames)
         if self.output_channels == 2:
+            # Add mono input to both stereo channels
             outdata[:] = mix
+            outdata[:, 0] += mono[:, 0]
+            outdata[:, 1] += mono[:, 0]
         else:
-            outdata[:, 0] = mix[:, 0]
+            outdata[:, 0] = mix[:, 0] + mono[:, 0]
+
+        np.clip(outdata, -1.0, 1.0, out=outdata)
 
         # Check if song ended
         if self.mixer.is_playing and self.mixer.is_finished:
