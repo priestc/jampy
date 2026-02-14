@@ -45,6 +45,7 @@ class ProjectScreen(Screen):
             path_str = path_input.value.strip()
             if not path_str:
                 self.notify("Enter a file path", severity="warning")
+                path_input.focus()
                 return
             path = Path(path_str).expanduser()
             if not path.exists():
@@ -67,6 +68,7 @@ class ProjectScreen(Screen):
             instrument = inst_input.value.strip()
             if not instrument:
                 self.notify("Enter an instrument name", severity="warning")
+                inst_input.focus()
                 return
             if not project.setlist.tracks:
                 self.notify("Add at least one track first", severity="warning")
