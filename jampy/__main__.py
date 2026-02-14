@@ -67,9 +67,15 @@ def studio_setup() -> None:
         default="512",
     )
 
-    # Input / output device
-    input_device = click.prompt("Input device index", type=int, default=0)
+    # Output device
+    if devices:
+        click.echo("Output devices:")
+        for i, d in enumerate(devices):
+            if d["max_output_channels"] > 0:
+                click.echo(f"  [{i}] {d['name']}  ({d['max_output_channels']} channels)")
     output_device = click.prompt("Output device index", type=int, default=0)
+    max_out = devices[output_device]["max_output_channels"] if devices else 2
+    output_channels = click.prompt("Output channels", type=int, default=min(2, max_out))
 
     # Instruments
     instruments: list[Instrument] = []
@@ -86,8 +92,8 @@ def studio_setup() -> None:
     config = StudioConfig(
         sample_rate=int(sample_rate),
         buffer_size=int(buffer_size),
-        input_device=input_device,
         output_device=output_device,
+        output_channels=output_channels,
         instruments=instruments,
     )
 
@@ -206,14 +212,30 @@ def start_session(instrument: str) -> None:
     # Import AudioEngine here to avoid top-level sounddevice import
     # (allows non-audio commands to work without PortAudio)
     from .audio.engine import AudioEngine
+    import sounddevice as sd
+
+    # Use the instrument's device for input, studio config for output
+    in_dev: int | None = None
+    try:
+        in_dev = int(inst.device)
+    except ValueError:
+        # Device specified by name — let sounddevice resolve it
+        in_dev = inst.device  # type: ignore[assignment]
+    out_dev = config.output_device
+
+    # Query actual device capabilities to avoid channel count mismatches
+    in_info = sd.query_devices(in_dev, "input")
+    out_info = sd.query_devices(out_dev, "output")
+    input_channels = min(config.input_channels, in_info["max_input_channels"])
+    output_channels = min(config.output_channels, out_info["max_output_channels"])
 
     engine = AudioEngine(
         sample_rate=config.sample_rate,
         buffer_size=config.buffer_size,
-        input_device=config.input_device,
-        output_device=config.output_device,
-        input_channels=config.input_channels,
-        output_channels=config.output_channels,
+        input_device=in_dev,
+        output_device=out_dev,
+        input_channels=max(1, input_channels),
+        output_channels=max(1, output_channels),
     )
 
     session = Session(project=project, instrument=inst.name)
