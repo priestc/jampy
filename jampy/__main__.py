@@ -249,7 +249,8 @@ def start_session(instrument: str) -> None:
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
-    click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track  [q]uit\n")
+    click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track")
+    click.echo("          [l]ower volume  [u]p volume  [q]uit\n")
 
     # Start the audio stream (opens devices, callback runs continuously)
     engine.start()
@@ -299,7 +300,9 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-    # Session ended
+    # Session ended — save volume changes back to setlist
+    session.project.save_setlist()
+
     log_path = session.save_log()
     click.echo(f"\nSession ended.")
     if log_path:
@@ -356,6 +359,20 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         session.song_end(engine.mixer.position)
         _show_status(session)
 
+    elif key == "l":
+        track = session.current_track
+        if track:
+            track.volume = max(0, track.volume - 5)
+            engine.mixer.set_volume("backing", track.volume / 100.0)
+            click.echo(f"  Volume: {track.volume}%")
+
+    elif key == "u":
+        track = session.current_track
+        if track:
+            track.volume = track.volume + 5
+            engine.mixer.set_volume("backing", track.volume / 100.0)
+            click.echo(f"  Volume: {track.volume}%")
+
     elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
         session.next_track()
         if session.state == SessionState.WAITING:
@@ -372,7 +389,7 @@ def _show_status(session: Session) -> None:
 
     if track:
         dur = format_duration(track.duration_seconds)
-        click.echo(f"[{idx}/{total}] {track.name} ({dur}) — {state}")
+        click.echo(f"[{idx}/{total}] {track.name} ({dur}) vol:{track.volume}% — {state}")
     else:
         click.echo(f"[{idx}/{total}] — {state}")
 
