@@ -77,14 +77,20 @@ def studio_setup() -> None:
     max_out = devices[output_device]["max_output_channels"] if devices else 2
     output_channels = click.prompt("Output channels", type=int, default=min(2, max_out))
 
-    # Instruments
-    instruments: list[Instrument] = []
+    # Instruments — start with any previously configured instruments
+    existing_config = StudioConfig.load()
+    instruments: list[Instrument] = list(existing_config.instruments)
     click.echo("\n--- Instrument Setup ---")
+    if instruments:
+        click.echo("Existing instruments:")
+        for inst in instruments:
+            click.echo(f"  - {inst.name} (device={inst.device}, input={inst.input_number})")
+        click.echo()
     while True:
         if not click.confirm("Add an instrument?", default=bool(not instruments)):
             break
         name = click.prompt("  Instrument name")
-        device = click.prompt("  Device name or index", default=str(input_device))
+        device = click.prompt("  Device name or index", default=str(output_device))
         input_number = click.prompt("  Input number (channel)", type=int, default=1)
         instruments.append(Instrument(name=name, device=device, input_number=input_number))
         click.echo(f"  Added '{name}'.\n")
