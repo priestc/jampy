@@ -1,8 +1,8 @@
 # Jam.py
 
-A TUI application for musicians to record instruments over backing tracks, manage songs/albums, and track completed takes.
+A CLI application for musicians to record instruments over backing tracks, manage songs/albums, and track completed takes.
 
-Jam.py handles continuous audio recording, playback mixing, session logging, and automatic splicing of completed takes. Record one instrument at a time — each new session plays back your previous takes alongside the backing track so you can layer parts.
+Jam.py handles continuous audio recording, playback mixing, session logging, and per-take file management. Record one instrument at a time — each new session plays back your previous takes alongside the backing track so you can layer parts.
 
 ## Requirements
 
@@ -35,55 +35,74 @@ pip install -e .
 
 ## Usage
 
-```bash
-jampy
-```
+### Studio Setup
 
-Or:
+Configure your audio devices, output settings, and instruments:
 
 ```bash
-python -m jampy
+jampy studio-setup
 ```
 
-### First Run
+The wizard asks for:
+- Studio name, location, and default musician name (all optional)
+- Sample rate and buffer size
+- Output device and channel count
+- Instruments: name, input device/channel, musician name
+- Desktop audio capture option (for virtual instruments or system audio)
 
-On first launch you'll see the home screen. Start with **Studio Setup** to configure your audio devices, sample rate, buffer size, and projects directory. The config is saved to `~/studio_config.json`.
+Config is saved to `~/studio_config.json`.
 
 ### Creating a Project
 
-1. Select **New Project** and enter a name (e.g. "My Album")
-2. On the project screen, add backing tracks by entering the full path to each audio file (FLAC, WAV, MP3, M4A)
-3. Enter an instrument name (e.g. "acoustic guitar")
-4. Press **Start Session**
+```bash
+jampy new-project
+```
+
+Enter a project name (e.g. "My Album"). Creates the project folder structure in `~/JamPy Projects/`.
+
+### Updating the Setlist
+
+Copy audio files (FLAC, WAV, MP3, M4A) into the project's `backing_tracks/` directory, then:
+
+```bash
+cd ~/JamPy\ Projects/My\ Album
+jampy update-setlist
+```
+
+Scans `backing_tracks/`, adds new files to `setlist.json`, and removes entries for deleted files. Each track in `setlist.json` includes a `volume` field (default 100%) that you can edit manually to adjust backing track playback level.
 
 ### Recording Session
 
-Audio capture runs continuously from the moment the session starts until it ends. The session follows this flow:
+```bash
+cd ~/JamPy\ Projects/My\ Album
+jampy start-session guitar
+```
+
+The session plays the backing track through your speakers, monitors your instrument input in real-time, and records your take. Controls:
 
 | Key | Action | When |
 |-----|--------|------|
 | `r` | Start recording (plays backing track) | Waiting |
 | `b` | Back to start (restart the take) | Playing |
 | `e` | Mark song end (complete the take) | Playing |
-| `n` | Move to next track | Between tracks |
-| `q` / `Esc` | End session | Any time |
+| `n` | Move to next track (auto-starts recording) | Between tracks |
+| `l` | Lower backing track volume by 5% | Any time |
+| `u` | Raise backing track volume by 5% | Any time |
+| `q` | End session | Any time |
 
-**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is marked as completed.
+**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to `completed_takes/` and set as the preferred take in the setlist.
 
-**Restarting a take:** If you make a mistake, press `b` to loop back to the beginning. The backing track restarts and you keep playing. Takes with a restart are marked as mistakes and won't be spliced.
+**Restarting a take:** Press `b` to loop back to the beginning. The backing track restarts and a new take file begins.
 
-### Post-Session Processing
-
-When you end a session, Jam.py automatically:
-
-1. Parses the session log to find completed takes (no restarts)
-2. Splices the audio from the raw recording
-3. Saves each take to `completed_takes/` as `Track Name - instrument - takeN.flac`
-4. Updates the setlist so the new take becomes the preferred take for that instrument
+**Volume adjustments** are saved back to `setlist.json` at the end of the session.
 
 ### Multi-Instrument Layering
 
-Start a new session with a different instrument (e.g. "electric bass"). The backing track now plays back mixed with your previously recorded preferred takes, so you hear everything together while recording the new part.
+Start a new session with a different instrument (e.g. "bass"). The backing track plays mixed with your previously recorded preferred takes, so you hear everything together while recording the new part.
+
+### Desktop Audio Capture
+
+Instruments configured with desktop audio capture record from a PulseAudio/PipeWire monitor source instead of a physical input. This is useful for virtual instruments, software synths, or any audio playing through your system.
 
 ## Project Structure
 
@@ -96,13 +115,15 @@ My Album/
 │   ├── song1.mp3
 │   └── song2.flac
 ├── completed_takes/
-│   ├── song1 - acoustic guitar - take1.flac
-│   ├── song1 - electric bass - take1.flac
-│   └── song2 - acoustic guitar - take2.flac
+│   ├── song1 - guitar - take1.flac
+│   ├── song1 - bass - take1.flac
+│   └── song2 - guitar - take2.flac
 └── sessions/
-    └── 2025-01-15_14-30-00_acoustic guitar/
-        ├── raw_recording.flac
+    └── 2025-01-15_14-30-00_guitar/
+        ├── session.flac
         └── session_log.json
 ```
 
-Existing take files are never deleted. New takes for the same instrument increment the take number and replace the preferred take in the setlist.
+- `completed_takes/` — individual per-song recordings, one file per take
+- `sessions/` — continuous raw recording (`session.flac`) spanning the full session, plus the session log with musician, studio, and event data
+- Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
