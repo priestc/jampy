@@ -322,6 +322,22 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
         click.echo(f"Log saved to {log_path}")
 
 
+def _start_recording(session: Session, engine: AudioEngine) -> None:
+    """Start recording and playing the current track."""
+    track = session.current_track
+    if track and session.session_dir:
+        take_num = next_take_number(
+            session.project.completed_takes_dir, track.name, session.instrument
+        )
+        fname = take_filename(track.name, session.instrument, take_num, "flac")
+        rec_path = session.session_dir / fname
+        engine.start_recording(rec_path)
+
+    engine.mixer.reset()
+    engine.mixer.set_playing(True)
+    session.start_recording(engine.mixer.position)
+
+
 def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
     """Process a single keypress."""
     if key == "q":
@@ -331,21 +347,7 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         return
 
     if key == "r" and session.state == SessionState.WAITING:
-        # Determine take filename and start recording
-        track = session.current_track
-        if track and session.session_dir:
-            take_num = next_take_number(
-                session.project.completed_takes_dir, track.name, session.instrument
-            )
-            fname = take_filename(track.name, session.instrument, take_num, "flac")
-            rec_path = session.session_dir / fname
-            engine.start_recording(rec_path)
-
-        # Reset mixer to beginning and start playback
-        engine.mixer.reset()
-        engine.mixer.set_playing(True)
-
-        session.start_recording(engine.mixer.position)
+        _start_recording(session, engine)
         _show_status(session)
 
     elif key == "b" and session.state == SessionState.PLAYING:
@@ -390,6 +392,8 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         session.next_track()
         if session.state == SessionState.WAITING:
             _load_backing_track(session, engine)
+            # Automatically start recording the next track
+            _start_recording(session, engine)
         _show_status(session)
 
 
