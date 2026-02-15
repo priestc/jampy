@@ -19,6 +19,7 @@ class Instrument:
     device: str  # device name or index
     input_number: int
     musician: str = ""
+    desktop_audio: bool = False
 
 
 @dataclass
