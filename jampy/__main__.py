@@ -210,6 +210,103 @@ def update_setlist() -> None:
     click.echo(f"\nSetlist updated: {added} added, {removed} removed, {len(kept_tracks)} total.")
 
 
+@main.command()
+def listen() -> None:
+    """Listen to mixed takes for a track (without backing track)."""
+    cwd = Path.cwd()
+    if not (cwd / "setlist.json").exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    project = Project.open(cwd)
+    if not project.setlist.tracks:
+        click.echo("No tracks in setlist.")
+        raise SystemExit(1)
+
+    # Display tracks with their available takes
+    click.echo("=== Tracks ===\n")
+    tracks_with_takes = []
+    for i, track in enumerate(project.setlist.tracks):
+        instruments = list(track.preferred_takes.keys())
+        if instruments:
+            click.echo(f"  [{i + 1}] {track.name}  ({', '.join(instruments)})")
+            tracks_with_takes.append(i)
+        else:
+            click.echo(f"  [{i + 1}] {track.name}  (no takes)")
+    click.echo()
+
+    if not tracks_with_takes:
+        click.echo("No tracks have recorded takes yet.")
+        raise SystemExit(1)
+
+    choice = click.prompt("Select track number", type=int)
+    idx = choice - 1
+    if idx < 0 or idx >= len(project.setlist.tracks):
+        click.echo("Invalid track number.", err=True)
+        raise SystemExit(1)
+
+    track = project.setlist.tracks[idx]
+    if not track.preferred_takes:
+        click.echo(f"No takes recorded for '{track.name}'.")
+        raise SystemExit(1)
+
+    # Import audio modules
+    import sounddevice as sd
+    from .audio.mixer import Mixer
+
+    config = StudioConfig.load()
+
+    # Load all preferred takes into mixer
+    mixer = Mixer(config.sample_rate)
+    click.echo(f"\nPlaying: {track.name}")
+    for inst_name, take_info in track.preferred_takes.items():
+        take_path = project.completed_takes_dir / take_info.filename
+        if take_path.exists():
+            mixer.add_source(f"take:{inst_name}", take_path, volume=take_info.volume)
+            click.echo(f"  + {inst_name}: {take_info.filename}")
+        else:
+            click.echo(f"  ! {inst_name}: {take_info.filename} (file missing)")
+
+    if not mixer.sources:
+        click.echo("No take files found on disk.")
+        raise SystemExit(1)
+
+    click.echo(f"\nDuration: {format_duration(mixer.duration_seconds)}")
+    click.echo("Press Ctrl+C to stop.\n")
+
+    mixer.set_playing(True)
+
+    # Play through output device
+    out_dev = config.output_device
+    out_info = sd.query_devices(out_dev, "output")
+    out_channels = min(config.output_channels, out_info["max_output_channels"])
+
+    def callback(outdata, frames, time_info, status):
+        mix = mixer.read(frames)
+        if out_channels == 2:
+            outdata[:] = mix
+        else:
+            outdata[:, 0] = mix[:, 0]
+        if mixer.is_finished:
+            raise sd.CallbackStop
+
+    try:
+        with sd.OutputStream(
+            samplerate=config.sample_rate,
+            blocksize=config.buffer_size,
+            device=out_dev,
+            channels=max(1, out_channels),
+            dtype="float32",
+            callback=callback,
+        ):
+            while mixer.is_playing and not mixer.is_finished:
+                sd.sleep(100)
+    except KeyboardInterrupt:
+        pass
+
+    click.echo("Done.")
+
+
 def _find_monitor_device(sd: object) -> int | None:
     """Find a PulseAudio/PipeWire monitor/loopback source for desktop audio capture."""
     devices = sd.query_devices()  # type: ignore[union-attr]
