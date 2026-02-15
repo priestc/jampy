@@ -325,6 +325,17 @@ def start_session(instrument: str) -> None:
     session.studio_location = config.studio_location
     session.start()
 
+    # Skip tracks that already have a preferred take for this instrument
+    tracks = project.setlist.tracks
+    for i, track in enumerate(tracks):
+        if track.get_take_for_instrument(inst.name) is None:
+            session.current_track_index = i
+            break
+    else:
+        click.echo(f"All tracks already have a take for '{inst.name}'.")
+        click.echo("Starting from the first track anyway.\n")
+        session.current_track_index = 0
+
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
     click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track")
@@ -488,10 +499,22 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
             click.echo(f"  Volume: {track.volume}%")
 
     elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
-        session.next_track()
+        # Advance to next track without a take for this instrument
+        tracks = session.project.setlist.tracks
+        found = False
+        while session.current_track_index < len(tracks) - 1:
+            session.next_track()
+            if session.state == SessionState.ENDED:
+                break
+            track = session.current_track
+            if track and track.get_take_for_instrument(session.instrument) is None:
+                found = True
+                break
+            click.echo(f"  Skipping '{track.name}' (already has a take)")
+        if not found and session.state != SessionState.ENDED:
+            session.end_session()
         if session.state == SessionState.WAITING:
             _load_backing_track(session, engine)
-            # Automatically start recording the next track
             _start_recording(session, engine)
         _show_status(session)
 
