@@ -37,10 +37,13 @@ def studio_setup() -> None:
     """Interactive wizard to configure studio audio settings."""
     click.echo("=== Studio Setup ===\n")
 
+    # Load existing config for defaults
+    existing = StudioConfig.load()
+
     # Studio info
-    studio_name = click.prompt("Studio name", default="", show_default=False)
-    studio_location = click.prompt("Studio location", default="", show_default=False)
-    studio_musician = click.prompt("Studio musician (default performer)", default="", show_default=False)
+    studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
+    studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
+    studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
     click.echo()
 
     # Query available audio devices
@@ -62,7 +65,7 @@ def studio_setup() -> None:
     sample_rate = click.prompt(
         "Sample rate",
         type=click.Choice(sr_choices),
-        default="48000",
+        default=str(existing.sample_rate),
     )
 
     # Buffer size
@@ -70,7 +73,7 @@ def studio_setup() -> None:
     buffer_size = click.prompt(
         "Buffer size",
         type=click.Choice(buf_choices),
-        default="512",
+        default=str(existing.buffer_size),
     )
 
     # Output device
@@ -79,13 +82,12 @@ def studio_setup() -> None:
         for i, d in enumerate(devices):
             if d["max_output_channels"] > 0:
                 click.echo(f"  [{i}] {d['name']}  ({d['max_output_channels']} channels)")
-    output_device = click.prompt("Output device index", type=int, default=0)
+    output_device = click.prompt("Output device index", type=int, default=existing.output_device or 0)
     max_out = devices[output_device]["max_output_channels"] if devices else 2
-    output_channels = click.prompt("Output channels", type=int, default=min(2, max_out))
+    output_channels = click.prompt("Output channels", type=int, default=existing.output_channels if existing.output_channels <= max_out else min(2, max_out))
 
     # Instruments — start with any previously configured instruments
-    existing_config = StudioConfig.load()
-    instruments: list[Instrument] = list(existing_config.instruments)
+    instruments: list[Instrument] = list(existing.instruments)
     click.echo("\n--- Instrument Setup ---")
     if instruments:
         click.echo("Existing instruments:")
