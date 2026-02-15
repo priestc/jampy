@@ -107,13 +107,15 @@ class AudioEngine:
         """Start the audio stream."""
         if self._running:
             return
+        # Compute latency from buffer size for minimal delay
+        latency = self.buffer_size / self.sample_rate
         self._stream = sd.Stream(
             samplerate=self.sample_rate,
             blocksize=self.buffer_size,
             device=(self.input_device, self.output_device),
             channels=(self.input_channels, self.output_channels),
             dtype="float32",
-            latency="low",
+            latency=latency,
             callback=self._callback,
         )
         self._stream.start()
