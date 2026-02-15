@@ -18,6 +18,7 @@ class Instrument:
     name: str
     device: str  # device name or index
     input_number: int
+    musician: str = ""
 
 
 @dataclass
@@ -29,6 +30,9 @@ class StudioConfig:
     input_channels: int = 1
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
+    studio_musician: str = ""
+    studio_name: str = ""
+    studio_location: str = ""
     instruments: list[Instrument] = field(default_factory=list)
 
     def validate(self) -> list[str]:

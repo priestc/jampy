@@ -69,6 +69,9 @@ class Session:
         self._had_back_to_start: bool = False  # track if current take had a restart
         self._on_state_change = on_state_change
         self.session_dir: Path | None = None
+        self.musician: str = ""
+        self.studio_name: str = ""
+        self.studio_location: str = ""
 
     @property
     def current_track(self) -> TrackEntry | None:
@@ -163,7 +166,10 @@ class Session:
         log_path = self.session_dir / "session_log.json"
         data = {
             "instrument": self.instrument,
+            "musician": self.musician,
             "project": self.project.name,
+            "studio_name": self.studio_name,
+            "studio_location": self.studio_location,
             "events": [e.to_dict() for e in self.events],
         }
         log_path.write_text(json.dumps(data, indent=2))

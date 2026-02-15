@@ -37,6 +37,12 @@ def studio_setup() -> None:
     """Interactive wizard to configure studio audio settings."""
     click.echo("=== Studio Setup ===\n")
 
+    # Studio info
+    studio_name = click.prompt("Studio name", default="", show_default=False)
+    studio_location = click.prompt("Studio location", default="", show_default=False)
+    studio_musician = click.prompt("Studio musician (default performer)", default="", show_default=False)
+    click.echo()
+
     # Query available audio devices
     devices = []
     try:
@@ -92,7 +98,8 @@ def studio_setup() -> None:
         name = click.prompt("  Instrument name")
         device = click.prompt("  Device name or index", default=str(output_device))
         input_number = click.prompt("  Input number (channel)", type=int, default=1)
-        instruments.append(Instrument(name=name, device=device, input_number=input_number))
+        musician = click.prompt("  Musician name", default="", show_default=False)
+        instruments.append(Instrument(name=name, device=device, input_number=input_number, musician=musician))
         click.echo(f"  Added '{name}'.\n")
 
     config = StudioConfig(
@@ -100,6 +107,9 @@ def studio_setup() -> None:
         buffer_size=int(buffer_size),
         output_device=output_device,
         output_channels=output_channels,
+        studio_musician=studio_musician,
+        studio_name=studio_name,
+        studio_location=studio_location,
         instruments=instruments,
     )
 
@@ -257,7 +267,15 @@ def start_session(instrument: str) -> None:
         monitor_channel=input_channel_index,
     )
 
+    # Resolve musician name: instrument → studio default → prompt
+    musician = inst.musician or config.studio_musician
+    if not musician:
+        musician = click.prompt("Musician name")
+
     session = Session(project=project, instrument=inst.name)
+    session.musician = musician
+    session.studio_name = config.studio_name
+    session.studio_location = config.studio_location
     session.start()
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
