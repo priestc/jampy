@@ -211,11 +211,14 @@ def update_setlist() -> None:
 
 
 def _find_monitor_device(sd: object) -> int | None:
-    """Find a PulseAudio/PipeWire monitor source for desktop audio capture."""
+    """Find a PulseAudio/PipeWire monitor/loopback source for desktop audio capture."""
     devices = sd.query_devices()  # type: ignore[union-attr]
+    keywords = ["monitor", "loopback", "stereo mix", "what u hear", "wave out"]
     for i, d in enumerate(devices):
-        if d["max_input_channels"] > 0 and "monitor" in d["name"].lower():
-            return i
+        if d["max_input_channels"] > 0:
+            name_lower = d["name"].lower()
+            if any(kw in name_lower for kw in keywords):
+                return i
     return None
 
 
@@ -253,11 +256,26 @@ def start_session(instrument: str) -> None:
     out_dev = config.output_device
 
     if inst.desktop_audio:
-        # Find a monitor/loopback device for desktop audio capture
-        in_dev = _find_monitor_device(sd)
+        # Use manually specified device if set, otherwise auto-detect
+        if inst.device:
+            try:
+                in_dev = int(inst.device)
+            except ValueError:
+                in_dev = inst.device  # type: ignore[assignment]
+        else:
+            in_dev = _find_monitor_device(sd)
         if in_dev is None:
             click.echo("Error: No desktop audio monitor device found.", err=True)
-            click.echo("On PulseAudio/PipeWire, ensure a monitor source is available.", err=True)
+            click.echo("\nAvailable input devices:", err=True)
+            all_devices = sd.query_devices()
+            for i, d in enumerate(all_devices):
+                if d["max_input_channels"] > 0:
+                    click.echo(f"  [{i}] {d['name']}", err=True)
+            click.echo(
+                "\nTo fix: set this instrument's 'device' field in studio_config.json "
+                "to the index of your loopback/monitor device.",
+                err=True,
+            )
             raise SystemExit(1)
         click.echo(f"Using desktop audio: {sd.query_devices(in_dev)['name']}")
     else:
