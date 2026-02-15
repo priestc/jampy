@@ -265,8 +265,11 @@ def start_session(instrument: str) -> None:
     click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track")
     click.echo("          [l]ower volume  [u]p volume  [q]uit\n")
 
-    # Start the audio stream (opens devices, callback runs continuously)
+    # Start the audio stream and continuous session recording
     engine.start()
+    session_flac = session.session_dir / "session.flac" if session.session_dir else None
+    if session_flac:
+        engine.start_session_recording(session_flac)
     try:
         _run_session_loop(session, engine)
     finally:
@@ -325,12 +328,12 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
 def _start_recording(session: Session, engine: AudioEngine) -> None:
     """Start recording and playing the current track."""
     track = session.current_track
-    if track and session.session_dir:
+    if track:
         take_num = next_take_number(
             session.project.completed_takes_dir, track.name, session.instrument
         )
         fname = take_filename(track.name, session.instrument, take_num, "flac")
-        rec_path = session.session_dir / fname
+        rec_path = session.project.completed_takes_dir / fname
         engine.start_recording(rec_path)
 
     engine.mixer.reset()
@@ -351,17 +354,17 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         _show_status(session)
 
     elif key == "b" and session.state == SessionState.PLAYING:
-        # Restart from beginning — stop current recording, reset mixer, start new recording
+        # Restart from beginning — stop current take, reset mixer, start new take
         engine.stop_recording()
         engine.mixer.reset()
 
         track = session.current_track
-        if track and session.session_dir:
+        if track:
             take_num = next_take_number(
                 session.project.completed_takes_dir, track.name, session.instrument
             )
             fname = take_filename(track.name, session.instrument, take_num, "flac")
-            rec_path = session.session_dir / fname
+            rec_path = session.project.completed_takes_dir / fname
             engine.start_recording(rec_path)
 
         session.back_to_start(engine.mixer.position)

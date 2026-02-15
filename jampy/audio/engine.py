@@ -39,6 +39,7 @@ class AudioEngine:
         self.monitor_channel = monitor_channel
 
         self.recorder: Recorder | None = None
+        self.session_recorder: Recorder | None = None
         self.mixer = Mixer(sample_rate)
         self._stream: sd.Stream | None = None
         self._running = False
@@ -53,13 +54,24 @@ class AudioEngine:
         """Set callback invoked when mixer reaches end of backing track."""
         self._on_song_end = callback
 
+    def start_session_recording(self, output_path: Path) -> None:
+        """Start the continuous session-level recorder."""
+        self.session_recorder = Recorder(output_path, self.sample_rate, 1)
+        self.session_recorder.start()
+
+    def stop_session_recording(self) -> None:
+        """Stop the continuous session-level recorder."""
+        if self.session_recorder:
+            self.session_recorder.stop()
+            self.session_recorder = None
+
     def start_recording(self, output_path: Path) -> None:
-        """Create and start the recorder."""
-        self.recorder = Recorder(output_path, self.sample_rate, self.input_channels)
+        """Create and start the per-take recorder."""
+        self.recorder = Recorder(output_path, self.sample_rate, 1)
         self.recorder.start()
 
     def stop_recording(self) -> None:
-        """Stop the recorder."""
+        """Stop the per-take recorder."""
         if self.recorder:
             self.recorder.stop()
             self.recorder = None
@@ -78,6 +90,8 @@ class AudioEngine:
         mono = indata[:, ch:ch+1].copy()
 
         # Record input to disk
+        if self.session_recorder:
+            self.session_recorder.write(mono)
         if self.recorder:
             self.recorder.write(mono)
 
@@ -122,13 +136,14 @@ class AudioEngine:
         self._running = True
 
     def stop(self) -> None:
-        """Stop the audio stream and recorder."""
+        """Stop the audio stream and all recorders."""
         self._running = False
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
         self.stop_recording()
+        self.stop_session_recording()
 
     @property
     def is_running(self) -> bool:
