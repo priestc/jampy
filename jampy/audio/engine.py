@@ -28,6 +28,7 @@ class AudioEngine:
         output_device: int | None = None,
         input_channels: int = 1,
         output_channels: int = 2,
+        monitor_channel: int = 0,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -35,6 +36,7 @@ class AudioEngine:
         self.output_device = output_device
         self.input_channels = input_channels
         self.output_channels = output_channels
+        self.monitor_channel = monitor_channel
 
         self.recorder: Recorder | None = None
         self.mixer = Mixer(sample_rate)
@@ -71,11 +73,9 @@ class AudioEngine:
         status: sd.CallbackFlags,
     ) -> None:
         """Audio stream callback — runs in real-time audio thread."""
-        # Capture mono input
-        if indata.shape[1] > 1:
-            mono = indata[:, 0:1].copy()
-        else:
-            mono = indata.copy()
+        # Capture mono input from the instrument's channel
+        ch = self.monitor_channel
+        mono = indata[:, ch:ch+1].copy()
 
         # Record input to disk
         if self.recorder:

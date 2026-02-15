@@ -232,16 +232,29 @@ def start_session(instrument: str) -> None:
     # Query actual device capabilities to avoid channel count mismatches
     in_info = sd.query_devices(in_dev, "input")
     out_info = sd.query_devices(out_dev, "output")
-    input_channels = min(config.input_channels, in_info["max_input_channels"])
+    max_in = in_info["max_input_channels"]
     output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+    # Open enough input channels to reach the instrument's input number
+    # input_number is 1-based (channel 1 = index 0)
+    input_channel_index = inst.input_number - 1
+    input_channels = max(inst.input_number, 1)
+    if input_channels > max_in:
+        click.echo(
+            f"Error: Instrument '{inst.name}' needs input channel {inst.input_number} "
+            f"but device only has {max_in} channels.",
+            err=True,
+        )
+        raise SystemExit(1)
 
     engine = AudioEngine(
         sample_rate=config.sample_rate,
         buffer_size=config.buffer_size,
         input_device=in_dev,
         output_device=out_dev,
-        input_channels=max(1, input_channels),
+        input_channels=input_channels,
         output_channels=max(1, output_channels),
+        monitor_channel=input_channel_index,
     )
 
     session = Session(project=project, instrument=inst.name)
