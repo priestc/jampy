@@ -277,7 +277,7 @@ def start_session(instrument: str) -> None:
 
 
 def _load_backing_track(session: Session, engine: AudioEngine) -> None:
-    """Load the current track's backing file into the mixer."""
+    """Load the current track's backing file and preferred takes into the mixer."""
     track = session.current_track
     if not track:
         return
@@ -285,6 +285,16 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
     backing_path = session.project.backing_tracks_dir / track.backing_track
     if backing_path.exists():
         engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
+
+    # Load preferred takes from other instruments
+    for inst_name, take_info in track.preferred_takes.items():
+        if inst_name.lower() == session.instrument.lower():
+            continue  # skip the instrument we're currently recording
+        take_path = session.project.completed_takes_dir / take_info.filename
+        if take_path.exists():
+            engine.mixer.add_source(
+                f"take:{inst_name}", take_path, volume=take_info.volume
+            )
 
 
 def _run_session_loop(session: Session, engine: AudioEngine) -> None:
@@ -296,6 +306,7 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     def on_song_end() -> None:
         if session.state == SessionState.PLAYING:
             engine.stop_recording()
+            _save_preferred_take(session)
             session.song_end(engine.mixer.position)
             _show_status(session)
 
@@ -325,6 +336,17 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
         click.echo(f"Log saved to {log_path}")
 
 
+def _save_preferred_take(session: Session) -> None:
+    """Save the current take as the preferred take for this track/instrument."""
+    track = session.current_track
+    if not track or not hasattr(session, '_current_take_info'):
+        return
+    take_info = session._current_take_info
+    if take_info:
+        track.set_preferred_take(session.instrument, take_info)
+        session._current_take_info = None
+
+
 def _start_recording(session: Session, engine: AudioEngine) -> None:
     """Start recording and playing the current track."""
     track = session.current_track
@@ -335,6 +357,14 @@ def _start_recording(session: Session, engine: AudioEngine) -> None:
         fname = take_filename(track.name, session.instrument, take_num, "flac")
         rec_path = session.project.completed_takes_dir / fname
         engine.start_recording(rec_path)
+
+        # Track the current take so we can save it as preferred when the song ends
+        from .project import TakeInfo
+        session._current_take_info = TakeInfo(
+            instrument=session.instrument,
+            take_number=take_num,
+            filename=fname,
+        )
 
     engine.mixer.reset()
     engine.mixer.set_playing(True)
@@ -374,6 +404,7 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         # End the current song — stop recording and playback
         engine.stop_recording()
         engine.mixer.set_playing(False)
+        _save_preferred_take(session)
         session.song_end(engine.mixer.position)
         _show_status(session)
 
