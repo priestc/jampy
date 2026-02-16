@@ -494,16 +494,6 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     # Load the first backing track into the mixer
     _load_backing_track(session, engine)
 
-    # When the backing track finishes, auto-trigger song_end
-    def on_song_end() -> None:
-        if session.state == SessionState.PLAYING:
-            engine.stop_recording()
-            _save_preferred_take(session)
-            session.song_end(engine.mixer.position)
-            _show_status(session)
-
-    engine.set_on_song_end(on_song_end)
-
     _show_status(session)
 
     # Set terminal to raw mode for single-key input
@@ -512,8 +502,18 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     try:
         tty.setcbreak(fd)
         while session.state != SessionState.ENDED:
-            # Wait for keypress
-            if select.select([sys.stdin], [], [], 0.5)[0]:
+            # Check if backing track finished naturally
+            if (session.state == SessionState.PLAYING
+                    and engine.mixer.is_finished
+                    and not engine.mixer.is_playing):
+                engine.stop_recording()
+                _save_preferred_take(session)
+                session.song_end(engine.mixer.position)
+                _show_status(session)
+                continue
+
+            # Wait for keypress (0.2s timeout to keep polling responsive)
+            if select.select([sys.stdin], [], [], 0.2)[0]:
                 key = sys.stdin.read(1).lower()
                 _handle_key(session, engine, key)
     finally:
