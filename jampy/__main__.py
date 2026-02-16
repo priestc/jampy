@@ -508,6 +508,12 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     if log_path:
         click.echo(f"Log saved to {log_path}")
 
+    # Print completed takes summary
+    completed = getattr(session, '_completed_takes', [])
+    click.echo(f"\nCompleted takes: {len(completed)}")
+    for name in completed:
+        click.echo(f"  - {name}")
+
 
 def _save_preferred_take(session: Session) -> None:
     """Save the current take as the preferred take for this track/instrument."""
@@ -517,6 +523,9 @@ def _save_preferred_take(session: Session) -> None:
     take_info = session._current_take_info
     if take_info:
         track.set_preferred_take(session.instrument, take_info)
+        if not hasattr(session, '_completed_takes'):
+            session._completed_takes = []
+        session._completed_takes.append(track.name)
         session._current_take_info = None
 
 
@@ -574,11 +583,12 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         click.echo("  >> Back to start")
 
     elif key == "e" and session.state == SessionState.PLAYING:
-        # End the current song — stop recording and playback
+        # Early end — mistake take, not saved as preferred
         engine.stop_recording()
         engine.mixer.set_playing(False)
-        _save_preferred_take(session)
+        session._current_take_info = None
         session.song_end(engine.mixer.position)
+        click.echo("  (take discarded — song ended early)")
         _show_status(session)
 
     elif key == "l":
