@@ -31,6 +31,7 @@ class StudioConfig:
     input_channels: int = 1
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
+    latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""

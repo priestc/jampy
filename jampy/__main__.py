@@ -86,6 +86,17 @@ def studio_setup() -> None:
     max_out = devices[output_device]["max_output_channels"] if devices else 2
     output_channels = click.prompt("Output channels", type=int, default=existing.output_channels if existing.output_channels <= max_out else min(2, max_out))
 
+    # Latency compensation
+    default_comp = existing.latency_compensation_ms
+    if default_comp == 0.0:
+        # Default to one buffer's worth of latency
+        default_comp = round(int(buffer_size) / int(sample_rate) * 1000, 1)
+    latency_compensation_ms = click.prompt(
+        "Latency compensation (ms)",
+        type=float,
+        default=default_comp,
+    )
+
     # Instruments — start with any previously configured instruments
     instruments: list[Instrument] = list(existing.instruments)
     click.echo("\n--- Instrument Setup ---")
@@ -117,6 +128,7 @@ def studio_setup() -> None:
         buffer_size=int(buffer_size),
         output_device=output_device,
         output_channels=output_channels,
+        latency_compensation_ms=latency_compensation_ms,
         studio_musician=studio_musician,
         studio_name=studio_name,
         studio_location=studio_location,
@@ -256,13 +268,14 @@ def listen() -> None:
 
     config = StudioConfig.load()
 
-    # Load all preferred takes into mixer
+    # Load all preferred takes into mixer with latency compensation
     mixer = Mixer(config.sample_rate)
+    trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
     click.echo(f"\nPlaying: {track.name}")
     for inst_name, take_info in track.preferred_takes.items():
         take_path = project.completed_takes_dir / take_info.filename
         if take_path.exists():
-            mixer.add_source(f"take:{inst_name}", take_path, volume=take_info.volume)
+            mixer.add_source(f"take:{inst_name}", take_path, volume=take_info.volume, trim_frames=trim)
             click.echo(f"  + {inst_name}: {take_info.filename}")
         else:
             click.echo(f"  ! {inst_name}: {take_info.filename} (file missing)")
@@ -420,6 +433,10 @@ def start_session(instrument: str) -> None:
     session.musician = musician
     session.studio_name = config.studio_name
     session.studio_location = config.studio_location
+    # Compute latency compensation in frames for take playback
+    session._latency_trim_frames = int(
+        config.latency_compensation_ms / 1000.0 * config.sample_rate
+    )
     session.start()
 
     # Skip tracks that already have a preferred take for this instrument
@@ -459,14 +476,16 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
     if backing_path.exists():
         engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
 
-    # Load preferred takes from other instruments
+    # Load preferred takes from other instruments, trimming for latency compensation
+    trim = getattr(session, '_latency_trim_frames', 0)
     for inst_name, take_info in track.preferred_takes.items():
         if inst_name.lower() == session.instrument.lower():
             continue  # skip the instrument we're currently recording
         take_path = session.project.completed_takes_dir / take_info.filename
         if take_path.exists():
             engine.mixer.add_source(
-                f"take:{inst_name}", take_path, volume=take_info.volume
+                f"take:{inst_name}", take_path, volume=take_info.volume,
+                trim_frames=trim,
             )
 
 
