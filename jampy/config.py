@@ -13,11 +13,18 @@ VALID_BUFFER_SIZES = [128, 256, 512, 1024, 2048]
 
 
 @dataclass
+class InputLabel:
+    """A labeled audio input: maps a human-friendly name to a device + channel."""
+    label: str        # e.g. "Mic 1", "Guitar DI"
+    device: str       # device name
+    channel: int      # 1-based channel number on that device
+
+
+@dataclass
 class Instrument:
     """An instrument input configuration."""
     name: str
-    device: str  # device name or index
-    input_number: int
+    input_label: str = ""   # references an InputLabel.label
     musician: str = ""
     desktop_audio: bool = False
 
@@ -26,15 +33,14 @@ class Instrument:
 class StudioConfig:
     sample_rate: int = 48000
     buffer_size: int = 512
-    input_device: str = ""
     output_device: str = ""
-    input_channels: int = 1
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
+    input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 
     def validate(self) -> list[str]:
@@ -43,8 +49,6 @@ class StudioConfig:
             errors.append(f"Invalid sample rate: {self.sample_rate}. Must be one of {VALID_SAMPLE_RATES}")
         if self.buffer_size not in VALID_BUFFER_SIZES:
             errors.append(f"Invalid buffer size: {self.buffer_size}. Must be one of {VALID_BUFFER_SIZES}")
-        if self.input_channels < 1:
-            errors.append("Input channels must be >= 1")
         if self.output_channels < 1:
             errors.append("Output channels must be >= 1")
         return errors
@@ -55,6 +59,13 @@ class StudioConfig:
                 return inst
         return None
 
+    def resolve_input(self, label: str) -> InputLabel | None:
+        """Find the InputLabel for a given label string."""
+        for il in self.input_labels:
+            if il.label.lower() == label.lower():
+                return il
+        return None
+
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
         path.write_text(json.dumps(asdict(self), indent=2))
 
@@ -63,9 +74,10 @@ class StudioConfig:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text())
+        input_labels = [InputLabel(**il) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**i) for i in data.pop("instruments", [])]
         filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        return cls(**filtered, instruments=instruments)
+        return cls(**filtered, input_labels=input_labels, instruments=instruments)
 
     @classmethod
     def exists(cls, path: Path = DEFAULT_CONFIG_PATH) -> bool:

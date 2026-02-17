@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 from .config import (
     DEFAULT_CONFIG_PATH,
     StudioConfig,
+    InputLabel,
     Instrument,
     VALID_SAMPLE_RATES,
     VALID_BUFFER_SIZES,
@@ -102,37 +103,126 @@ def studio_setup() -> None:
         default=default_comp,
     )
 
-    # Instruments — start with any previously configured instruments
-    instruments: list[Instrument] = list(existing.instruments)
+    # --- Audio Interface & Input Setup ---
+    input_labels: list[InputLabel] = list(existing.input_labels)
+    if devices:
+        click.echo("\n--- Audio Interface Setup ---")
+        # Show input devices
+        input_devs = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
+        if input_devs:
+            click.echo("Available input devices:")
+            # Mark which are already configured
+            existing_dev_names = {il.device for il in input_labels}
+            for i, d in input_devs:
+                marker = " *" if d["name"] in existing_dev_names else ""
+                click.echo(f"  [{i}] {d['name']}  ({d['max_input_channels']} ch){marker}")
+            if existing_dev_names:
+                click.echo("  (* = already configured)")
+            click.echo()
+
+            # Pre-fill default selection from existing labels
+            existing_indices = []
+            for i, d in input_devs:
+                if d["name"] in existing_dev_names:
+                    existing_indices.append(str(i))
+            default_sel = ",".join(existing_indices) if existing_indices else ""
+
+            sel = click.prompt(
+                "Select interface(s) (comma-separated indices, or empty to skip)",
+                default=default_sel, show_default=bool(default_sel),
+            ).strip()
+
+            selected_devs = []
+            if sel:
+                for s in sel.split(","):
+                    s = s.strip()
+                    if s.isdigit():
+                        idx = int(s)
+                        if 0 <= idx < len(devices) and devices[idx]["max_input_channels"] > 0:
+                            selected_devs.append((idx, devices[idx]))
+
+            # Build new input_labels from selected interfaces
+            new_labels: list[InputLabel] = []
+            for dev_idx, dev in selected_devs:
+                dev_name = dev["name"]
+                max_ch = dev["max_input_channels"]
+                click.echo(f"\n  Interface: {dev_name} ({max_ch} channels)")
+
+                # Find existing labels for this device
+                existing_for_dev = {il.channel: il.label for il in input_labels if il.device == dev_name}
+
+                # Pre-fill channel selection from existing labels
+                if existing_for_dev:
+                    default_chs = ",".join(str(ch) for ch in sorted(existing_for_dev.keys()))
+                else:
+                    default_chs = "1"
+                ch_sel = click.prompt(
+                    f"  Channels to use (1-{max_ch}, comma-separated)",
+                    default=default_chs,
+                ).strip()
+
+                channels = []
+                for c in ch_sel.split(","):
+                    c = c.strip()
+                    if c.isdigit():
+                        ch = int(c)
+                        if 1 <= ch <= max_ch:
+                            channels.append(ch)
+
+                for ch in channels:
+                    default_label = existing_for_dev.get(ch, f"{dev_name} Ch{ch}")
+                    label = click.prompt(f"  Label for channel {ch}", default=default_label)
+                    new_labels.append(InputLabel(label=label, device=dev_name, channel=ch))
+
+            if new_labels:
+                input_labels = new_labels
+
+    # --- Instrument Setup ---
+    instruments: list[Instrument] = []
     click.echo("\n--- Instrument Setup ---")
-    if instruments:
-        click.echo("Existing instruments:")
-        for inst in instruments:
-            click.echo(f"  - {inst.name} (device={inst.device}, input={inst.input_number})")
+    if input_labels:
+        click.echo("Available inputs:")
+        for i, il in enumerate(input_labels):
+            click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
+        click.echo(f"  [0] Desktop audio")
         click.echo()
+
+    if existing.instruments:
+        click.echo("Existing instruments:")
+        for inst in existing.instruments:
+            src = "desktop" if inst.desktop_audio else inst.input_label
+            click.echo(f"  - {inst.name} ({src})")
+        click.echo()
+
     while True:
         if not click.confirm("Add an instrument?", default=bool(not instruments)):
             break
         name = click.prompt("  Instrument name")
-        desktop_audio = click.confirm("  Capture from desktop audio?", default=False)
-        if desktop_audio:
-            device = ""
-            input_number = 1
+        if input_labels:
+            choice = click.prompt("  Input number (0=desktop audio)", type=int, default=1)
+            if choice == 0:
+                desktop_audio = True
+                input_label_name = ""
+            elif 1 <= choice <= len(input_labels):
+                desktop_audio = False
+                input_label_name = input_labels[choice - 1].label
+            else:
+                click.echo(f"  Invalid choice, using first input.")
+                desktop_audio = False
+                input_label_name = input_labels[0].label
         else:
-            if devices:
-                click.echo("  Input devices:")
-                for i, d in enumerate(devices):
-                    if d["max_input_channels"] > 0:
-                        click.echo(f"    [{i}] {d['name']}  ({d['max_input_channels']} channels)")
-            dev_idx = click.prompt("  Input device index", type=int, default=0)
-            device = devices[dev_idx]["name"] if devices else str(dev_idx)
-            input_number = click.prompt("  Input number (channel)", type=int, default=1)
+            desktop_audio = click.confirm("  Capture from desktop audio?", default=False)
+            input_label_name = ""
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
-            name=name, device=device, input_number=input_number,
+            name=name, input_label=input_label_name,
             musician=musician, desktop_audio=desktop_audio,
         ))
         click.echo(f"  Added '{name}'.\n")
+
+    # Keep existing instruments if none were added
+    if not instruments:
+        instruments = list(existing.instruments)
 
     config = StudioConfig(
         sample_rate=int(sample_rate),
@@ -143,6 +233,7 @@ def studio_setup() -> None:
         studio_musician=studio_musician,
         studio_name=studio_name,
         studio_location=studio_location,
+        input_labels=input_labels,
         instruments=instruments,
     )
 
@@ -154,10 +245,15 @@ def studio_setup() -> None:
 
     config.save()
     click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
+    if input_labels:
+        click.echo("Inputs:")
+        for il in input_labels:
+            click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
     if instruments:
         click.echo("Instruments:")
         for inst in instruments:
-            click.echo(f"  - {inst.name} (device={inst.device}, input={inst.input_number})")
+            src = "desktop audio" if inst.desktop_audio else inst.input_label
+            click.echo(f"  - {inst.name} ({src})")
 
 
 @main.command()
@@ -392,11 +488,7 @@ def start_session(instrument: str) -> None:
     out_dev = _resolve_device(sd, config.output_device, "output")
 
     if inst.desktop_audio:
-        # Use manually specified device if set, otherwise auto-detect
-        if inst.device:
-            in_dev = _resolve_device(sd, inst.device, "input")
-        else:
-            in_dev = _find_monitor_device(sd)
+        in_dev = _find_monitor_device(sd)
         if in_dev is None:
             click.echo("Error: No desktop audio monitor device found.", err=True)
             click.echo("\nAvailable input devices:", err=True)
@@ -404,19 +496,21 @@ def start_session(instrument: str) -> None:
             for i, d in enumerate(all_devices):
                 if d["max_input_channels"] > 0:
                     click.echo(f"  [{i}] {d['name']}", err=True)
-            click.echo(
-                "\nTo fix: set this instrument's 'device' field in studio_config.json "
-                "to the name of your loopback/monitor device.",
-                err=True,
-            )
             raise SystemExit(1)
         click.echo(f"Using desktop audio: {sd.query_devices(in_dev)['name']}")
+        input_channel_index = 0
+        input_channels = 1
     else:
-        # Resolve the instrument's device name to index
-        in_dev = _resolve_device(sd, inst.device, "input")
-        if in_dev is None:
-            click.echo(f"Error: Input device '{inst.device}' not found.", err=True)
+        input_info = config.resolve_input(inst.input_label)
+        if input_info is None:
+            click.echo(f"Error: Input label '{inst.input_label}' not found in config.", err=True)
             raise SystemExit(1)
+        in_dev = _resolve_device(sd, input_info.device, "input")
+        if in_dev is None:
+            click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
+            raise SystemExit(1)
+        input_channel_index = input_info.channel - 1
+        input_channels = max(input_info.channel, 1)
 
     # Query actual device capabilities to avoid channel count mismatches
     in_info = sd.query_devices(in_dev, "input")
@@ -424,13 +518,9 @@ def start_session(instrument: str) -> None:
     max_in = in_info["max_input_channels"]
     output_channels = min(config.output_channels, out_info["max_output_channels"])
 
-    # Open enough input channels to reach the instrument's input number
-    # input_number is 1-based (channel 1 = index 0)
-    input_channel_index = inst.input_number - 1
-    input_channels = max(inst.input_number, 1)
     if input_channels > max_in:
         click.echo(
-            f"Error: Instrument '{inst.name}' needs input channel {inst.input_number} "
+            f"Error: Instrument '{inst.name}' needs input channel {input_channels} "
             f"but device only has {max_in} channels.",
             err=True,
         )
