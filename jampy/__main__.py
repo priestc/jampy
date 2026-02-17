@@ -645,6 +645,15 @@ def _save_preferred_take(session: Session) -> None:
         session._current_take_info = None
 
 
+def _delete_partial_take(session: Session) -> None:
+    """Delete the current in-progress take file (incomplete recording)."""
+    if hasattr(session, '_current_take_info') and session._current_take_info:
+        partial = session.project.completed_takes_dir / session._current_take_info.filename
+        if partial.exists():
+            partial.unlink()
+        session._current_take_info = None
+
+
 def _start_recording(session: Session, engine: AudioEngine) -> None:
     """Start recording and playing the current track."""
     track = session.current_track
@@ -673,6 +682,7 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
     """Process a single keypress."""
     if key == "q":
         engine.stop_recording()
+        _delete_partial_take(session)
         engine.mixer.set_playing(False)
         session.end_session()
         return
@@ -682,8 +692,9 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         _show_status(session)
 
     elif key == "b" and session.state == SessionState.PLAYING:
-        # Restart from beginning — stop current take, reset mixer, start new take
+        # Restart from beginning — stop current take, delete partial file, start new take
         engine.stop_recording()
+        _delete_partial_take(session)
         engine.mixer.reset()
 
         track = session.current_track
@@ -695,14 +706,21 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
             rec_path = session.project.completed_takes_dir / fname
             engine.start_recording(rec_path)
 
+            from .project import TakeInfo
+            session._current_take_info = TakeInfo(
+                instrument=session.instrument,
+                take_number=take_num,
+                filename=fname,
+            )
+
         session.back_to_start(engine.mixer.position)
         click.echo("  >> Back to start")
 
     elif key == "e" and session.state == SessionState.PLAYING:
         # Early end — mistake take, not saved as preferred
         engine.stop_recording()
+        _delete_partial_take(session)
         engine.mixer.set_playing(False)
-        session._current_take_info = None
         session.song_end(engine.mixer.position)
         click.echo("  (take discarded — song ended early)")
         _show_status(session)
