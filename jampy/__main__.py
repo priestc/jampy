@@ -443,11 +443,28 @@ def start_session(instrument: str) -> None:
     config = StudioConfig.load()
     inst = config.get_instrument(instrument)
     if inst is None:
-        available = [i.name for i in config.instruments]
-        click.echo(f"Error: Unknown instrument '{instrument}'.", err=True)
-        if available:
-            click.echo(f"Available: {', '.join(available)}", err=True)
-        raise SystemExit(1)
+        if not config.input_labels:
+            click.echo("Error: No inputs configured. Run 'jampy studio-setup' first.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
+        click.echo("Available inputs:")
+        for i, il in enumerate(config.input_labels):
+            click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
+        choice = click.prompt("  Input number", type=int, default=1)
+        if 1 <= choice <= len(config.input_labels):
+            input_label_name = config.input_labels[choice - 1].label
+        else:
+            click.echo(f"  Invalid choice, using first input.")
+            input_label_name = config.input_labels[0].label
+        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
+        inst = Instrument(
+            name=instrument, input_label=input_label_name,
+            full_name=full_name, musician=musician,
+        )
+        config.instruments.append(inst)
+        config.save()
+        click.echo(f"  Saved '{instrument}' to config.\n")
 
     # Check we're in a project directory
     cwd = Path.cwd()
