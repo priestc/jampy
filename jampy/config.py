@@ -24,9 +24,8 @@ class InputLabel:
 class Instrument:
     """An instrument input configuration."""
     name: str
-    input_label: str = ""   # references an InputLabel.label
+    input_label: str   # references an InputLabel.label
     musician: str = ""
-    desktop_audio: bool = False
 
 
 @dataclass

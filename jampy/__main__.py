@@ -184,14 +184,12 @@ def studio_setup() -> None:
         click.echo("Available inputs:")
         for i, il in enumerate(input_labels):
             click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
-        click.echo(f"  [0] Desktop audio")
         click.echo()
 
     if existing.instruments:
         click.echo("Existing instruments:")
         for inst in existing.instruments:
-            src = "desktop" if inst.desktop_audio else inst.input_label
-            click.echo(f"  - {inst.name} ({src})")
+            click.echo(f"  - {inst.name} ({inst.input_label})")
         click.echo()
 
     while True:
@@ -199,24 +197,18 @@ def studio_setup() -> None:
             break
         name = click.prompt("  Instrument name")
         if input_labels:
-            choice = click.prompt("  Input number (0=desktop audio)", type=int, default=1)
-            if choice == 0:
-                desktop_audio = True
-                input_label_name = ""
-            elif 1 <= choice <= len(input_labels):
-                desktop_audio = False
+            choice = click.prompt("  Input number", type=int, default=1)
+            if 1 <= choice <= len(input_labels):
                 input_label_name = input_labels[choice - 1].label
             else:
                 click.echo(f"  Invalid choice, using first input.")
-                desktop_audio = False
                 input_label_name = input_labels[0].label
         else:
-            desktop_audio = click.confirm("  Capture from desktop audio?", default=False)
-            input_label_name = ""
+            click.echo("  No inputs configured. Run interface setup first.")
+            break
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
-            name=name, input_label=input_label_name,
-            musician=musician, desktop_audio=desktop_audio,
+            name=name, input_label=input_label_name, musician=musician,
         ))
         click.echo(f"  Added '{name}'.\n")
 
@@ -252,8 +244,7 @@ def studio_setup() -> None:
     if instruments:
         click.echo("Instruments:")
         for inst in instruments:
-            src = "desktop audio" if inst.desktop_audio else inst.input_label
-            click.echo(f"  - {inst.name} ({src})")
+            click.echo(f"  - {inst.name} ({inst.input_label})")
 
 
 @main.command()
@@ -442,18 +433,6 @@ def listen() -> None:
     click.echo("Done.")
 
 
-def _find_monitor_device(sd: object) -> int | None:
-    """Find a PulseAudio/PipeWire monitor/loopback source for desktop audio capture."""
-    devices = sd.query_devices()  # type: ignore[union-attr]
-    keywords = ["monitor", "loopback", "stereo mix", "what u hear", "wave out"]
-    for i, d in enumerate(devices):
-        if d["max_input_channels"] > 0:
-            name_lower = d["name"].lower()
-            if any(kw in name_lower for kw in keywords):
-                return i
-    return None
-
-
 @main.command()
 @click.argument("instrument")
 def start_session(instrument: str) -> None:
@@ -487,30 +466,16 @@ def start_session(instrument: str) -> None:
     # Resolve output device name to index
     out_dev = _resolve_device(sd, config.output_device, "output")
 
-    if inst.desktop_audio:
-        in_dev = _find_monitor_device(sd)
-        if in_dev is None:
-            click.echo("Error: No desktop audio monitor device found.", err=True)
-            click.echo("\nAvailable input devices:", err=True)
-            all_devices = sd.query_devices()
-            for i, d in enumerate(all_devices):
-                if d["max_input_channels"] > 0:
-                    click.echo(f"  [{i}] {d['name']}", err=True)
-            raise SystemExit(1)
-        click.echo(f"Using desktop audio: {sd.query_devices(in_dev)['name']}")
-        input_channel_index = 0
-        input_channels = 1
-    else:
-        input_info = config.resolve_input(inst.input_label)
-        if input_info is None:
-            click.echo(f"Error: Input label '{inst.input_label}' not found in config.", err=True)
-            raise SystemExit(1)
-        in_dev = _resolve_device(sd, input_info.device, "input")
-        if in_dev is None:
-            click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
-            raise SystemExit(1)
-        input_channel_index = input_info.channel - 1
-        input_channels = max(input_info.channel, 1)
+    input_info = config.resolve_input(inst.input_label)
+    if input_info is None:
+        click.echo(f"Error: Input label '{inst.input_label}' not found in config.", err=True)
+        raise SystemExit(1)
+    in_dev = _resolve_device(sd, input_info.device, "input")
+    if in_dev is None:
+        click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
+        raise SystemExit(1)
+    input_channel_index = input_info.channel - 1
+    input_channels = max(input_info.channel, 1)
 
     # Query actual device capabilities to avoid channel count mismatches
     in_info = sd.query_devices(in_dev, "input")

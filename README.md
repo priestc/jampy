@@ -47,8 +47,8 @@ The wizard asks for:
 - Studio name, location, and default musician name (all optional)
 - Sample rate and buffer size
 - Output device and channel count
-- Instruments: name, input device/channel, musician name
-- Desktop audio capture option (for virtual instruments or system audio)
+- Audio interfaces: select devices, label input channels
+- Instruments: name, input label, musician name
 
 Config is saved to `~/studio_config.json`.
 
@@ -102,7 +102,7 @@ Start a new session with a different instrument (e.g. "bass"). The backing track
 
 ### Desktop Audio Capture
 
-Instruments configured with desktop audio capture record from a PulseAudio/PipeWire monitor source instead of a physical input. This is useful for virtual instruments, software synths, or any audio playing through your system.
+To record virtual instruments, software synths, or system audio, you need a virtual audio loopback device. See [Desktop Audio Capture Setup](docs/desktop-audio-capture.md) for instructions.
 
 ## Project Structure
 
