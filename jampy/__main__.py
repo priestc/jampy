@@ -206,9 +206,11 @@ def studio_setup() -> None:
         else:
             click.echo("  No inputs configured. Run interface setup first.")
             break
+        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
-            name=name, input_label=input_label_name, musician=musician,
+            name=name, input_label=input_label_name,
+            full_name=full_name, musician=musician,
         ))
         click.echo(f"  Added '{name}'.\n")
 
@@ -508,6 +510,7 @@ def start_session(instrument: str) -> None:
 
     session = Session(project=project, instrument=inst.name)
     session.musician = musician
+    session.instrument_full_name = inst.full_name
     session.studio_name = config.studio_name
     session.studio_location = config.studio_location
     # Compute latency compensation in frames for take playback

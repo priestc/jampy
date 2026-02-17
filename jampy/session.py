@@ -70,6 +70,7 @@ class Session:
         self._on_state_change = on_state_change
         self.session_dir: Path | None = None
         self.musician: str = ""
+        self.instrument_full_name: str = ""
         self.studio_name: str = ""
         self.studio_location: str = ""
 
@@ -166,6 +167,7 @@ class Session:
         log_path = self.session_dir / "session_log.json"
         data = {
             "instrument": self.instrument,
+            "instrument_full_name": self.instrument_full_name,
             "musician": self.musician,
             "project": self.project.name,
             "studio_name": self.studio_name,

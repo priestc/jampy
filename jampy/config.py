@@ -25,6 +25,7 @@ class Instrument:
     """An instrument input configuration."""
     name: str
     input_label: str   # references an InputLabel.label
+    full_name: str = ""  # manufacturer and model, e.g. "Fender American Stratocaster"
     musician: str = ""
 
 
