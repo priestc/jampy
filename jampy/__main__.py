@@ -82,8 +82,13 @@ def studio_setup() -> None:
         for i, d in enumerate(devices):
             if d["max_output_channels"] > 0:
                 click.echo(f"  [{i}] {d['name']}  ({d['max_output_channels']} channels)")
-    output_device = click.prompt("Output device index", type=int, default=existing.output_device or 0)
-    max_out = devices[output_device]["max_output_channels"] if devices else 2
+    out_idx = click.prompt("Output device index", type=int, default=0)
+    output_device_name = devices[out_idx]["name"] if devices else ""
+    if existing.output_device:
+        output_device_name = click.prompt("Output device name", default=existing.output_device)
+    else:
+        click.echo(f"  Selected: {output_device_name}")
+    max_out = devices[out_idx]["max_output_channels"] if devices else 2
     output_channels = click.prompt("Output channels", type=int, default=existing.output_channels if existing.output_channels <= max_out else min(2, max_out))
 
     # Latency compensation
@@ -114,7 +119,13 @@ def studio_setup() -> None:
             device = ""
             input_number = 1
         else:
-            device = click.prompt("  Device name or index", default=str(output_device))
+            if devices:
+                click.echo("  Input devices:")
+                for i, d in enumerate(devices):
+                    if d["max_input_channels"] > 0:
+                        click.echo(f"    [{i}] {d['name']}  ({d['max_input_channels']} channels)")
+            dev_idx = click.prompt("  Input device index", type=int, default=0)
+            device = devices[dev_idx]["name"] if devices else str(dev_idx)
             input_number = click.prompt("  Input number (channel)", type=int, default=1)
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
@@ -126,7 +137,7 @@ def studio_setup() -> None:
     config = StudioConfig(
         sample_rate=int(sample_rate),
         buffer_size=int(buffer_size),
-        output_device=output_device,
+        output_device=output_device_name,
         output_channels=output_channels,
         latency_compensation_ms=latency_compensation_ms,
         studio_musician=studio_musician,
@@ -222,6 +233,21 @@ def update_setlist() -> None:
     click.echo(f"\nSetlist updated: {added} added, {removed} removed, {len(kept_tracks)} total.")
 
 
+def _resolve_device(sd: object, device_name: str, kind: str) -> int | None:
+    """Resolve a device name to its index. Returns None if not found."""
+    if not device_name:
+        return None
+    devices = sd.query_devices()  # type: ignore[union-attr]
+    for i, d in enumerate(devices):
+        if d["name"] == device_name:
+            return i
+    # Partial match fallback
+    for i, d in enumerate(devices):
+        if device_name.lower() in d["name"].lower():
+            return i
+    return None
+
+
 @main.command()
 def listen() -> None:
     """Listen to mixed takes for a track (without backing track)."""
@@ -290,7 +316,7 @@ def listen() -> None:
     mixer.set_playing(True)
 
     # Play through output device
-    out_dev = config.output_device
+    out_dev = _resolve_device(sd, config.output_device, "output")
     out_info = sd.query_devices(out_dev, "output")
     out_channels = min(config.output_channels, out_info["max_output_channels"])
 
@@ -362,16 +388,13 @@ def start_session(instrument: str) -> None:
     from .audio.engine import AudioEngine
     import sounddevice as sd
 
-    # Determine input device
-    out_dev = config.output_device
+    # Resolve output device name to index
+    out_dev = _resolve_device(sd, config.output_device, "output")
 
     if inst.desktop_audio:
         # Use manually specified device if set, otherwise auto-detect
         if inst.device:
-            try:
-                in_dev = int(inst.device)
-            except ValueError:
-                in_dev = inst.device  # type: ignore[assignment]
+            in_dev = _resolve_device(sd, inst.device, "input")
         else:
             in_dev = _find_monitor_device(sd)
         if in_dev is None:
@@ -383,18 +406,17 @@ def start_session(instrument: str) -> None:
                     click.echo(f"  [{i}] {d['name']}", err=True)
             click.echo(
                 "\nTo fix: set this instrument's 'device' field in studio_config.json "
-                "to the index of your loopback/monitor device.",
+                "to the name of your loopback/monitor device.",
                 err=True,
             )
             raise SystemExit(1)
         click.echo(f"Using desktop audio: {sd.query_devices(in_dev)['name']}")
     else:
-        # Use the instrument's device for input
-        in_dev: int | None = None
-        try:
-            in_dev = int(inst.device)
-        except ValueError:
-            in_dev = inst.device  # type: ignore[assignment]
+        # Resolve the instrument's device name to index
+        in_dev = _resolve_device(sd, inst.device, "input")
+        if in_dev is None:
+            click.echo(f"Error: Input device '{inst.device}' not found.", err=True)
+            raise SystemExit(1)
 
     # Query actual device capabilities to avoid channel count mismatches
     in_info = sd.query_devices(in_dev, "input")

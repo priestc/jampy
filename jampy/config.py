@@ -26,8 +26,8 @@ class Instrument:
 class StudioConfig:
     sample_rate: int = 48000
     buffer_size: int = 512
-    input_device: int | None = None
-    output_device: int | None = None
+    input_device: str = ""
+    output_device: str = ""
     input_channels: int = 1
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
