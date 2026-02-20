@@ -34,19 +34,33 @@ def main() -> None:
 
 
 @main.command()
-def studio_setup() -> None:
-    """Interactive wizard to configure studio audio settings."""
+def setup_studio() -> None:
+    """Configure studio name, location, musician, and backup server."""
     click.echo("=== Studio Setup ===\n")
 
-    # Load existing config for defaults
     existing = StudioConfig.load()
 
-    # Studio info
-    studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
-    studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
-    studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
-    backup_server = click.prompt("Backup server (user@host:/path, or empty to skip)", default=existing.backup_server, show_default=bool(existing.backup_server))
-    click.echo()
+    existing.studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
+    existing.studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
+    existing.studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
+    existing.backup_server = click.prompt("Backup server (user@host:/path, or empty to skip)", default=existing.backup_server, show_default=bool(existing.backup_server))
+
+    errors = existing.validate()
+    if errors:
+        for e in errors:
+            click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    existing.save()
+    click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
+
+
+@main.command()
+def setup_recording_devices() -> None:
+    """Configure audio devices, sample rate, buffer size, and input labels."""
+    click.echo("=== Recording Devices Setup ===\n")
+
+    existing = StudioConfig.load()
 
     # Query available audio devices
     devices = []
@@ -96,7 +110,6 @@ def studio_setup() -> None:
     # Latency compensation
     default_comp = existing.latency_compensation_ms
     if default_comp == 0.0:
-        # Default to one buffer's worth of latency
         default_comp = round(int(buffer_size) / int(sample_rate) * 1000, 1)
     latency_compensation_ms = click.prompt(
         "Latency compensation (ms)",
@@ -108,11 +121,9 @@ def studio_setup() -> None:
     input_labels: list[InputLabel] = list(existing.input_labels)
     if devices:
         click.echo("\n--- Audio Interface Setup ---")
-        # Show input devices
         input_devs = [(i, d) for i, d in enumerate(devices) if d["max_input_channels"] > 0]
         if input_devs:
             click.echo("Available input devices:")
-            # Mark which are already configured
             existing_dev_names = {il.device for il in input_labels}
             for i, d in input_devs:
                 marker = " *" if d["name"] in existing_dev_names else ""
@@ -121,7 +132,6 @@ def studio_setup() -> None:
                 click.echo("  (* = already configured)")
             click.echo()
 
-            # Pre-fill default selection from existing labels
             existing_indices = []
             for i, d in input_devs:
                 if d["name"] in existing_dev_names:
@@ -142,17 +152,14 @@ def studio_setup() -> None:
                         if 0 <= idx < len(devices) and devices[idx]["max_input_channels"] > 0:
                             selected_devs.append((idx, devices[idx]))
 
-            # Build new input_labels from selected interfaces
             new_labels: list[InputLabel] = []
             for dev_idx, dev in selected_devs:
                 dev_name = dev["name"]
                 max_ch = dev["max_input_channels"]
                 click.echo(f"\n  Interface: {dev_name} ({max_ch} channels)")
 
-                # Find existing labels for this device
                 existing_for_dev = {il.channel: il.label for il in input_labels if il.device == dev_name}
 
-                # Pre-fill channel selection from existing labels
                 if existing_for_dev:
                     default_chs = ",".join(str(ch) for ch in sorted(existing_for_dev.keys()))
                 else:
@@ -178,14 +185,42 @@ def studio_setup() -> None:
             if new_labels:
                 input_labels = new_labels
 
-    # --- Instrument Setup ---
-    instruments: list[Instrument] = []
-    click.echo("\n--- Instrument Setup ---")
+    existing.sample_rate = int(sample_rate)
+    existing.buffer_size = int(buffer_size)
+    existing.output_device = output_device_name
+    existing.output_channels = output_channels
+    existing.latency_compensation_ms = latency_compensation_ms
+    existing.input_labels = input_labels
+
+    errors = existing.validate()
+    if errors:
+        for e in errors:
+            click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
+
+    existing.save()
+    click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
     if input_labels:
+        click.echo("Inputs:")
+        for il in input_labels:
+            click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
+
+
+@main.command()
+def setup_instruments() -> None:
+    """Configure instruments and their input assignments."""
+    click.echo("=== Instrument Setup ===\n")
+
+    existing = StudioConfig.load()
+
+    if existing.input_labels:
         click.echo("Available inputs:")
-        for i, il in enumerate(input_labels):
+        for i, il in enumerate(existing.input_labels):
             click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
         click.echo()
+    else:
+        click.echo("No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+        raise SystemExit(1)
 
     if existing.instruments:
         click.echo("Existing instruments:")
@@ -193,20 +228,17 @@ def studio_setup() -> None:
             click.echo(f"  - {inst.name} ({inst.input_label})")
         click.echo()
 
+    instruments: list[Instrument] = []
     while True:
         if not click.confirm("Add an instrument?", default=bool(not instruments)):
             break
         name = click.prompt("  Instrument name")
-        if input_labels:
-            choice = click.prompt("  Input number", type=int, default=1)
-            if 1 <= choice <= len(input_labels):
-                input_label_name = input_labels[choice - 1].label
-            else:
-                click.echo(f"  Invalid choice, using first input.")
-                input_label_name = input_labels[0].label
+        choice = click.prompt("  Input number", type=int, default=1)
+        if 1 <= choice <= len(existing.input_labels):
+            input_label_name = existing.input_labels[choice - 1].label
         else:
-            click.echo("  No inputs configured. Run interface setup first.")
-            break
+            click.echo(f"  Invalid choice, using first input.")
+            input_label_name = existing.input_labels[0].label
         full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
         musician = click.prompt("  Musician name", default="", show_default=False)
         instruments.append(Instrument(
@@ -215,39 +247,16 @@ def studio_setup() -> None:
         ))
         click.echo(f"  Added '{name}'.\n")
 
-    # Keep existing instruments if none were added
-    if not instruments:
-        instruments = list(existing.instruments)
-
-    config = StudioConfig(
-        sample_rate=int(sample_rate),
-        buffer_size=int(buffer_size),
-        output_device=output_device_name,
-        output_channels=output_channels,
-        backup_server=backup_server,
-        latency_compensation_ms=latency_compensation_ms,
-        studio_musician=studio_musician,
-        studio_name=studio_name,
-        studio_location=studio_location,
-        input_labels=input_labels,
-        instruments=instruments,
-    )
-
-    errors = config.validate()
-    if errors:
-        for e in errors:
-            click.echo(f"Error: {e}", err=True)
-        raise SystemExit(1)
-
-    config.save()
-    click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
-    if input_labels:
-        click.echo("Inputs:")
-        for il in input_labels:
-            click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
     if instruments:
+        existing.instruments = instruments
+    else:
+        click.echo("No instruments added; keeping existing config.")
+
+    existing.save()
+    click.echo(f"\nConfig saved to {DEFAULT_CONFIG_PATH}")
+    if existing.instruments:
         click.echo("Instruments:")
-        for inst in instruments:
+        for inst in existing.instruments:
             click.echo(f"  - {inst.name} ({inst.input_label})")
 
 
@@ -449,7 +458,7 @@ def start_session(instrument: str) -> None:
     inst = config.get_instrument(instrument)
     if inst is None:
         if not config.input_labels:
-            click.echo("Error: No inputs configured. Run 'jampy studio-setup' first.", err=True)
+            click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
             raise SystemExit(1)
         click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
         click.echo("Available inputs:")
