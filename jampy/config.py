@@ -36,6 +36,7 @@ class StudioConfig:
     output_device: str = ""
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
+    backup_server: str = ""  # e.g. "user@host:/path/to/backups"
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     studio_musician: str = ""
     studio_name: str = ""

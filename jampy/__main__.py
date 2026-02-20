@@ -45,6 +45,7 @@ def studio_setup() -> None:
     studio_name = click.prompt("Studio name", default=existing.studio_name, show_default=bool(existing.studio_name))
     studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
     studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
+    backup_server = click.prompt("Backup server (user@host:/path, or empty to skip)", default=existing.backup_server, show_default=bool(existing.backup_server))
     click.echo()
 
     # Query available audio devices
@@ -223,6 +224,7 @@ def studio_setup() -> None:
         buffer_size=int(buffer_size),
         output_device=output_device_name,
         output_channels=output_channels,
+        backup_server=backup_server,
         latency_compensation_ms=latency_compensation_ms,
         studio_musician=studio_musician,
         studio_name=studio_name,
@@ -257,6 +259,9 @@ def new_project() -> None:
 
     name = click.prompt("Project name")
     project = Project.create_new(projects_dir, name)
+    if config.backup_server:
+        project.setlist.backup_server = config.backup_server
+        project.save_setlist()
     click.echo(f"Created project: {project.path}")
     click.echo("  backing_tracks/")
     click.echo("  completed_takes/")
@@ -473,6 +478,12 @@ def start_session(instrument: str) -> None:
         raise SystemExit(1)
 
     project = Project.open(cwd)
+
+    if project.setlist.backup_server:
+        from .sync import sync_down
+        sync_down(project.path, project.setlist.backup_server)
+        project.load_setlist()  # reload after sync may have updated it
+
     if not project.setlist.tracks:
         click.echo("Error: Setlist is empty. Run 'jampy update-setlist' first.", err=True)
         raise SystemExit(1)
@@ -561,6 +572,10 @@ def start_session(instrument: str) -> None:
         _run_session_loop(session, engine)
     finally:
         engine.stop()
+
+    if project.setlist.backup_server:
+        from .sync import sync_up
+        sync_up(project.path, project.setlist.backup_server)
 
 
 def _load_backing_track(session: Session, engine: AudioEngine) -> None:
