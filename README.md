@@ -7,25 +7,9 @@ Jam.py handles continuous audio recording, playback mixing, session logging, and
 ## Requirements
 
 - Python 3.9+
-- ffmpeg (for MP3/M4A decoding)
-- PortAudio (for real-time audio I/O)
+- PortAudio, libsndfile, ffmpeg (system libraries)
 
-### System Dependencies
-
-**Ubuntu/Debian:**
-```bash
-sudo apt install ffmpeg libportaudio2 libsndfile1
-```
-
-**macOS:**
-```bash
-brew install ffmpeg portaudio libsndfile
-```
-
-**Arch:**
-```bash
-sudo pacman -S ffmpeg portaudio libsndfile
-```
+See [Prerequisites](docs/prerequisites.md) for install instructions for each operating system.
 
 ## Install
 
@@ -37,20 +21,13 @@ pip install -e .
 
 ### Studio Setup
 
-Configure your audio devices, output settings, and instruments:
+Configure your studio in three steps. Each command reads and updates `~/studio_config.json` independently, so you can re-run one without redoing the others.
 
 ```bash
-jampy studio-setup
+jampy setup-studio              # studio name, location, musician, backup server
+jampy setup-recording-devices   # sample rate, buffer size, output device, input labels
+jampy setup-instruments         # assign instruments to input channels
 ```
-
-The wizard asks for:
-- Studio name, location, and default musician name (all optional)
-- Sample rate and buffer size
-- Output device and channel count
-- Audio interfaces: select devices, label input channels
-- Instruments: name, input label, musician name
-
-Config is saved to `~/studio_config.json`.
 
 ### Creating a Project
 
