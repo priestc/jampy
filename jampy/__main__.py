@@ -886,6 +886,10 @@ def measure_latency(instrument: str) -> None:
 
     try:
         click.echo("=== Latency Measurement ===\n")
+        click.echo(f"  Instrument:  {inst.name}")
+        click.echo(f"  Input:       {input_info.label} ({input_info.device} ch{input_info.channel})")
+        click.echo(f"  Output:      {config.output_device}")
+        click.echo()
         click.echo("You'll hear a rhythm of beeps ending with a loud HIT tone.")
         click.echo("Clap or hit your instrument exactly on the HIT.\n")
 
