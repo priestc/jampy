@@ -808,5 +808,189 @@ def _show_status(session: Session) -> None:
             click.echo("  Last track done! Press [q] to finish")
 
 
+@main.command()
+@click.argument("instrument")
+def measure_latency(instrument: str) -> None:
+    """Measure and calibrate latency compensation by ear for INSTRUMENT."""
+    config = StudioConfig.load()
+    inst = config.get_instrument(instrument)
+    if inst is None:
+        if not config.input_labels:
+            click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+            raise SystemExit(1)
+        click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
+        click.echo("Available inputs:")
+        for i, il in enumerate(config.input_labels):
+            click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
+        choice = click.prompt("  Input number", type=int, default=1)
+        if 1 <= choice <= len(config.input_labels):
+            input_label_name = config.input_labels[choice - 1].label
+        else:
+            click.echo("  Invalid choice, using first input.")
+            input_label_name = config.input_labels[0].label
+        full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+        musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
+        inst = Instrument(
+            name=instrument, input_label=input_label_name,
+            full_name=full_name, musician=musician,
+        )
+        config.instruments.append(inst)
+        config.save()
+        click.echo(f"  Saved '{instrument}' to config.\n")
+
+    import sounddevice as sd
+    from .audio.engine import AudioEngine
+
+    input_info = config.resolve_input(inst.input_label)
+    if input_info is None:
+        click.echo(f"Error: Input label '{inst.input_label}' not found in config.", err=True)
+        raise SystemExit(1)
+    in_dev = _resolve_device(sd, input_info.device, "input")
+    if in_dev is None:
+        click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
+        raise SystemExit(1)
+    out_dev = _resolve_device(sd, config.output_device, "output")
+
+    in_info = sd.query_devices(in_dev, "input")
+    out_info = sd.query_devices(out_dev, "output")
+    input_channel_index = input_info.channel - 1
+    input_channels = max(input_info.channel, 1)
+    output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+    if input_channels > in_info["max_input_channels"]:
+        click.echo(
+            f"Error: Instrument '{inst.name}' needs input channel {input_channels} "
+            f"but device only has {in_info['max_input_channels']} channels.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    ref_wav = Path(__file__).parent / "data" / "measure_latency.wav"
+    if not ref_wav.exists():
+        click.echo(f"Error: Reference audio not found at {ref_wav}", err=True)
+        raise SystemExit(1)
+
+    import tempfile
+    tmp_recording = Path(tempfile.mktemp(suffix=".flac", prefix="jampy_latency_"))
+
+    engine = AudioEngine(
+        sample_rate=config.sample_rate,
+        buffer_size=config.buffer_size,
+        input_device=in_dev,
+        output_device=out_dev,
+        input_channels=input_channels,
+        output_channels=max(1, output_channels),
+        monitor_channel=input_channel_index,
+    )
+    engine.start()
+
+    try:
+        click.echo("=== Latency Measurement ===\n")
+        click.echo("You'll hear a rhythm of beeps ending with a loud HIT tone.")
+        click.echo("Clap or hit your instrument exactly on the HIT.\n")
+
+        if _latency_record_phase(engine, ref_wav, tmp_recording):
+            _latency_adjust_phase(engine, ref_wav, tmp_recording, config)
+    finally:
+        engine.stop()
+        if tmp_recording.exists():
+            tmp_recording.unlink()
+
+
+def _latency_record_phase(engine: AudioEngine, ref_wav: Path, tmp_recording: Path) -> bool:
+    """Record phase: play reference, record clap. Returns True to continue to adjust."""
+    while True:
+        engine.mixer.clear()
+        engine.mixer.add_source("ref", ref_wav)
+        engine.start_recording(tmp_recording)
+        engine.mixer.reset()
+        engine.mixer.set_playing(True)
+
+        click.echo("  Playing reference... clap/hit on the HIT tone!")
+
+        import sounddevice as sd
+        while not engine.mixer.is_finished:
+            sd.sleep(100)
+
+        engine.stop_recording()
+        engine.mixer.set_playing(False)
+
+        click.echo("  Recording captured.")
+        action = click.prompt("  [r]etry, [c]ontinue to adjust, [q]uit", type=click.Choice(["r", "c", "q"]))
+
+        if action == "c":
+            return True
+        elif action == "q":
+            return False
+        else:
+            # Retry — delete recording and loop
+            if tmp_recording.exists():
+                tmp_recording.unlink()
+
+
+def _latency_adjust_phase(
+    engine: AudioEngine, ref_wav: Path, tmp_recording: Path, config: StudioConfig
+) -> None:
+    """Adjustment phase: play ref + recording together, adjust trim with u/d keys."""
+    latency_ms = config.latency_compensation_ms
+    sample_rate = config.sample_rate
+
+    def _load_and_play() -> None:
+        trim = int(latency_ms / 1000.0 * sample_rate)
+        engine.mixer.clear()
+        engine.mixer.add_source("ref", ref_wav)
+        engine.mixer.add_source("recording", tmp_recording, trim_frames=trim)
+        engine.mixer.reset()
+        engine.mixer.set_playing(True)
+
+    _load_and_play()
+
+    click.echo(f"\n  Current latency: {latency_ms:.0f} ms")
+    click.echo("  Controls: [u] +5ms  [d] -5ms  [r] replay  [s] save  [q] quit")
+    click.echo("  Listening... adjust until the clap aligns with the HIT tone.\n")
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        import sounddevice as sd
+        while True:
+            if select.select([sys.stdin], [], [], 0.2)[0]:
+                key = sys.stdin.read(1).lower()
+
+                if key == "u":
+                    latency_ms += 5
+                    trim = int(latency_ms / 1000.0 * sample_rate)
+                    engine.mixer.set_trim("recording", trim)
+                    engine.mixer.reset()
+                    engine.mixer.set_playing(True)
+                    click.echo(f"  Latency: {latency_ms:.0f} ms")
+
+                elif key == "d":
+                    latency_ms = max(0, latency_ms - 5)
+                    trim = int(latency_ms / 1000.0 * sample_rate)
+                    engine.mixer.set_trim("recording", trim)
+                    engine.mixer.reset()
+                    engine.mixer.set_playing(True)
+                    click.echo(f"  Latency: {latency_ms:.0f} ms")
+
+                elif key == "r":
+                    engine.mixer.reset()
+                    engine.mixer.set_playing(True)
+                    click.echo("  Replaying...")
+
+                elif key == "s":
+                    config.latency_compensation_ms = latency_ms
+                    config.save()
+                    click.echo(f"\n  Saved latency_compensation_ms = {latency_ms:.0f} ms to {DEFAULT_CONFIG_PATH}")
+                    return
+
+                elif key == "q":
+                    click.echo("\n  Quit without saving.")
+                    return
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
 if __name__ == "__main__":
     main()

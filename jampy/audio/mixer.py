@@ -17,6 +17,7 @@ class MixSource:
     data: np.ndarray  # float32, shape (N, 2) stereo
     volume: float = 1.0
     active: bool = True
+    original_data: np.ndarray | None = None  # full array before trim
 
 
 class Mixer:
@@ -43,9 +44,10 @@ class Mixer:
             data = np.column_stack([data, data])
         elif data.shape[1] == 1:
             data = np.column_stack([data[:, 0], data[:, 0]])
+        original = data
         if trim_frames > 0 and trim_frames < len(data):
             data = data[trim_frames:]
-        self.sources.append(MixSource(name=name, data=data, volume=volume))
+        self.sources.append(MixSource(name=name, data=data, volume=volume, original_data=original))
 
     def clear(self) -> None:
         """Remove all sources."""
@@ -121,4 +123,14 @@ class Mixer:
         for source in self.sources:
             if source.name == name:
                 source.volume = volume
+                break
+
+    def set_trim(self, name: str, trim_frames: int) -> None:
+        """Re-slice a source from its original_data with a new trim offset."""
+        for source in self.sources:
+            if source.name == name and source.original_data is not None:
+                if trim_frames > 0 and trim_frames < len(source.original_data):
+                    source.data = source.original_data[trim_frames:]
+                else:
+                    source.data = source.original_data
                 break
