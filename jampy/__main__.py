@@ -769,24 +769,24 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
         track = session.current_track
         if track:
             track.takes_volume = max(0, track.takes_volume - 5)
-            for src_name in list(engine.mixer.sources):
-                if src_name.startswith("take:"):
-                    inst_name = src_name[5:]
+            for src in engine.mixer.sources:
+                if src.name.startswith("take:"):
+                    inst_name = src.name[5:]
                     take_info = track.preferred_takes.get(inst_name)
                     base_vol = take_info.volume if take_info else 1.0
-                    engine.mixer.set_volume(src_name, base_vol * (track.takes_volume / 100.0))
+                    engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
             click.echo(f"  Takes volume: {track.takes_volume}%")
 
     elif key == "]":
         track = session.current_track
         if track:
             track.takes_volume = track.takes_volume + 5
-            for src_name in list(engine.mixer.sources):
-                if src_name.startswith("take:"):
-                    inst_name = src_name[5:]
+            for src in engine.mixer.sources:
+                if src.name.startswith("take:"):
+                    inst_name = src.name[5:]
                     take_info = track.preferred_takes.get(inst_name)
                     base_vol = take_info.volume if take_info else 1.0
-                    engine.mixer.set_volume(src_name, base_vol * (track.takes_volume / 100.0))
+                    engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
             click.echo(f"  Takes volume: {track.takes_volume}%")
 
     elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
