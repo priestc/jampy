@@ -59,6 +59,7 @@ class Setlist:
     """Ordered list of tracks for a project."""
     tracks: list[TrackEntry] = field(default_factory=list)
     backup_server: str = ""
+    inspiration: list[dict] = field(default_factory=list)
 
     def add_track(self, track: TrackEntry) -> None:
         self.tracks.append(track)
@@ -76,12 +77,18 @@ class Setlist:
         d: dict = {"tracks": [t.to_dict() for t in self.tracks]}
         if self.backup_server:
             d["backup_server"] = self.backup_server
+        if self.inspiration:
+            d["inspiration"] = self.inspiration
         return d
 
     @classmethod
     def from_dict(cls, data: dict) -> Setlist:
         tracks = [TrackEntry.from_dict(t) for t in data.get("tracks", [])]
-        return cls(tracks=tracks, backup_server=data.get("backup_server", ""))
+        return cls(
+            tracks=tracks,
+            backup_server=data.get("backup_server", ""),
+            inspiration=data.get("inspiration", []),
+        )
 
 
 class Project:

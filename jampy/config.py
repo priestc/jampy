@@ -37,6 +37,8 @@ class StudioConfig:
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "JamPy Projects")
     backup_server: str = ""  # e.g. "user@host:/path/to/backups"
+    inspiration_server: str = ""  # e.g. "http://myserver:8000"
+    inspiration_api_key: str = ""
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     studio_musician: str = ""
     studio_name: str = ""

@@ -44,6 +44,8 @@ def setup_studio() -> None:
     existing.studio_location = click.prompt("Studio location", default=existing.studio_location, show_default=bool(existing.studio_location))
     existing.studio_musician = click.prompt("Studio musician (default performer)", default=existing.studio_musician, show_default=bool(existing.studio_musician))
     existing.backup_server = click.prompt("Backup server (user@host:/path, or empty to skip)", default=existing.backup_server, show_default=bool(existing.backup_server))
+    existing.inspiration_server = click.prompt("Inspiration server URL (or empty to skip)", default=existing.inspiration_server, show_default=bool(existing.inspiration_server))
+    existing.inspiration_api_key = click.prompt("Inspiration API key (or empty to skip)", default=existing.inspiration_api_key, show_default=bool(existing.inspiration_api_key))
 
     errors = existing.validate()
     if errors:
@@ -1021,6 +1023,166 @@ def _latency_adjust_phase(
                     return
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+@main.command()
+def inspiration() -> None:
+    """Play tracks from your music library for inspiration."""
+    import json
+    import random
+    import tempfile
+    import urllib.request
+    import urllib.error
+
+    cwd = Path.cwd()
+    if not (cwd / "setlist.json").exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    project = Project.open(cwd)
+    if not project.setlist.inspiration:
+        click.echo("Error: No inspiration filters in setlist.json.", err=True)
+        click.echo('Add an "inspiration" key with filter sets, e.g.:')
+        click.echo('  "inspiration": [{"genre": "Rock"}, {"artist": "Miles Davis"}]')
+        raise SystemExit(1)
+
+    config = StudioConfig.load()
+    if not config.inspiration_server or not config.inspiration_api_key:
+        click.echo("Error: inspiration_server and inspiration_api_key must be set.", err=True)
+        click.echo("Run 'jampy setup-studio' to configure them.")
+        raise SystemExit(1)
+
+    server = config.inspiration_server.rstrip("/")
+    headers = {
+        "Authorization": f"Bearer {config.inspiration_api_key}",
+        "Content-Type": "application/json",
+    }
+
+    # Query tracks from radioserver
+    click.echo("Querying inspiration tracks...")
+    payload = json.dumps({"filters": project.setlist.inspiration}).encode()
+    req = urllib.request.Request(
+        f"{server}/library/api/tracks/",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read())
+    except urllib.error.URLError as e:
+        click.echo(f"Error contacting server: {e}", err=True)
+        raise SystemExit(1)
+
+    tracks = data.get("tracks", [])
+    if not tracks:
+        click.echo("No tracks matched the inspiration filters.")
+        raise SystemExit(1)
+
+    random.shuffle(tracks)
+    click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
+    click.echo("Controls: [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
+
+    import sounddevice as sd
+    from .audio.mixer import Mixer
+
+    out_dev = _resolve_device(sd, config.output_device, "output")
+    out_info = sd.query_devices(out_dev, "output")
+    out_channels = min(config.output_channels, out_info["max_output_channels"])
+
+    tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
+    volume = 1.0
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+
+    try:
+        tty.setcbreak(fd)
+
+        for i, track_info in enumerate(tracks):
+            title = track_info.get("title", "Unknown")
+            artist = track_info.get("artist", "Unknown")
+            album = track_info.get("album", "")
+            dur = track_info.get("duration") or 0
+            dur_str = format_duration(dur)
+            click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}")
+            if album:
+                click.echo(f"         {album} ({dur_str})")
+            else:
+                click.echo(f"         ({dur_str})")
+
+            # Download track
+            track_id = track_info["id"]
+            fmt = track_info.get("format", "flac") or "flac"
+            tmp_path = Path(tmpdir) / f"track_{track_id}.{fmt}"
+            dl_req = urllib.request.Request(
+                f"{server}/library/api/tracks/{track_id}/download/",
+                headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
+            )
+            try:
+                with urllib.request.urlopen(dl_req) as resp:
+                    tmp_path.write_bytes(resp.read())
+            except urllib.error.URLError as e:
+                click.echo(f"  Download failed: {e}")
+                continue
+
+            # Play via Mixer
+            mixer = Mixer(config.sample_rate)
+            mixer.add_source("inspiration", tmp_path, volume=volume)
+            mixer.set_playing(True)
+
+            skip = False
+
+            def callback(outdata, frames, time_info, status):
+                mix = mixer.read(frames)
+                if out_channels == 2:
+                    outdata[:] = mix
+                else:
+                    outdata[:, 0] = mix[:, 0]
+                if mixer.is_finished:
+                    raise sd.CallbackStop
+
+            with sd.OutputStream(
+                samplerate=config.sample_rate,
+                blocksize=config.buffer_size,
+                device=out_dev,
+                channels=max(1, out_channels),
+                dtype="float32",
+                callback=callback,
+            ):
+                while mixer.is_playing and not mixer.is_finished:
+                    if select.select([sys.stdin], [], [], 0.2)[0]:
+                        key = sys.stdin.read(1).lower()
+                        if key == "q":
+                            click.echo("\nQuitting inspiration mode.")
+                            return
+                        elif key == "s":
+                            click.echo("  >> Skip")
+                            skip = True
+                            mixer.set_playing(False)
+                            break
+                        elif key == "l":
+                            volume = max(0.0, volume - 0.1)
+                            mixer.set_volume("inspiration", volume)
+                            click.echo(f"  Volume: {int(volume * 100)}%")
+                        elif key == "u":
+                            volume = min(2.0, volume + 0.1)
+                            mixer.set_volume("inspiration", volume)
+                            click.echo(f"  Volume: {int(volume * 100)}%")
+
+            # Clean up downloaded file
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+        click.echo("\nAll tracks played.")
+
+    except KeyboardInterrupt:
+        click.echo("\nInterrupted.")
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # Clean up temp directory
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 if __name__ == "__main__":
