@@ -25,6 +25,7 @@ class TrackEntry:
     backing_track: str  # relative path to backing track file
     duration_seconds: float = 0.0
     volume: int = 100  # playback volume percentage
+    takes_volume: int = 100  # playback volume for other instruments' takes
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
 
@@ -48,6 +49,7 @@ class TrackEntry:
             backing_track=data["backing_track"],
             duration_seconds=data.get("duration_seconds", 0.0),
             volume=data.get("volume", 100),
+            takes_volume=data.get("takes_volume", 100),
             preferred_takes=takes,
         )
 

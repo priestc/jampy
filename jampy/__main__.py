@@ -570,7 +570,8 @@ def start_session(instrument: str) -> None:
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
     click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track")
-    click.echo("          [l]ower volume  [u]p volume  [q]uit\n")
+    click.echo("          [l]ower volume  [u]p volume  [[]lower takes  []]raise takes")
+    click.echo("          [q]uit\n")
 
     # Start the audio stream and continuous session recording
     engine.start()
@@ -604,8 +605,9 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
             continue  # skip the instrument we're currently recording
         take_path = session.project.completed_takes_dir / take_info.filename
         if take_path.exists():
+            effective_vol = take_info.volume * (track.takes_volume / 100.0)
             engine.mixer.add_source(
-                f"take:{inst_name}", take_path, volume=take_info.volume,
+                f"take:{inst_name}", take_path, volume=effective_vol,
                 trim_frames=trim,
             )
 
@@ -763,6 +765,30 @@ def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
             engine.mixer.set_volume("backing", track.volume / 100.0)
             click.echo(f"  Volume: {track.volume}%")
 
+    elif key == "[":
+        track = session.current_track
+        if track:
+            track.takes_volume = max(0, track.takes_volume - 5)
+            for src_name in list(engine.mixer.sources):
+                if src_name.startswith("take:"):
+                    inst_name = src_name[5:]
+                    take_info = track.preferred_takes.get(inst_name)
+                    base_vol = take_info.volume if take_info else 1.0
+                    engine.mixer.set_volume(src_name, base_vol * (track.takes_volume / 100.0))
+            click.echo(f"  Takes volume: {track.takes_volume}%")
+
+    elif key == "]":
+        track = session.current_track
+        if track:
+            track.takes_volume = track.takes_volume + 5
+            for src_name in list(engine.mixer.sources):
+                if src_name.startswith("take:"):
+                    inst_name = src_name[5:]
+                    take_info = track.preferred_takes.get(inst_name)
+                    base_vol = take_info.volume if take_info else 1.0
+                    engine.mixer.set_volume(src_name, base_vol * (track.takes_volume / 100.0))
+            click.echo(f"  Takes volume: {track.takes_volume}%")
+
     elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
         # Advance to next track without a take for this instrument
         tracks = session.project.setlist.tracks
@@ -793,7 +819,8 @@ def _show_status(session: Session) -> None:
 
     if track:
         dur = format_duration(track.duration_seconds)
-        click.echo(f"[{idx}/{total}] {track.name} ({dur}) vol:{track.volume}% — {state}")
+        takes_vol = f" takes:{track.takes_volume}%" if track.preferred_takes else ""
+        click.echo(f"[{idx}/{total}] {track.name} ({dur}) vol:{track.volume}%{takes_vol} — {state}")
     else:
         click.echo(f"[{idx}/{total}] — {state}")
 
