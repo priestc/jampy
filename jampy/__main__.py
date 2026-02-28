@@ -281,6 +281,44 @@ def new_project() -> None:
 
 
 @main.command()
+def sync_push() -> None:
+    """Push local project files to the backup server."""
+    cwd = Path.cwd()
+    if not (cwd / "setlist.json").exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    project = Project.open(cwd)
+    remote = project.setlist.backup_server or StudioConfig.load().backup_server
+    if not remote:
+        click.echo("Error: No backup server configured.", err=True)
+        click.echo("Set it in setlist.json or via 'jampy setup-studio'.")
+        raise SystemExit(1)
+
+    from .sync import sync_up
+    sync_up(project.path, remote)
+
+
+@main.command()
+def sync_pull() -> None:
+    """Pull project files from the backup server."""
+    cwd = Path.cwd()
+    if not (cwd / "setlist.json").exists():
+        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+        raise SystemExit(1)
+
+    project = Project.open(cwd)
+    remote = project.setlist.backup_server or StudioConfig.load().backup_server
+    if not remote:
+        click.echo("Error: No backup server configured.", err=True)
+        click.echo("Set it in setlist.json or via 'jampy setup-studio'.")
+        raise SystemExit(1)
+
+    from .sync import sync_down
+    sync_down(project.path, remote)
+
+
+@main.command()
 def update_setlist() -> None:
     """Scan backing_tracks/ and update setlist.json in the current directory."""
     cwd = Path.cwd()
