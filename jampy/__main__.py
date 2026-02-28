@@ -1126,9 +1126,11 @@ def inspiration() -> None:
                 click.echo(f"  Download failed: {e}")
                 continue
 
-            # Play via Mixer
+            # Play via Mixer — apply ReplayGain if available
+            rg_gain = track_info.get("replaygain_track_gain")
+            rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
             mixer = Mixer(config.sample_rate)
-            mixer.add_source("inspiration", tmp_path, volume=volume)
+            mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
             mixer.set_playing(True)
 
             skip = False
@@ -1163,11 +1165,11 @@ def inspiration() -> None:
                             break
                         elif key == "l":
                             volume = max(0.0, volume - 0.1)
-                            mixer.set_volume("inspiration", volume)
+                            mixer.set_volume("inspiration", volume * rg_linear)
                             click.echo(f"  Volume: {int(volume * 100)}%")
                         elif key == "u":
                             volume = min(2.0, volume + 0.1)
-                            mixer.set_volume("inspiration", volume)
+                            mixer.set_volume("inspiration", volume * rg_linear)
                             click.echo(f"  Volume: {int(volume * 100)}%")
 
             # Clean up downloaded file
