@@ -1025,12 +1025,9 @@ def _latency_adjust_phase(
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-@main.command()
-def inspiration() -> None:
-    """Play tracks from your music library for inspiration."""
+def _query_inspiration_tracks() -> tuple[list[dict], StudioConfig]:
+    """Query inspiration tracks from radioserver. Returns (tracks, config)."""
     import json
-    import random
-    import tempfile
     import urllib.request
     import urllib.error
 
@@ -1053,18 +1050,13 @@ def inspiration() -> None:
         raise SystemExit(1)
 
     server = config.inspiration_server.rstrip("/")
-    headers = {
-        "Authorization": f"Bearer {config.inspiration_api_key}",
-        "Content-Type": "application/json",
-    }
 
-    # Query tracks from radioserver
     click.echo("Querying inspiration tracks...")
     payload = json.dumps({"filters": project.setlist.inspiration}).encode()
     req = urllib.request.Request(
         f"{server}/library/api/tracks/",
         data=payload,
-        headers=headers,
+        headers={"Authorization": f"Bearer {config.inspiration_api_key}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -1079,7 +1071,31 @@ def inspiration() -> None:
         click.echo("No tracks matched the inspiration filters.")
         raise SystemExit(1)
 
-    random.shuffle(tracks)
+    return tracks, config
+
+
+@main.command()
+def list_inspirations() -> None:
+    """List tracks matching the current project's inspiration filters."""
+    tracks, config = _query_inspiration_tracks()
+    click.echo(f"\n{len(tracks)} tracks:\n")
+    for i, t in enumerate(tracks):
+        artist = t.get("artist", "Unknown")
+        title = t.get("title", "Unknown")
+        album = t.get("album", "")
+        year = t.get("year", "")
+        dur = format_duration(t.get("duration") or 0)
+        year_str = f" ({year})" if year else ""
+        album_str = f" [{album}]" if album else ""
+        click.echo(f"  {i + 1:3}. {artist} - {title}{album_str}{year_str}  {dur}")
+
+
+@main.command()
+def inspiration() -> None:
+    """Play tracks from your music library for inspiration."""
+    import tempfile
+
+    tracks, config = _query_inspiration_tracks()
     click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
     click.echo("Controls: [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
 
