@@ -1107,7 +1107,7 @@ def inspiration() -> None:
     out_channels = min(config.output_channels, out_info["max_output_channels"])
 
     tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
-    volume = 1.0
+    volume = config.inspiration_volume
 
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -1182,10 +1182,14 @@ def inspiration() -> None:
                         elif key == "l":
                             volume = max(0.0, volume - 0.1)
                             mixer.set_volume("inspiration", volume * rg_linear)
+                            config.inspiration_volume = volume
+                            config.save()
                             click.echo(f"  Volume: {int(volume * 100)}%")
                         elif key == "u":
                             volume = min(2.0, volume + 0.1)
                             mixer.set_volume("inspiration", volume * rg_linear)
+                            config.inspiration_volume = volume
+                            config.save()
                             click.echo(f"  Volume: {int(volume * 100)}%")
 
             # Clean up downloaded file
