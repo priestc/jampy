@@ -1122,9 +1122,11 @@ def inspiration() -> None:
             title = track_info.get("title", "Unknown")
             artist = track_info.get("artist", "Unknown")
             album = track_info.get("album", "")
+            year = track_info.get("year") or ""
             dur = track_info.get("duration") or 0
             dur_str = format_duration(dur)
-            click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}")
+            year_str = f" ({year})" if year else ""
+            click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}{year_str}")
             if album:
                 click.echo(f"         {album} ({dur_str})")
             else:
