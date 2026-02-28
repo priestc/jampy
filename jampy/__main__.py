@@ -1094,8 +1094,11 @@ def list_inspirations() -> None:
 def inspiration() -> None:
     """Play tracks from your music library for inspiration."""
     import tempfile
+    import urllib.request
+    import urllib.error
 
     tracks, config = _query_inspiration_tracks()
+    server = config.inspiration_server.rstrip("/")
     click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
     click.echo("Controls: [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
 
