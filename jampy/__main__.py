@@ -623,6 +623,13 @@ def start_session(instrument: str) -> None:
     finally:
         engine.stop()
 
+    # Clean up downloaded inspiration backing tracks
+    for track in project.setlist.tracks:
+        if track.inspiration_track_id:
+            bt_path = project.backing_tracks_dir / track.backing_track
+            if bt_path.exists():
+                bt_path.unlink()
+
     if project.setlist.backup_server:
         from .sync import sync_up
         sync_up(project.path, project.setlist.backup_server)
@@ -635,6 +642,24 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
         return
     engine.mixer.clear()
     backing_path = session.project.backing_tracks_dir / track.backing_track
+
+    # Download inspiration tracks on demand
+    if track.inspiration_track_id and not backing_path.exists():
+        import urllib.request
+        import urllib.error
+        config = StudioConfig.load()
+        server = config.inspiration_server.rstrip("/")
+        url = f"{server}/library/api/tracks/{track.inspiration_track_id}/download/"
+        dl_req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
+        )
+        click.echo(f"  Downloading: {track.name}...")
+        try:
+            with urllib.request.urlopen(dl_req) as resp:
+                backing_path.write_bytes(resp.read())
+        except urllib.error.URLError as e:
+            click.echo(f"  Download failed: {e}")
+
     if backing_path.exists():
         engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
 
@@ -1110,6 +1135,69 @@ def _query_inspiration_tracks() -> tuple[list[dict], StudioConfig]:
         raise SystemExit(1)
 
     return tracks, config
+
+
+@main.command()
+def record_inspiration() -> None:
+    """Pick inspiration tracks to add to the setlist for recording."""
+    tracks, config = _query_inspiration_tracks()
+
+    click.echo(f"\n{len(tracks)} tracks:\n")
+    for i, t in enumerate(tracks):
+        artist = t.get("artist", "Unknown")
+        title = t.get("title", "Unknown")
+        album = t.get("album", "")
+        year = t.get("year", "")
+        dur = format_duration(t.get("duration") or 0)
+        year_str = f" ({year})" if year else ""
+        album_str = f" [{album}]" if album else ""
+        click.echo(f"  {i + 1:3}. {artist} - {title}{album_str}{year_str}  {dur}")
+
+    click.echo()
+    selection = click.prompt("Select tracks (comma-separated numbers, e.g. 1,3,7)")
+    indices = []
+    for s in selection.split(","):
+        s = s.strip()
+        if s.isdigit():
+            idx = int(s) - 1
+            if 0 <= idx < len(tracks):
+                indices.append(idx)
+            else:
+                click.echo(f"  Skipping invalid number: {int(s)}")
+
+    if not indices:
+        click.echo("No valid tracks selected.")
+        raise SystemExit(1)
+
+    cwd = Path.cwd()
+    project = Project.open(cwd)
+
+    added = 0
+    for idx in indices:
+        t = tracks[idx]
+        artist = t.get("artist", "Unknown")
+        title = t.get("title", "Unknown")
+        year = t.get("year", "")
+        track_id = t["id"]
+        fmt = t.get("format", "flac") or "flac"
+        duration = t.get("duration") or 0
+
+        year_str = f" ({year})" if year else ""
+        name = f"{artist} - {title}{year_str}"
+        backing_file = f"inspiration_{track_id}.{fmt}"
+
+        entry = TrackEntry(
+            name=name,
+            backing_track=backing_file,
+            duration_seconds=duration,
+            inspiration_track_id=track_id,
+        )
+        project.setlist.add_track(entry)
+        click.echo(f"  + {name}")
+        added += 1
+
+    project.save_setlist()
+    click.echo(f"\nAdded {added} tracks to setlist.")
 
 
 @main.command()

@@ -26,6 +26,7 @@ class TrackEntry:
     duration_seconds: float = 0.0
     volume: int = 100  # playback volume percentage
     takes_volume: int = 100  # playback volume for other instruments' takes
+    inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
 
@@ -50,6 +51,7 @@ class TrackEntry:
             duration_seconds=data.get("duration_seconds", 0.0),
             volume=data.get("volume", 100),
             takes_volume=data.get("takes_volume", 100),
+            inspiration_track_id=data.get("inspiration_track_id", 0),
             preferred_takes=takes,
         )
 
