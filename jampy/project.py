@@ -135,7 +135,7 @@ class Project:
 
     def load_setlist(self) -> None:
         if self.setlist_path.exists():
-            data = json.loads(self.setlist_path.read_text())
+            data = json.loads(_strip_json_comments(self.setlist_path.read_text()))
             self.setlist = Setlist.from_dict(data)
 
     def add_backing_track(self, source_path: Path, track_name: str | None = None) -> TrackEntry:

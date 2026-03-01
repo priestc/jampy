@@ -15,7 +15,7 @@ def sync_down(project_path: Path, remote: str) -> None:
     click.echo(f"Syncing down from {source} ...")
     try:
         result = subprocess.run(
-            ["rsync", "-avz", source, f"{project_path}/"],
+            ["rsync", "-avz", "--checksum", source, f"{project_path}/"],
             capture_output=True, text=True,
         )
         if result.returncode == 0:
@@ -39,7 +39,7 @@ def sync_up(project_path: Path, remote: str) -> None:
     click.echo(f"Syncing up to {dest} ...")
     try:
         result = subprocess.run(
-            ["rsync", "-avz", f"{project_path}/", dest],
+            ["rsync", "-avz", "--checksum", f"{project_path}/", dest],
             capture_output=True, text=True,
         )
         if result.returncode == 0:

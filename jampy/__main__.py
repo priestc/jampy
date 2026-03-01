@@ -273,11 +273,19 @@ def new_project() -> None:
     if config.backup_server:
         project.setlist.backup_server = config.backup_server
         project.save_setlist()
+
     click.echo(f"Created project: {project.path}")
     click.echo("  backing_tracks/")
     click.echo("  completed_takes/")
     click.echo("  sessions/")
     click.echo("  setlist.json")
+    click.echo()
+    click.echo("To enable inspiration features, add an \"inspiration\" key to setlist.json:")
+    click.echo('  "inspiration": [')
+    click.echo('    {"genre": "Rock"},')
+    click.echo('    {"artist": "Miles Davis"},')
+    click.echo('    {"genre": "Blues", "decade": "1960s"}')
+    click.echo('  ]')
 
 
 @main.command()
