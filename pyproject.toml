@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "jampy"
-version = "0.4.1"
+version = "0.4.2"
 description = "Music Recording Session Manager"
 requires-python = ">=3.9"
 dependencies = [
