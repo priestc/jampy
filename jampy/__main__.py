@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import select
 import termios
@@ -279,6 +280,18 @@ def new_project() -> None:
     click.echo("  completed_takes/")
     click.echo("  sessions/")
     click.echo("  setlist.json")
+
+    # Scan backing_tracks/ and update setlist
+    saved_cwd = Path.cwd()
+    try:
+        os.chdir(project.path)
+        ctx = click.get_current_context()
+        ctx.invoke(update_setlist)
+    except SystemExit:
+        pass
+    finally:
+        os.chdir(saved_cwd)
+
     click.echo()
     click.echo("To enable inspiration features, add an \"inspiration\" key to setlist.json:")
     click.echo('  "inspiration": [')
