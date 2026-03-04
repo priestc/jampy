@@ -1255,6 +1255,7 @@ def inspiration() -> None:
     out_dev = _resolve_device(sd, config.output_device, "output")
     out_info = sd.query_devices(out_dev, "output")
     out_channels = min(config.output_channels, out_info["max_output_channels"])
+    playback_sr = int(out_info["default_samplerate"])
 
     tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
     volume = config.inspiration_volume
@@ -1297,7 +1298,7 @@ def inspiration() -> None:
             # Play via Mixer — apply ReplayGain if available
             rg_gain = track_info.get("replaygain_track_gain")
             rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
-            mixer = Mixer(config.sample_rate)
+            mixer = Mixer(playback_sr)
             mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
             mixer.set_playing(True)
 
@@ -1313,7 +1314,7 @@ def inspiration() -> None:
                     raise sd.CallbackStop
 
             with sd.OutputStream(
-                samplerate=config.sample_rate,
+                samplerate=playback_sr,
                 blocksize=config.buffer_size,
                 device=out_dev,
                 channels=max(1, out_channels),
