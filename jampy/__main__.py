@@ -1315,7 +1315,6 @@ def inspiration() -> None:
 
             with sd.OutputStream(
                 samplerate=playback_sr,
-                blocksize=config.buffer_size,
                 device=out_dev,
                 channels=max(1, out_channels),
                 dtype="float32",
