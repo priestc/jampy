@@ -1247,7 +1247,7 @@ def inspiration() -> None:
     tracks, config = _query_inspiration_tracks()
     server = config.inspiration_server.rstrip("/")
     click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
-    click.echo("Controls: [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
+    click.echo("Controls: [space] pause/play  [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
 
     import sounddevice as sd
     from .audio.mixer import Mixer
@@ -1320,7 +1320,7 @@ def inspiration() -> None:
                 dtype="float32",
                 callback=callback,
             ):
-                while mixer.is_playing and not mixer.is_finished:
+                while not mixer.is_finished and not skip:
                     if select.select([sys.stdin], [], [], 0.2)[0]:
                         key = sys.stdin.read(1).lower()
                         if key == "q":
@@ -1331,6 +1331,13 @@ def inspiration() -> None:
                             skip = True
                             mixer.set_playing(False)
                             break
+                        elif key == " ":
+                            if mixer.is_playing:
+                                mixer.set_playing(False)
+                                click.echo("  || Paused")
+                            else:
+                                mixer.set_playing(True)
+                                click.echo("  >> Playing")
                         elif key == "l":
                             volume = max(0.0, volume - 0.1)
                             mixer.set_volume("inspiration", volume * rg_linear)
