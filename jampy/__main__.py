@@ -1313,13 +1313,26 @@ def inspiration() -> None:
                 if mixer.is_finished:
                     raise sd.CallbackStop
 
-            with sd.OutputStream(
-                samplerate=playback_sr,
-                device=out_dev,
-                channels=max(1, out_channels),
-                dtype="float32",
-                callback=callback,
-            ):
+            for _attempt in range(3):
+                try:
+                    stream_ctx = sd.OutputStream(
+                        samplerate=playback_sr,
+                        device=out_dev,
+                        channels=max(1, out_channels),
+                        dtype="float32",
+                        callback=callback,
+                    )
+                    break
+                except sd.PortAudioError:
+                    if _attempt == 2:
+                        raise
+                    import time
+                    time.sleep(0.5)
+                    mixer.set_playing(False)
+                    mixer = Mixer(playback_sr)
+                    mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                    mixer.set_playing(True)
+            with stream_ctx:
                 while not mixer.is_finished and not skip:
                     if select.select([sys.stdin], [], [], 0.2)[0]:
                         key = sys.stdin.read(1).lower()
