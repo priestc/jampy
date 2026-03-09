@@ -1314,7 +1314,8 @@ def inspiration() -> None:
                     raise sd.CallbackStop
 
             import time as _time
-            for _attempt in range(3):
+            _stream = None
+            for _attempt in range(5):
                 _stream = None
                 try:
                     _stream = sd.OutputStream(
@@ -1332,13 +1333,19 @@ def inspiration() -> None:
                             _stream.close()
                         except Exception:
                             pass
-                    if _attempt == 2:
-                        raise
-                    _time.sleep(0.5)
+                        _stream = None
+                    if _attempt == 4:
+                        click.echo("  [audio error — skipping track]")
+                        break
+                    _time.sleep(2.0)
                     mixer.set_playing(False)
                     mixer = Mixer(playback_sr)
                     mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
                     mixer.set_playing(True)
+            if _stream is None:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                continue
             try:
                 while not mixer.is_finished and not skip:
                     if select.select([sys.stdin], [], [], 0.2)[0]:
@@ -1373,6 +1380,7 @@ def inspiration() -> None:
             finally:
                 _stream.stop()
                 _stream.close()
+                _time.sleep(0.3)
 
             # Clean up downloaded file
             if tmp_path.exists():
