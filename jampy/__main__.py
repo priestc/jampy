@@ -1263,8 +1263,37 @@ def inspiration() -> None:
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
+    import threading as _threading
+
+    def _prefetch(track_info):
+        """Start downloading track_info in a background thread.
+        Returns a callable that blocks until done and returns (Path, error_str)."""
+        track_id = track_info["id"]
+        fmt = track_info.get("format", "flac") or "flac"
+        tmp_path = Path(tmpdir) / f"track_{track_id}.{fmt}"
+        result = [None, None]  # [path, error]
+
+        def _run():
+            dl_req = urllib.request.Request(
+                f"{server}/library/api/tracks/{track_id}/download/",
+                headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
+            )
+            try:
+                with urllib.request.urlopen(dl_req) as resp:
+                    tmp_path.write_bytes(resp.read())
+                result[0] = tmp_path
+            except urllib.error.URLError as e:
+                result[1] = str(e)
+
+        t = _threading.Thread(target=_run, daemon=True)
+        t.start()
+        return lambda: (t.join(), result[0], result[1])[1:]
+
     try:
         tty.setcbreak(fd)
+
+        # Kick off download of the first track before the loop starts
+        _wait_download = _prefetch(tracks[0])
 
         for i, track_info in enumerate(tracks):
             title = track_info.get("title", "Unknown")
@@ -1280,19 +1309,12 @@ def inspiration() -> None:
             else:
                 click.echo(f"         ({dur_str})")
 
-            # Download track
-            track_id = track_info["id"]
-            fmt = track_info.get("format", "flac") or "flac"
-            tmp_path = Path(tmpdir) / f"track_{track_id}.{fmt}"
-            dl_req = urllib.request.Request(
-                f"{server}/library/api/tracks/{track_id}/download/",
-                headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
-            )
-            try:
-                with urllib.request.urlopen(dl_req) as resp:
-                    tmp_path.write_bytes(resp.read())
-            except urllib.error.URLError as e:
-                click.echo(f"  Download failed: {e}")
+            # Wait for this track's download to finish
+            tmp_path, dl_error = _wait_download()
+            if dl_error:
+                click.echo(f"  Download failed: {dl_error}")
+                if i + 1 < len(tracks):
+                    _wait_download = _prefetch(tracks[i + 1])
                 continue
 
             # Play via Mixer — apply ReplayGain if available
@@ -1345,7 +1367,12 @@ def inspiration() -> None:
             if _stream is None:
                 if tmp_path.exists():
                     tmp_path.unlink()
+                if i + 1 < len(tracks):
+                    _wait_download = _prefetch(tracks[i + 1])
                 continue
+            # Stream started — prefetch next track while this one plays
+            if i + 1 < len(tracks):
+                _wait_download = _prefetch(tracks[i + 1])
             try:
                 while not mixer.is_finished and not skip:
                     if select.select([sys.stdin], [], [], 0.2)[0]:
