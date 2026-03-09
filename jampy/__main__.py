@@ -1313,26 +1313,33 @@ def inspiration() -> None:
                 if mixer.is_finished:
                     raise sd.CallbackStop
 
+            import time as _time
             for _attempt in range(3):
+                _stream = None
                 try:
-                    stream_ctx = sd.OutputStream(
+                    _stream = sd.OutputStream(
                         samplerate=playback_sr,
                         device=out_dev,
                         channels=max(1, out_channels),
                         dtype="float32",
                         callback=callback,
                     )
+                    _stream.start()
                     break
                 except sd.PortAudioError:
+                    if _stream is not None:
+                        try:
+                            _stream.close()
+                        except Exception:
+                            pass
                     if _attempt == 2:
                         raise
-                    import time
-                    time.sleep(0.5)
+                    _time.sleep(0.5)
                     mixer.set_playing(False)
                     mixer = Mixer(playback_sr)
                     mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
                     mixer.set_playing(True)
-            with stream_ctx:
+            try:
                 while not mixer.is_finished and not skip:
                     if select.select([sys.stdin], [], [], 0.2)[0]:
                         key = sys.stdin.read(1).lower()
@@ -1363,6 +1370,9 @@ def inspiration() -> None:
                             config.inspiration_volume = volume
                             config.save()
                             click.echo(f"  Volume: {int(volume * 100)}%")
+            finally:
+                _stream.stop()
+                _stream.close()
 
             # Clean up downloaded file
             if tmp_path.exists():
