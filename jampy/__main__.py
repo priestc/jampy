@@ -1260,6 +1260,13 @@ def inspiration() -> None:
     tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
     volume = config.inspiration_volume
 
+    import subprocess as _subprocess
+    _caffeinate = None
+    try:
+        _caffeinate = _subprocess.Popen(["caffeinate", "-i"])
+    except FileNotFoundError:
+        pass  # not macOS
+
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
@@ -1419,6 +1426,8 @@ def inspiration() -> None:
     except KeyboardInterrupt:
         click.echo("\nInterrupted.")
     finally:
+        if _caffeinate is not None:
+            _caffeinate.terminate()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         # Clean up temp directory
         import shutil
