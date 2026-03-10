@@ -1349,7 +1349,7 @@ def inspiration() -> None:
                     )
                     _stream.start()
                     break
-                except sd.PortAudioError:
+                except sd.PortAudioError as _pa_err:
                     if _stream is not None:
                         try:
                             _stream.close()
@@ -1357,8 +1357,9 @@ def inspiration() -> None:
                             pass
                         _stream = None
                     if _attempt == 4:
-                        click.echo("  [audio error — skipping track]")
+                        click.echo(f"  [audio error after 5 attempts — skipping track: {_pa_err}]")
                         break
+                    click.echo(f"  [audio error (attempt {_attempt + 1}/5), retrying in 2s: {_pa_err}]")
                     _time.sleep(2.0)
                     mixer.set_playing(False)
                     mixer = Mixer(playback_sr)
