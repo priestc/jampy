@@ -1277,6 +1277,8 @@ def inspiration() -> None:
         Returns a callable that blocks until done and returns (Path, error_str)."""
         track_id = track_info["id"]
         fmt = track_info.get("format", "flac") or "flac"
+        title = track_info.get("title", "Unknown")
+        artist = track_info.get("artist", "Unknown")
         tmp_path = Path(tmpdir) / f"track_{track_id}.{fmt}"
         result = [None, None]  # [path, error]
 
@@ -1291,9 +1293,11 @@ def inspiration() -> None:
                     data = resp.read()
                     tmp_path.write_bytes(data)
                     result[0] = tmp_path
+                click.echo(f"  [prefetch] done: {artist} - {title} ({len(data) // 1024} KB)")
             except Exception as e:
                 import traceback
                 result[1] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
+                click.echo(f"  [prefetch] failed: {artist} - {title}: {type(e).__name__}: {e}")
 
         t = _threading.Thread(target=_run, daemon=True)
         t.start()
