@@ -1269,7 +1269,8 @@ def inspiration() -> None:
     import threading as _threading
     _wake_ctx = _keep.running()
     _wakelock = _wake_ctx.__enter__()
-    click.echo(f"[system] sleep inhibit active: {getattr(_wakelock, 'success', 'unknown')}")
+    _wake_success = getattr(_wakelock, 'success', None) or getattr(_wakelock, 'active', None)
+    click.echo(f"[system] sleep inhibit: {_wakelock!r}  (type={type(_wakelock).__name__})")
 
     def _prefetch(track_info):
         """Start downloading track_info in a background thread.
