@@ -1309,6 +1309,19 @@ def inspiration() -> None:
 
         return _wait
 
+    _now_playing = [None]  # mutable slot shared with status thread
+    _stop_status = _threading.Event()
+
+    def _status_printer():
+        while not _stop_status.wait(timeout=30):
+            info = _now_playing[0]
+            if info:
+                click.echo(f"  [now playing] {info['artist']} - {info['title']}"
+                           + (f" ({info['year']})" if info.get('year') else ""))
+
+    _status_thread = _threading.Thread(target=_status_printer, daemon=True)
+    _status_thread.start()
+
     try:
         tty.setcbreak(fd)
 
@@ -1324,6 +1337,7 @@ def inspiration() -> None:
             dur = track_info.get("duration") or 0
             dur_str = format_duration(dur)
             year_str = f" ({year})" if year else ""
+            _now_playing[0] = {"artist": artist, "title": title, "year": year}
             click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}{year_str}")
             if album:
                 click.echo(f"         {album} ({dur_str})")
@@ -1458,11 +1472,12 @@ def inspiration() -> None:
 
     except KeyboardInterrupt:
         click.echo("\nInterrupted.")
-    except Exception as _top_err:
+    except Exception as _top_err:  # noqa: F841
         import traceback as _tb
         click.echo(f"\n[FATAL] Unhandled exception:\n{_tb.format_exc()}", err=True)
         raise
     finally:
+        _stop_status.set()
         _wake_ctx.__exit__(None, None, None)
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         # Clean up temp directory
