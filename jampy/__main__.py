@@ -1282,15 +1282,21 @@ def inspiration() -> None:
                 headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
             )
             try:
-                with urllib.request.urlopen(dl_req) as resp:
+                with urllib.request.urlopen(dl_req, timeout=30) as resp:
                     tmp_path.write_bytes(resp.read())
                 result[0] = tmp_path
-            except urllib.error.URLError as e:
+            except Exception as e:
                 result[1] = str(e)
 
         t = _threading.Thread(target=_run, daemon=True)
         t.start()
-        return lambda: (t.join(), result[0], result[1])[1:]
+
+        def _wait():
+            while t.is_alive():
+                t.join(timeout=0.2)
+            return result[0], result[1]
+
+        return _wait
 
     try:
         tty.setcbreak(fd)
