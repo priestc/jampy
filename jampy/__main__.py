@@ -1238,11 +1238,16 @@ def list_inspirations() -> None:
 
 
 @main.command()
-def inspiration() -> None:
+@click.option("--verbose", "-v", is_flag=True, default=False, help="Print debug info.")
+def inspiration(verbose: bool) -> None:
     """Play tracks from your music library for inspiration."""
     import tempfile
     import urllib.request
     import urllib.error
+
+    def vlog(msg: str) -> None:
+        if verbose:
+            click.echo(msg)
 
     tracks, config = _query_inspiration_tracks()
     server = config.inspiration_server.rstrip("/")
@@ -1256,10 +1261,10 @@ def inspiration() -> None:
     out_info = sd.query_devices(out_dev, "output")
     out_channels = min(config.output_channels, out_info["max_output_channels"])
     playback_sr = int(out_info["default_samplerate"])
-    click.echo(f"[audio] device={out_info['name']!r}  channels={out_channels}  sample_rate={playback_sr} Hz")
+    vlog(f"[audio] device={out_info['name']!r}  channels={out_channels}  sample_rate={playback_sr} Hz")
 
     tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
-    click.echo(f"[audio] tmp dir: {tmpdir}")
+    vlog(f"[audio] tmp dir: {tmpdir}")
     volume = config.inspiration_volume
 
     fd = sys.stdin.fileno()
@@ -1269,8 +1274,7 @@ def inspiration() -> None:
     import threading as _threading
     _wake_ctx = _keep.running()
     _wakelock = _wake_ctx.__enter__()
-    _wake_success = getattr(_wakelock, 'success', None) or getattr(_wakelock, 'active', None)
-    click.echo(f"[system] sleep inhibit: {_wakelock!r}  (type={type(_wakelock).__name__})")
+    vlog(f"[system] sleep inhibit: {_wakelock!r}  (type={type(_wakelock).__name__})")
 
     def _prefetch(track_info):
         """Start downloading track_info in a background thread.
@@ -1293,7 +1297,7 @@ def inspiration() -> None:
                     data = resp.read()
                     tmp_path.write_bytes(data)
                     result[0] = tmp_path
-                click.echo(f"  [prefetch] done: {artist} - {title} ({len(data) // 1024} KB)")
+                vlog(f"  [prefetch] done: {artist} - {title} ({len(data) // 1024} KB)")
             except Exception as e:
                 import traceback
                 result[1] = f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
@@ -1326,7 +1330,7 @@ def inspiration() -> None:
         tty.setcbreak(fd)
 
         # Kick off download of the first track before the loop starts
-        click.echo(f"[prefetch] starting download of track 1/{len(tracks)}")
+        vlog(f"[prefetch] starting download of track 1/{len(tracks)}")
         _wait_download = _prefetch(tracks[0])
 
         for i, track_info in enumerate(tracks):
@@ -1345,20 +1349,20 @@ def inspiration() -> None:
                 click.echo(f"         ({dur_str})")
 
             # Wait for this track's download to finish
-            click.echo(f"  [download] waiting for track {i + 1} (id={track_info['id']})...")
+            vlog(f"  [download] waiting for track {i + 1} (id={track_info['id']})...")
             tmp_path, dl_error = _wait_download()
             if dl_error:
                 click.echo(f"  [download] FAILED for track {i + 1} (id={track_info['id']}):\n{dl_error}")
                 if i + 1 < len(tracks):
-                    click.echo(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                    vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                     _wait_download = _prefetch(tracks[i + 1])
                 continue
-            click.echo(f"  [download] OK — {tmp_path} ({tmp_path.stat().st_size // 1024} KB)")
+            vlog(f"  [download] OK — {tmp_path} ({tmp_path.stat().st_size // 1024} KB)")
 
             # Play via Mixer — apply ReplayGain if available
             rg_gain = track_info.get("replaygain_track_gain")
             rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
-            click.echo(f"  [mixer] replaygain={rg_gain} ({rg_linear:.3f}x)  volume={volume:.2f}")
+            vlog(f"  [mixer] replaygain={rg_gain} ({rg_linear:.3f}x)  volume={volume:.2f}")
             mixer = Mixer(playback_sr)
             mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
             mixer.set_playing(True)
@@ -1378,7 +1382,7 @@ def inspiration() -> None:
             _stream = None
             for _attempt in range(5):
                 _stream = None
-                click.echo(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
+                vlog(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
                 try:
                     _stream = sd.OutputStream(
                         samplerate=playback_sr,
@@ -1387,26 +1391,25 @@ def inspiration() -> None:
                         dtype="float32",
                         callback=callback,
                     )
-                    click.echo(f"  [stream] calling start()...")
+                    vlog(f"  [stream] calling start()...")
                     _stream.start()
-                    click.echo(f"  [stream] started OK")
+                    vlog(f"  [stream] started OK")
                     break
                 except sd.PortAudioError as _pa_err:
                     import traceback as _tb
-                    click.echo(f"  [stream] PortAudioError on attempt {_attempt + 1}/5:\n"
-                               f"    {_pa_err}\n"
-                               f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n"
-                               f"{_tb.format_exc()}")
+                    click.echo(f"  [audio error] attempt {_attempt + 1}/5: {_pa_err}")
+                    if verbose:
+                        click.echo(f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n{_tb.format_exc()}")
                     if _stream is not None:
                         try:
                             _stream.close()
                         except Exception as _ce:
-                            click.echo(f"  [stream] close() also failed: {_ce}")
+                            vlog(f"  [stream] close() also failed: {_ce}")
                         _stream = None
                     if _attempt == 4:
-                        click.echo(f"  [stream] all 5 attempts failed — skipping track")
+                        click.echo(f"  [audio error] all 5 attempts failed — skipping track")
                         break
-                    click.echo(f"  [stream] waiting 2s before retry...")
+                    vlog(f"  [stream] waiting 2s before retry...")
                     _time.sleep(2.0)
                     mixer.set_playing(False)
                     mixer = Mixer(playback_sr)
@@ -1416,12 +1419,12 @@ def inspiration() -> None:
                 if tmp_path.exists():
                     tmp_path.unlink()
                 if i + 1 < len(tracks):
-                    click.echo(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                    vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                     _wait_download = _prefetch(tracks[i + 1])
                 continue
             # Stream started — prefetch next track while this one plays
             if i + 1 < len(tracks):
-                click.echo(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                 _wait_download = _prefetch(tracks[i + 1])
             try:
                 while not mixer.is_finished and not skip:
@@ -1455,16 +1458,14 @@ def inspiration() -> None:
                             config.save()
                             click.echo(f"  Volume: {int(volume * 100)}%")
             finally:
-                click.echo(f"  [stream] stopping and closing...")
+                vlog(f"  [stream] stopping and closing...")
                 try:
                     _stream.stop()
                     _stream.close()
                 except Exception as _se:
-                    click.echo(f"  [stream] stop/close error: {_se}")
+                    vlog(f"  [stream] stop/close error: {_se}")
                 _time.sleep(0.3)
 
-            # Clean up downloaded file
-            click.echo(f"  [cleanup] removing {tmp_path}")
             if tmp_path.exists():
                 tmp_path.unlink()
 
@@ -1486,9 +1487,8 @@ def inspiration() -> None:
         _wake_exit.start()
         _wake_exit.join(timeout=2.0)
         if _wake_exit.is_alive():
-            click.echo("[system] sleep inhibit release timed out — ignoring")
+            vlog("[system] sleep inhibit release timed out — ignoring")
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        # Clean up temp directory
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
