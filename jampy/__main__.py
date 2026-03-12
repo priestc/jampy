@@ -1478,7 +1478,15 @@ def inspiration() -> None:
         raise
     finally:
         _stop_status.set()
-        _wake_ctx.__exit__(None, None, None)
+        # Run wakepy cleanup in a daemon thread so it can't block the exit
+        _wake_exit = _threading.Thread(
+            target=lambda: _wake_ctx.__exit__(None, None, None),
+            daemon=True,
+        )
+        _wake_exit.start()
+        _wake_exit.join(timeout=2.0)
+        if _wake_exit.is_alive():
+            click.echo("[system] sleep inhibit release timed out — ignoring")
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         # Clean up temp directory
         import shutil
