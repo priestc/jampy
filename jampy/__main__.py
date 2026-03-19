@@ -1329,147 +1329,155 @@ def inspiration(verbose: bool) -> None:
     try:
         tty.setcbreak(fd)
 
-        # Kick off download of the first track before the loop starts
-        vlog(f"[prefetch] starting download of track 1/{len(tracks)}")
-        _wait_download = _prefetch(tracks[0])
+        while True:
+            # Kick off download of the first track before the loop starts
+            vlog(f"[prefetch] starting download of track 1/{len(tracks)}")
+            _wait_download = _prefetch(tracks[0])
 
-        for i, track_info in enumerate(tracks):
-            title = track_info.get("title", "Unknown")
-            artist = track_info.get("artist", "Unknown")
-            album = track_info.get("album", "")
-            year = track_info.get("year") or ""
-            dur = track_info.get("duration") or 0
-            dur_str = format_duration(dur)
-            year_str = f" ({year})" if year else ""
-            _now_playing[0] = {"artist": artist, "title": title, "year": year}
-            click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}{year_str}")
-            if album:
-                click.echo(f"         {album} ({dur_str})")
-            else:
-                click.echo(f"         ({dur_str})")
+            for i, track_info in enumerate(tracks):
+                title = track_info.get("title", "Unknown")
+                artist = track_info.get("artist", "Unknown")
+                album = track_info.get("album", "")
+                year = track_info.get("year") or ""
+                dur = track_info.get("duration") or 0
+                dur_str = format_duration(dur)
+                year_str = f" ({year})" if year else ""
+                _now_playing[0] = {"artist": artist, "title": title, "year": year}
+                click.echo(f"[{i + 1}/{len(tracks)}] {artist} - {title}{year_str}")
+                if album:
+                    click.echo(f"         {album} ({dur_str})")
+                else:
+                    click.echo(f"         ({dur_str})")
 
-            # Wait for this track's download to finish
-            vlog(f"  [download] waiting for track {i + 1} (id={track_info['id']})...")
-            tmp_path, dl_error = _wait_download()
-            if dl_error:
-                click.echo(f"  [download] FAILED for track {i + 1} (id={track_info['id']}):\n{dl_error}")
+                # Wait for this track's download to finish
+                vlog(f"  [download] waiting for track {i + 1} (id={track_info['id']})...")
+                tmp_path, dl_error = _wait_download()
+                if dl_error:
+                    click.echo(f"  [download] FAILED for track {i + 1} (id={track_info['id']}):\n{dl_error}")
+                    if i + 1 < len(tracks):
+                        vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                        _wait_download = _prefetch(tracks[i + 1])
+                    continue
+                vlog(f"  [download] OK — {tmp_path} ({tmp_path.stat().st_size // 1024} KB)")
+
+                # Play via Mixer — apply ReplayGain if available
+                rg_gain = track_info.get("replaygain_track_gain")
+                rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
+                vlog(f"  [mixer] replaygain={rg_gain} ({rg_linear:.3f}x)  volume={volume:.2f}")
+                mixer = Mixer(playback_sr)
+                mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                mixer.set_playing(True)
+
+                skip = False
+
+                def callback(outdata, frames, time_info, status):
+                    mix = mixer.read(frames)
+                    if out_channels == 2:
+                        outdata[:] = mix
+                    else:
+                        outdata[:, 0] = mix[:, 0]
+                    if mixer.is_finished:
+                        raise sd.CallbackStop
+
+                import time as _time
+                _stream = None
+                for _attempt in range(5):
+                    _stream = None
+                    vlog(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
+                    try:
+                        _stream = sd.OutputStream(
+                            samplerate=playback_sr,
+                            device=out_dev,
+                            channels=max(1, out_channels),
+                            dtype="float32",
+                            callback=callback,
+                        )
+                        vlog(f"  [stream] calling start()...")
+                        _stream.start()
+                        vlog(f"  [stream] started OK")
+                        break
+                    except sd.PortAudioError as _pa_err:
+                        import traceback as _tb
+                        click.echo(f"  [audio error] attempt {_attempt + 1}/5: {_pa_err}")
+                        if verbose:
+                            click.echo(f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n{_tb.format_exc()}")
+                        if _stream is not None:
+                            try:
+                                _stream.close()
+                            except Exception as _ce:
+                                vlog(f"  [stream] close() also failed: {_ce}")
+                            _stream = None
+                        if _attempt == 4:
+                            click.echo(f"  [audio error] all 5 attempts failed — skipping track")
+                            break
+                        vlog(f"  [stream] waiting 2s before retry...")
+                        _time.sleep(2.0)
+                        mixer.set_playing(False)
+                        mixer = Mixer(playback_sr)
+                        mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                        mixer.set_playing(True)
+                if _stream is None:
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                    if i + 1 < len(tracks):
+                        vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                        _wait_download = _prefetch(tracks[i + 1])
+                    continue
+                # Stream started — prefetch next track while this one plays
                 if i + 1 < len(tracks):
                     vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                     _wait_download = _prefetch(tracks[i + 1])
-                continue
-            vlog(f"  [download] OK — {tmp_path} ({tmp_path.stat().st_size // 1024} KB)")
-
-            # Play via Mixer — apply ReplayGain if available
-            rg_gain = track_info.get("replaygain_track_gain")
-            rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
-            vlog(f"  [mixer] replaygain={rg_gain} ({rg_linear:.3f}x)  volume={volume:.2f}")
-            mixer = Mixer(playback_sr)
-            mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
-            mixer.set_playing(True)
-
-            skip = False
-
-            def callback(outdata, frames, time_info, status):
-                mix = mixer.read(frames)
-                if out_channels == 2:
-                    outdata[:] = mix
-                else:
-                    outdata[:, 0] = mix[:, 0]
-                if mixer.is_finished:
-                    raise sd.CallbackStop
-
-            import time as _time
-            _stream = None
-            for _attempt in range(5):
-                _stream = None
-                vlog(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
                 try:
-                    _stream = sd.OutputStream(
-                        samplerate=playback_sr,
-                        device=out_dev,
-                        channels=max(1, out_channels),
-                        dtype="float32",
-                        callback=callback,
-                    )
-                    vlog(f"  [stream] calling start()...")
-                    _stream.start()
-                    vlog(f"  [stream] started OK")
-                    break
-                except sd.PortAudioError as _pa_err:
-                    import traceback as _tb
-                    click.echo(f"  [audio error] attempt {_attempt + 1}/5: {_pa_err}")
-                    if verbose:
-                        click.echo(f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n{_tb.format_exc()}")
-                    if _stream is not None:
-                        try:
-                            _stream.close()
-                        except Exception as _ce:
-                            vlog(f"  [stream] close() also failed: {_ce}")
-                        _stream = None
-                    if _attempt == 4:
-                        click.echo(f"  [audio error] all 5 attempts failed — skipping track")
-                        break
-                    vlog(f"  [stream] waiting 2s before retry...")
-                    _time.sleep(2.0)
-                    mixer.set_playing(False)
-                    mixer = Mixer(playback_sr)
-                    mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
-                    mixer.set_playing(True)
-            if _stream is None:
+                    while not mixer.is_finished and not skip:
+                        if select.select([sys.stdin], [], [], 0.2)[0]:
+                            key = sys.stdin.read(1).lower()
+                            if key == "q":
+                                click.echo("\nQuitting inspiration mode.")
+                                return
+                            elif key == "s":
+                                click.echo("  >> Skip")
+                                skip = True
+                                mixer.set_playing(False)
+                                break
+                            elif key == " ":
+                                if mixer.is_playing:
+                                    mixer.set_playing(False)
+                                    click.echo("  || Paused")
+                                else:
+                                    mixer.set_playing(True)
+                                    click.echo("  >> Playing")
+                            elif key == "l":
+                                volume = max(0.0, volume - 0.1)
+                                mixer.set_volume("inspiration", volume * rg_linear)
+                                config.inspiration_volume = volume
+                                config.save()
+                                click.echo(f"  Volume: {int(volume * 100)}%")
+                            elif key == "u":
+                                volume = min(2.0, volume + 0.1)
+                                mixer.set_volume("inspiration", volume * rg_linear)
+                                config.inspiration_volume = volume
+                                config.save()
+                                click.echo(f"  Volume: {int(volume * 100)}%")
+                finally:
+                    vlog(f"  [stream] stopping and closing...")
+                    try:
+                        _stream.stop()
+                        _stream.close()
+                    except Exception as _se:
+                        vlog(f"  [stream] stop/close error: {_se}")
+                    _time.sleep(0.3)
+
                 if tmp_path.exists():
                     tmp_path.unlink()
-                if i + 1 < len(tracks):
-                    vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
-                    _wait_download = _prefetch(tracks[i + 1])
-                continue
-            # Stream started — prefetch next track while this one plays
-            if i + 1 < len(tracks):
-                vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
-                _wait_download = _prefetch(tracks[i + 1])
-            try:
-                while not mixer.is_finished and not skip:
-                    if select.select([sys.stdin], [], [], 0.2)[0]:
-                        key = sys.stdin.read(1).lower()
-                        if key == "q":
-                            click.echo("\nQuitting inspiration mode.")
-                            return
-                        elif key == "s":
-                            click.echo("  >> Skip")
-                            skip = True
-                            mixer.set_playing(False)
-                            break
-                        elif key == " ":
-                            if mixer.is_playing:
-                                mixer.set_playing(False)
-                                click.echo("  || Paused")
-                            else:
-                                mixer.set_playing(True)
-                                click.echo("  >> Playing")
-                        elif key == "l":
-                            volume = max(0.0, volume - 0.1)
-                            mixer.set_volume("inspiration", volume * rg_linear)
-                            config.inspiration_volume = volume
-                            config.save()
-                            click.echo(f"  Volume: {int(volume * 100)}%")
-                        elif key == "u":
-                            volume = min(2.0, volume + 0.1)
-                            mixer.set_volume("inspiration", volume * rg_linear)
-                            config.inspiration_volume = volume
-                            config.save()
-                            click.echo(f"  Volume: {int(volume * 100)}%")
-            finally:
-                vlog(f"  [stream] stopping and closing...")
-                try:
-                    _stream.stop()
-                    _stream.close()
-                except Exception as _se:
-                    vlog(f"  [stream] stop/close error: {_se}")
-                _time.sleep(0.3)
 
-            if tmp_path.exists():
-                tmp_path.unlink()
-
-        click.echo("\nAll tracks played.")
+            # Batch exhausted — fetch next batch from server (obeys playlist settings)
+            vlog("[playlist] batch complete, fetching next batch...")
+            new_tracks, _ = _query_inspiration_tracks()
+            if not new_tracks:
+                click.echo("\nNo more tracks available.")
+                break
+            tracks = new_tracks
+            click.echo(f"\n[playlist] fetched {len(tracks)} more tracks.")
 
     except KeyboardInterrupt:
         click.echo("\nInterrupted.")
