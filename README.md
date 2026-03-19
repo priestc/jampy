@@ -14,7 +14,7 @@ See [Prerequisites](docs/prerequisites.md) for install instructions for each ope
 ## Install
 
 ```bash
-pip install -e .
+pipx install git+https://github.com/priestc/jampy.git
 ```
 
 ## Usage

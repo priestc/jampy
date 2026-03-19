@@ -1479,16 +1479,22 @@ def inspiration(verbose: bool) -> None:
         raise
     finally:
         _stop_status.set()
-        # Run wakepy cleanup in a daemon thread so it can't block the exit
-        _wake_exit = _threading.Thread(
-            target=lambda: _wake_ctx.__exit__(None, None, None),
-            daemon=True,
-        )
-        _wake_exit.start()
-        _wake_exit.join(timeout=2.0)
-        if _wake_exit.is_alive():
-            vlog("[system] sleep inhibit release timed out — ignoring")
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        # Must run in the same thread where __enter__ was called (wakepy is not thread-safe).
+        # Use SIGALRM to enforce a 3-second timeout so a hung wakepy release can't freeze exit.
+        import signal as _signal
+        def _wake_timeout(signum, frame): raise TimeoutError
+        _old_handler = _signal.signal(_signal.SIGALRM, _wake_timeout)
+        _signal.alarm(3)
+        try:
+            _wake_ctx.__exit__(None, None, None)
+        except Exception:
+            pass
+        finally:
+            _signal.alarm(0)
+            _signal.signal(_signal.SIGALRM, _old_handler)
+        # TCSANOW applies immediately; TCSADRAIN waits for output to drain and
+        # can block indefinitely if the screensaver has locked the terminal.
+        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
 
