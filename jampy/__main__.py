@@ -1320,8 +1320,8 @@ def inspiration(verbose: bool) -> None:
         while not _stop_status.wait(timeout=30):
             info = _now_playing[0]
             if info:
-                click.echo(f"  [now playing] {info['artist']} - {info['title']}"
-                           + (f" ({info['year']})" if info.get('year') else ""))
+                vlog(f"  [now playing] {info['artist']} - {info['title']}"
+                     + (f" ({info['year']})" if info.get('year') else ""))
 
     _status_thread = _threading.Thread(target=_status_printer, daemon=True)
     _status_thread.start()
