@@ -1397,6 +1397,14 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
+    import queue as _queue
+    from .streamdeck_controller import StreamDeckController
+    sd_keys: _queue.Queue[str] = _queue.Queue()
+    streamdeck = StreamDeckController()
+    if streamdeck.connect(sd_keys.put):
+        click.echo("StreamDeck connected.")
+        streamdeck.use_inspiration_layout()
+
     from wakepy import keep as _keep
     import threading as _threading
     _wake_ctx = _keep.running()
@@ -1504,42 +1512,48 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                     engine.mixer.reset()
                     engine.mixer.set_playing(True)
                     click.echo(f"  [rec] Recording take {take_num}: {fname}")
+                    streamdeck.update_inspiration(True, f"{artist} - {title}")
                     if i + 1 < len(tracks):
                         vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                         _wait_download = _prefetch(tracks[i + 1])
                     while not engine.mixer.is_finished and not skip:
-                        if select.select([sys.stdin], [], [], 0.2)[0]:
-                            key = sys.stdin.read(1).lower()
-                            if key == "q":
+                        key = None
+                        try:
+                            key = sd_keys.get_nowait()
+                        except _queue.Empty:
+                            if select.select([sys.stdin], [], [], 0.2)[0]:
+                                key = sys.stdin.read(1).lower()
+                        if key == "q":
+                            engine.mixer.set_playing(False)
+                            engine.stop_recording()
+                            if rec_path.exists():
+                                rec_path.unlink()
+                            click.echo("\nQuitting inspiration mode.")
+                            return
+                        elif key == "s":
+                            click.echo("  >> Skip (take discarded)")
+                            skip = True
+                            engine.mixer.set_playing(False)
+                        elif key == " ":
+                            if engine.mixer.is_playing:
                                 engine.mixer.set_playing(False)
-                                engine.stop_recording()
-                                if rec_path.exists():
-                                    rec_path.unlink()
-                                click.echo("\nQuitting inspiration mode.")
-                                return
-                            elif key == "s":
-                                click.echo("  >> Skip (take discarded)")
-                                skip = True
-                                engine.mixer.set_playing(False)
-                            elif key == " ":
-                                if engine.mixer.is_playing:
-                                    engine.mixer.set_playing(False)
-                                    click.echo("  || Paused")
-                                else:
-                                    engine.mixer.set_playing(True)
-                                    click.echo("  >> Playing")
-                            elif key == "l":
-                                volume = max(0.0, volume - 0.1)
-                                engine.mixer.set_volume("inspiration", volume * rg_linear)
-                                config.inspiration_volume = volume
-                                config.save()
-                                click.echo(f"  Volume: {int(volume * 100)}%")
-                            elif key == "u":
-                                volume = min(2.0, volume + 0.1)
-                                engine.mixer.set_volume("inspiration", volume * rg_linear)
-                                config.inspiration_volume = volume
-                                config.save()
-                                click.echo(f"  Volume: {int(volume * 100)}%")
+                                click.echo("  || Paused")
+                            else:
+                                engine.mixer.set_playing(True)
+                                click.echo("  >> Playing")
+                            streamdeck.update_inspiration(engine.mixer.is_playing, f"{artist} - {title}")
+                        elif key == "l":
+                            volume = max(0.0, volume - 0.1)
+                            engine.mixer.set_volume("inspiration", volume * rg_linear)
+                            config.inspiration_volume = volume
+                            config.save()
+                            click.echo(f"  Volume: {int(volume * 100)}%")
+                        elif key == "u":
+                            volume = min(2.0, volume + 0.1)
+                            engine.mixer.set_volume("inspiration", volume * rg_linear)
+                            config.inspiration_volume = volume
+                            config.save()
+                            click.echo(f"  Volume: {int(volume * 100)}%")
                     engine.stop_recording()
                     if not skip:
                         from .project import TakeInfo
@@ -1614,37 +1628,43 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                     if i + 1 < len(tracks):
                         vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                         _wait_download = _prefetch(tracks[i + 1])
+                    streamdeck.update_inspiration(True, f"{artist} - {title}")
                     try:
                         while not mixer.is_finished and not skip:
-                            if select.select([sys.stdin], [], [], 0.2)[0]:
-                                key = sys.stdin.read(1).lower()
-                                if key == "q":
-                                    click.echo("\nQuitting inspiration mode.")
-                                    return
-                                elif key == "s":
-                                    click.echo("  >> Skip")
-                                    skip = True
+                            key = None
+                            try:
+                                key = sd_keys.get_nowait()
+                            except _queue.Empty:
+                                if select.select([sys.stdin], [], [], 0.2)[0]:
+                                    key = sys.stdin.read(1).lower()
+                            if key == "q":
+                                click.echo("\nQuitting inspiration mode.")
+                                return
+                            elif key == "s":
+                                click.echo("  >> Skip")
+                                skip = True
+                                mixer.set_playing(False)
+                                break
+                            elif key == " ":
+                                if mixer.is_playing:
                                     mixer.set_playing(False)
-                                    break
-                                elif key == " ":
-                                    if mixer.is_playing:
-                                        mixer.set_playing(False)
-                                        click.echo("  || Paused")
-                                    else:
-                                        mixer.set_playing(True)
-                                        click.echo("  >> Playing")
-                                elif key == "l":
-                                    volume = max(0.0, volume - 0.1)
-                                    mixer.set_volume("inspiration", volume * rg_linear)
-                                    config.inspiration_volume = volume
-                                    config.save()
-                                    click.echo(f"  Volume: {int(volume * 100)}%")
-                                elif key == "u":
-                                    volume = min(2.0, volume + 0.1)
-                                    mixer.set_volume("inspiration", volume * rg_linear)
-                                    config.inspiration_volume = volume
-                                    config.save()
-                                    click.echo(f"  Volume: {int(volume * 100)}%")
+                                    click.echo("  || Paused")
+                                else:
+                                    mixer.set_playing(True)
+                                    click.echo("  >> Playing")
+                                streamdeck.update_inspiration(mixer.is_playing, f"{artist} - {title}")
+                            elif key == "l":
+                                volume = max(0.0, volume - 0.1)
+                                mixer.set_volume("inspiration", volume * rg_linear)
+                                config.inspiration_volume = volume
+                                config.save()
+                                click.echo(f"  Volume: {int(volume * 100)}%")
+                            elif key == "u":
+                                volume = min(2.0, volume + 0.1)
+                                mixer.set_volume("inspiration", volume * rg_linear)
+                                config.inspiration_volume = volume
+                                config.save()
+                                click.echo(f"  Volume: {int(volume * 100)}%")
                     finally:
                         vlog(f"  [stream] stopping and closing...")
                         try:
@@ -1689,6 +1709,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
             _signal.signal(_signal.SIGALRM, _old_handler)
         # TCSANOW applies immediately; TCSADRAIN waits for output to drain and
         # can block indefinitely if the screensaver has locked the terminal.
+        streamdeck.disconnect()
         termios.tcsetattr(fd, termios.TCSANOW, old_settings)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
