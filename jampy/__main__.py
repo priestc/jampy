@@ -26,7 +26,7 @@ from .config import (
 from .project import Project, Setlist, TrackEntry
 from .audio.formats import get_duration
 from .session import Session, SessionState
-from .utils import format_duration, take_filename, next_take_number
+from .utils import format_duration, take_filename, next_take_number, ensure_dir
 
 
 @click.group()
@@ -700,10 +700,20 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
 
 def _run_session_loop(session: Session, engine: AudioEngine) -> None:
     """Interactive single-key recording loop."""
+    import queue as _queue
+    from .streamdeck_controller import StreamDeckController
+
     # Load the first backing track into the mixer
     _load_backing_track(session, engine)
 
     _show_status(session)
+
+    # Optional StreamDeck — silently skip if unavailable or not connected
+    sd_keys: _queue.Queue[str] = _queue.Queue()
+    streamdeck = StreamDeckController()
+    if streamdeck.connect(sd_keys.put):
+        click.echo("StreamDeck connected.")
+        streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
 
     # Set terminal to raw mode for single-key input
     fd = sys.stdin.fileno()
@@ -719,13 +729,25 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
                 _save_preferred_take(session)
                 session.song_end(engine.mixer.position)
                 _show_status(session)
+                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
                 continue
+
+            # Check for StreamDeck button press (thread-safe via queue)
+            try:
+                key = sd_keys.get_nowait()
+                _handle_key(session, engine, key)
+                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
+                continue
+            except _queue.Empty:
+                pass
 
             # Wait for keypress (0.2s timeout to keep polling responsive)
             if select.select([sys.stdin], [], [], 0.2)[0]:
                 key = sys.stdin.read(1).lower()
                 _handle_key(session, engine, key)
+                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
     finally:
+        streamdeck.disconnect()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
     # Session ended — save volume changes back to setlist
@@ -1237,10 +1259,38 @@ def list_inspirations() -> None:
         click.echo(f"  {i + 1:3}. {artist} - {title}{album_str}{year_str}  {dur}")
 
 
+def _find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
+    """Return the setlist entry for an inspiration track, creating it if absent."""
+    track_id = track_info["id"]
+    for entry in project.setlist.tracks:
+        if entry.inspiration_track_id == track_id:
+            return entry
+    artist = track_info.get("artist", "Unknown")
+    title = track_info.get("title", "Unknown")
+    year = track_info.get("year", "")
+    fmt = track_info.get("format", "flac") or "flac"
+    duration = float(track_info.get("duration") or 0)
+    year_str = f" ({year})" if year else ""
+    name = f"{artist} - {title}{year_str}"
+    entry = TrackEntry(
+        name=name,
+        backing_track=f"inspiration_{track_id}.{fmt}",
+        duration_seconds=duration,
+        inspiration_track_id=track_id,
+    )
+    project.setlist.add_track(entry)
+    return entry
+
+
 @main.command()
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Print debug info.")
-def inspiration(verbose: bool) -> None:
-    """Play tracks from your music library for inspiration."""
+@click.argument("instrument", required=False, default=None)
+def inspiration(instrument: str | None, verbose: bool) -> None:
+    """Play tracks from your music library for inspiration.
+
+    Pass an INSTRUMENT name to start a recording session: each track is
+    recorded automatically and added to the setlist with your take.
+    """
     import tempfile
     import urllib.request
     import urllib.error
@@ -1251,8 +1301,6 @@ def inspiration(verbose: bool) -> None:
 
     tracks, config = _query_inspiration_tracks()
     server = config.inspiration_server.rstrip("/")
-    click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
-    click.echo("Controls: [space] pause/play  [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
 
     import sounddevice as sd
     from .audio.mixer import Mixer
@@ -1260,7 +1308,86 @@ def inspiration(verbose: bool) -> None:
     out_dev = _resolve_device(sd, config.output_device, "output")
     out_info = sd.query_devices(out_dev, "output")
     out_channels = min(config.output_channels, out_info["max_output_channels"])
-    playback_sr = int(out_info["default_samplerate"])
+
+    is_recording = instrument is not None
+    engine = None
+    project = None
+
+    if is_recording:
+        from .audio.engine import AudioEngine
+
+        cwd = Path.cwd()
+        if not (cwd / "setlist.json").exists():
+            click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
+            raise SystemExit(1)
+        project = Project.open(cwd)
+        ensure_dir(project.completed_takes_dir)
+
+        inst_obj = config.get_instrument(instrument)
+        if inst_obj is None:
+            if not config.input_labels:
+                click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+                raise SystemExit(1)
+            click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
+            click.echo("Available inputs:")
+            for i, il in enumerate(config.input_labels):
+                click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
+            choice = click.prompt("  Input number", type=int, default=1)
+            if 1 <= choice <= len(config.input_labels):
+                input_label_name = config.input_labels[choice - 1].label
+            else:
+                click.echo("  Invalid choice, using first input.")
+                input_label_name = config.input_labels[0].label
+            full_name = click.prompt("  Full name (manufacturer & model)", default="", show_default=False)
+            musician = click.prompt("  Musician name", default=config.studio_musician, show_default=bool(config.studio_musician))
+            inst_obj = Instrument(
+                name=instrument, input_label=input_label_name,
+                full_name=full_name, musician=musician,
+            )
+            config.instruments.append(inst_obj)
+            config.save()
+            click.echo(f"  Saved '{instrument}' to config.\n")
+
+        input_info = config.resolve_input(inst_obj.input_label)
+        if input_info is None:
+            click.echo(f"Error: Input label '{inst_obj.input_label}' not found in config.", err=True)
+            raise SystemExit(1)
+        in_dev = _resolve_device(sd, input_info.device, "input")
+        if in_dev is None:
+            click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
+            raise SystemExit(1)
+        input_channel_index = input_info.channel - 1
+        input_channels = max(input_info.channel, 1)
+        in_info = sd.query_devices(in_dev, "input")
+        if input_channels > in_info["max_input_channels"]:
+            click.echo(
+                f"Error: Instrument '{inst_obj.name}' needs input channel {input_channels} "
+                f"but device only has {in_info['max_input_channels']} channels.",
+                err=True,
+            )
+            raise SystemExit(1)
+        output_channels_e = min(config.output_channels, out_info["max_output_channels"])
+        engine = AudioEngine(
+            sample_rate=config.sample_rate,
+            buffer_size=config.buffer_size,
+            input_device=in_dev,
+            output_device=out_dev,
+            input_channels=input_channels,
+            output_channels=max(1, output_channels_e),
+            monitor_channel=input_channel_index,
+        )
+        engine.start()
+        playback_sr = config.sample_rate
+        click.echo(f"=== Inspiration Recording Session: {instrument} ===")
+        click.echo(f"Project: {project.name}")
+    else:
+        playback_sr = int(out_info["default_samplerate"])
+
+    click.echo(f"Found {len(tracks)} tracks. Playing radio-style.")
+    if is_recording:
+        click.echo("Controls: [space] pause/play  [s]kip (discard take)  [l]ower volume  [u]p volume  [q]uit\n")
+    else:
+        click.echo("Controls: [space] pause/play  [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
     vlog(f"[audio] device={out_info['name']!r}  channels={out_channels}  sample_rate={playback_sr} Hz")
 
     tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
@@ -1364,111 +1491,171 @@ def inspiration(verbose: bool) -> None:
                 rg_gain = track_info.get("replaygain_track_gain")
                 rg_linear = 10 ** (rg_gain / 20.0) if rg_gain is not None else 1.0
                 vlog(f"  [mixer] replaygain={rg_gain} ({rg_linear:.3f}x)  volume={volume:.2f}")
-                mixer = Mixer(playback_sr)
-                mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
-                mixer.set_playing(True)
-
                 skip = False
 
-                def callback(outdata, frames, time_info, status):
-                    mix = mixer.read(frames)
-                    if out_channels == 2:
-                        outdata[:] = mix
-                    else:
-                        outdata[:, 0] = mix[:, 0]
-                    if mixer.is_finished:
-                        raise sd.CallbackStop
-
-                import time as _time
-                _stream = None
-                for _attempt in range(5):
-                    _stream = None
-                    vlog(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
-                    try:
-                        _stream = sd.OutputStream(
-                            samplerate=playback_sr,
-                            device=out_dev,
-                            channels=max(1, out_channels),
-                            dtype="float32",
-                            callback=callback,
-                        )
-                        vlog(f"  [stream] calling start()...")
-                        _stream.start()
-                        vlog(f"  [stream] started OK")
-                        break
-                    except sd.PortAudioError as _pa_err:
-                        import traceback as _tb
-                        click.echo(f"  [audio error] attempt {_attempt + 1}/5: {_pa_err}")
-                        if verbose:
-                            click.echo(f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n{_tb.format_exc()}")
-                        if _stream is not None:
-                            try:
-                                _stream.close()
-                            except Exception as _ce:
-                                vlog(f"  [stream] close() also failed: {_ce}")
-                            _stream = None
-                        if _attempt == 4:
-                            click.echo(f"  [audio error] all 5 attempts failed — skipping track")
-                            break
-                        vlog(f"  [stream] waiting 2s before retry...")
-                        _time.sleep(2.0)
-                        mixer.set_playing(False)
-                        mixer = Mixer(playback_sr)
-                        mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
-                        mixer.set_playing(True)
-                if _stream is None:
-                    if tmp_path.exists():
-                        tmp_path.unlink()
+                if is_recording:
+                    track_entry = _find_or_add_inspiration_track(project, track_info)
+                    take_num = next_take_number(project.completed_takes_dir, track_entry.name, instrument)
+                    fname = take_filename(track_entry.name, instrument, take_num, "flac")
+                    rec_path = project.completed_takes_dir / fname
+                    engine.mixer.clear()
+                    engine.mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                    engine.start_recording(rec_path)
+                    engine.mixer.reset()
+                    engine.mixer.set_playing(True)
+                    click.echo(f"  [rec] Recording take {take_num}: {fname}")
                     if i + 1 < len(tracks):
                         vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                         _wait_download = _prefetch(tracks[i + 1])
-                    continue
-                # Stream started — prefetch next track while this one plays
-                if i + 1 < len(tracks):
-                    vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
-                    _wait_download = _prefetch(tracks[i + 1])
-                try:
-                    while not mixer.is_finished and not skip:
+                    while not engine.mixer.is_finished and not skip:
                         if select.select([sys.stdin], [], [], 0.2)[0]:
                             key = sys.stdin.read(1).lower()
                             if key == "q":
+                                engine.mixer.set_playing(False)
+                                engine.stop_recording()
+                                if rec_path.exists():
+                                    rec_path.unlink()
                                 click.echo("\nQuitting inspiration mode.")
                                 return
                             elif key == "s":
-                                click.echo("  >> Skip")
+                                click.echo("  >> Skip (take discarded)")
                                 skip = True
-                                mixer.set_playing(False)
-                                break
+                                engine.mixer.set_playing(False)
                             elif key == " ":
-                                if mixer.is_playing:
-                                    mixer.set_playing(False)
+                                if engine.mixer.is_playing:
+                                    engine.mixer.set_playing(False)
                                     click.echo("  || Paused")
                                 else:
-                                    mixer.set_playing(True)
+                                    engine.mixer.set_playing(True)
                                     click.echo("  >> Playing")
                             elif key == "l":
                                 volume = max(0.0, volume - 0.1)
-                                mixer.set_volume("inspiration", volume * rg_linear)
+                                engine.mixer.set_volume("inspiration", volume * rg_linear)
                                 config.inspiration_volume = volume
                                 config.save()
                                 click.echo(f"  Volume: {int(volume * 100)}%")
                             elif key == "u":
                                 volume = min(2.0, volume + 0.1)
-                                mixer.set_volume("inspiration", volume * rg_linear)
+                                engine.mixer.set_volume("inspiration", volume * rg_linear)
                                 config.inspiration_volume = volume
                                 config.save()
                                 click.echo(f"  Volume: {int(volume * 100)}%")
-                finally:
-                    vlog(f"  [stream] stopping and closing...")
-                    try:
-                        _stream.stop()
-                        _stream.close()
-                    except Exception as _se:
-                        vlog(f"  [stream] stop/close error: {_se}")
-                    _time.sleep(0.3)
+                    engine.stop_recording()
+                    if not skip:
+                        from .project import TakeInfo
+                        take = TakeInfo(instrument=instrument, take_number=take_num, filename=fname)
+                        track_entry.set_preferred_take(instrument, take)
+                        project.save_setlist()
+                        click.echo(f"  [rec] Saved take: {fname}")
+                    else:
+                        if rec_path.exists():
+                            rec_path.unlink()
+                    if tmp_path.exists():
+                        tmp_path.unlink()
+                else:
+                    mixer = Mixer(playback_sr)
+                    mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                    mixer.set_playing(True)
 
-                if tmp_path.exists():
-                    tmp_path.unlink()
+                    def callback(outdata, frames, time_info, status):
+                        mix = mixer.read(frames)
+                        if out_channels == 2:
+                            outdata[:] = mix
+                        else:
+                            outdata[:, 0] = mix[:, 0]
+                        if mixer.is_finished:
+                            raise sd.CallbackStop
+
+                    import time as _time
+                    _stream = None
+                    for _attempt in range(5):
+                        _stream = None
+                        vlog(f"  [stream] opening OutputStream (attempt {_attempt + 1}/5)...")
+                        try:
+                            _stream = sd.OutputStream(
+                                samplerate=playback_sr,
+                                device=out_dev,
+                                channels=max(1, out_channels),
+                                dtype="float32",
+                                callback=callback,
+                            )
+                            vlog(f"  [stream] calling start()...")
+                            _stream.start()
+                            vlog(f"  [stream] started OK")
+                            break
+                        except sd.PortAudioError as _pa_err:
+                            import traceback as _tb
+                            click.echo(f"  [audio error] attempt {_attempt + 1}/5: {_pa_err}")
+                            if verbose:
+                                click.echo(f"    cpu={_stream.cpu_load if _stream else 'n/a'}\n{_tb.format_exc()}")
+                            if _stream is not None:
+                                try:
+                                    _stream.close()
+                                except Exception as _ce:
+                                    vlog(f"  [stream] close() also failed: {_ce}")
+                                _stream = None
+                            if _attempt == 4:
+                                click.echo(f"  [audio error] all 5 attempts failed — skipping track")
+                                break
+                            vlog(f"  [stream] waiting 2s before retry...")
+                            _time.sleep(2.0)
+                            mixer.set_playing(False)
+                            mixer = Mixer(playback_sr)
+                            mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
+                            mixer.set_playing(True)
+                    if _stream is None:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        if i + 1 < len(tracks):
+                            vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                            _wait_download = _prefetch(tracks[i + 1])
+                        continue
+                    # Stream started — prefetch next track while this one plays
+                    if i + 1 < len(tracks):
+                        vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
+                        _wait_download = _prefetch(tracks[i + 1])
+                    try:
+                        while not mixer.is_finished and not skip:
+                            if select.select([sys.stdin], [], [], 0.2)[0]:
+                                key = sys.stdin.read(1).lower()
+                                if key == "q":
+                                    click.echo("\nQuitting inspiration mode.")
+                                    return
+                                elif key == "s":
+                                    click.echo("  >> Skip")
+                                    skip = True
+                                    mixer.set_playing(False)
+                                    break
+                                elif key == " ":
+                                    if mixer.is_playing:
+                                        mixer.set_playing(False)
+                                        click.echo("  || Paused")
+                                    else:
+                                        mixer.set_playing(True)
+                                        click.echo("  >> Playing")
+                                elif key == "l":
+                                    volume = max(0.0, volume - 0.1)
+                                    mixer.set_volume("inspiration", volume * rg_linear)
+                                    config.inspiration_volume = volume
+                                    config.save()
+                                    click.echo(f"  Volume: {int(volume * 100)}%")
+                                elif key == "u":
+                                    volume = min(2.0, volume + 0.1)
+                                    mixer.set_volume("inspiration", volume * rg_linear)
+                                    config.inspiration_volume = volume
+                                    config.save()
+                                    click.echo(f"  Volume: {int(volume * 100)}%")
+                    finally:
+                        vlog(f"  [stream] stopping and closing...")
+                        try:
+                            _stream.stop()
+                            _stream.close()
+                        except Exception as _se:
+                            vlog(f"  [stream] stop/close error: {_se}")
+                        _time.sleep(0.3)
+
+                    if tmp_path.exists():
+                        tmp_path.unlink()
 
             # Batch exhausted — fetch next batch from server (obeys playlist settings)
             vlog("[playlist] batch complete, fetching next batch...")
@@ -1505,6 +1692,10 @@ def inspiration(verbose: bool) -> None:
         termios.tcsetattr(fd, termios.TCSANOW, old_settings)
         import shutil
         shutil.rmtree(tmpdir, ignore_errors=True)
+        if engine is not None:
+            engine.stop()
+        if project is not None:
+            project.save_setlist()
 
 
 if __name__ == "__main__":

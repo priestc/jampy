@@ -73,8 +73,9 @@ class AudioEngine:
     def stop_recording(self) -> None:
         """Stop the per-take recorder."""
         if self.recorder:
-            self.recorder.stop()
-            self.recorder = None
+            rec = self.recorder
+            self.recorder = None  # cut off callback writes before flushing
+            rec.stop()
 
     def _callback(
         self,
