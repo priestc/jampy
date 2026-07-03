@@ -1749,6 +1749,10 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
             engine.stop()
         if project is not None:
             project.save_setlist()
+            remote = project.setlist.backup_server or StudioConfig.load().backup_server
+            if remote:
+                from .sync import sync_up
+                sync_up(project.path, remote)
 
 
 if __name__ == "__main__":
