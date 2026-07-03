@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import os
 import sys
+import queue
 import select
 import termios
 import tty
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -639,21 +641,18 @@ def start_session(instrument: str) -> None:
     session_flac = session.session_dir / "session.flac" if session.session_dir else None
     if session_flac:
         engine.start_session_recording(session_flac)
-    try:
-        _run_session_loop(session, engine)
-    finally:
-        engine.stop()
-
-    # Clean up downloaded inspiration backing tracks
-    for track in project.setlist.tracks:
-        if track.inspiration_track_id:
-            bt_path = project.backing_tracks_dir / track.backing_track
-            if bt_path.exists():
-                bt_path.unlink()
-
-    if project.setlist.backup_server:
-        from .sync import sync_up
-        sync_up(project.path, project.setlist.backup_server)
+    with _recording_context(project, config) as (streamdeck, sd_keys):
+        try:
+            _run_session_loop(session, engine, streamdeck, sd_keys)
+        finally:
+            engine.stop()
+            # Clean up downloaded inspiration backing tracks before sync
+            for track in project.setlist.tracks:
+                if track.inspiration_track_id:
+                    bt_path = project.backing_tracks_dir / track.backing_track
+                    if bt_path.exists():
+                        bt_path.unlink()
+            project.save_setlist()
 
 
 def _load_backing_track(session: Session, engine: AudioEngine) -> None:
@@ -698,22 +697,44 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
             )
 
 
-def _run_session_loop(session: Session, engine: AudioEngine) -> None:
-    """Interactive single-key recording loop."""
-    import queue as _queue
+@contextmanager
+def _recording_context(project=None, config=None):
+    """Context manager for any recording mode.
+
+    Yields (streamdeck, sd_keys). On exit, disconnects the StreamDeck and
+    syncs to the backup server if a project and remote are configured.
+    Any future recording mode gets these behaviours for free by using:
+
+        with _recording_context(project, config) as (streamdeck, sd_keys):
+            ...
+    """
     from .streamdeck_controller import StreamDeckController
-
-    # Load the first backing track into the mixer
-    _load_backing_track(session, engine)
-
-    _show_status(session)
-
-    # Optional StreamDeck — silently skip if unavailable or not connected
-    sd_keys: _queue.Queue[str] = _queue.Queue()
+    sd_keys: queue.Queue[str] = queue.Queue()
     streamdeck = StreamDeckController()
     if streamdeck.connect(sd_keys.put):
         click.echo("StreamDeck connected.")
-        streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
+    try:
+        yield streamdeck, sd_keys
+    finally:
+        streamdeck.disconnect()
+        if project is not None:
+            remote = project.setlist.backup_server or (config.backup_server if config else None)
+            if remote:
+                from .sync import sync_up
+                sync_up(project.path, remote)
+
+
+def _run_session_loop(
+    session: Session,
+    engine: AudioEngine,
+    streamdeck,
+    sd_keys: queue.Queue,
+) -> None:
+    """Interactive single-key recording loop."""
+    # Load the first backing track into the mixer
+    _load_backing_track(session, engine)
+    _show_status(session)
+    streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
 
     # Set terminal to raw mode for single-key input
     fd = sys.stdin.fileno()
@@ -738,7 +759,7 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
                 _handle_key(session, engine, key)
                 streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
                 continue
-            except _queue.Empty:
+            except queue.Empty:
                 pass
 
             # Wait for keypress (0.2s timeout to keep polling responsive)
@@ -747,11 +768,7 @@ def _run_session_loop(session: Session, engine: AudioEngine) -> None:
                 _handle_key(session, engine, key)
                 streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
     finally:
-        streamdeck.disconnect()
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    # Session ended — save volume changes back to setlist
-    session.project.save_setlist()
 
     log_path = session.save_log()
     click.echo(f"\nSession ended.")
@@ -1397,14 +1414,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
 
-    import queue as _queue
-    from .streamdeck_controller import StreamDeckController
-    sd_keys: _queue.Queue[str] = _queue.Queue()
-    streamdeck = StreamDeckController()
-    if streamdeck.connect(sd_keys.put):
-        click.echo("StreamDeck connected.")
-        streamdeck.use_inspiration_layout(recording=is_recording)
-
     from wakepy import keep as _keep
     import threading as _threading
     _wake_ctx = _keep.running()
@@ -1461,10 +1470,13 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     _status_thread = _threading.Thread(target=_status_printer, daemon=True)
     _status_thread.start()
 
-    try:
-        tty.setcbreak(fd)
+    with _recording_context(project if is_recording else None, config) as (streamdeck, sd_keys):
+        if streamdeck.connected:
+            streamdeck.use_inspiration_layout(recording=is_recording)
+        try:
+            tty.setcbreak(fd)
 
-        auto_play_next = False  # set True when a track ends naturally; auto-starts next track
+            auto_play_next = False  # set True when a track ends naturally; auto-starts next track
 
         while True:
             # Kick off download of the first track before the loop starts
@@ -1530,7 +1542,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                         key = None
                         try:
                             key = sd_keys.get_nowait()
-                        except _queue.Empty:
+                        except queue.Empty:
                             if select.select([sys.stdin], [], [], 0.2)[0]:
                                 key = sys.stdin.read(1).lower()
                         if key == "q":
@@ -1666,7 +1678,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                             key = None
                             try:
                                 key = sd_keys.get_nowait()
-                            except _queue.Empty:
+                            except queue.Empty:
                                 if select.select([sys.stdin], [], [], 0.2)[0]:
                                     key = sys.stdin.read(1).lower()
                             if key == "q":
@@ -1718,41 +1730,37 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
             tracks = new_tracks
             click.echo(f"\n[playlist] fetched {len(tracks)} more tracks.")
 
-    except KeyboardInterrupt:
-        click.echo("\nInterrupted.")
-    except Exception as _top_err:  # noqa: F841
-        import traceback as _tb
-        click.echo(f"\n[FATAL] Unhandled exception:\n{_tb.format_exc()}", err=True)
-        raise
-    finally:
-        _stop_status.set()
-        # Must run in the same thread where __enter__ was called (wakepy is not thread-safe).
-        # Use SIGALRM to enforce a 3-second timeout so a hung wakepy release can't freeze exit.
-        import signal as _signal
-        def _wake_timeout(signum, frame): raise TimeoutError
-        _old_handler = _signal.signal(_signal.SIGALRM, _wake_timeout)
-        _signal.alarm(3)
-        try:
-            _wake_ctx.__exit__(None, None, None)
-        except Exception:
-            pass
+        except KeyboardInterrupt:
+            click.echo("\nInterrupted.")
+        except Exception as _top_err:  # noqa: F841
+            import traceback as _tb
+            click.echo(f"\n[FATAL] Unhandled exception:\n{_tb.format_exc()}", err=True)
+            raise
         finally:
-            _signal.alarm(0)
-            _signal.signal(_signal.SIGALRM, _old_handler)
-        # TCSANOW applies immediately; TCSADRAIN waits for output to drain and
-        # can block indefinitely if the screensaver has locked the terminal.
-        streamdeck.disconnect()
-        termios.tcsetattr(fd, termios.TCSANOW, old_settings)
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
-        if engine is not None:
-            engine.stop()
-        if project is not None:
-            project.save_setlist()
-            remote = project.setlist.backup_server or StudioConfig.load().backup_server
-            if remote:
-                from .sync import sync_up
-                sync_up(project.path, remote)
+            _stop_status.set()
+            # Must run in the same thread where __enter__ was called (wakepy is not thread-safe).
+            # Use SIGALRM to enforce a 3-second timeout so a hung wakepy release can't freeze exit.
+            import signal as _signal
+            def _wake_timeout(signum, frame): raise TimeoutError
+            _old_handler = _signal.signal(_signal.SIGALRM, _wake_timeout)
+            _signal.alarm(3)
+            try:
+                _wake_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+            finally:
+                _signal.alarm(0)
+                _signal.signal(_signal.SIGALRM, _old_handler)
+            # TCSANOW applies immediately; TCSADRAIN waits for output to drain and
+            # can block indefinitely if the screensaver has locked the terminal.
+            termios.tcsetattr(fd, termios.TCSANOW, old_settings)
+            import shutil
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            if engine is not None:
+                engine.stop()
+            if project is not None:
+                project.save_setlist()
+    # _recording_context __exit__: StreamDeck disconnect + backup sync
 
 
 if __name__ == "__main__":
