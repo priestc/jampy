@@ -1464,6 +1464,8 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     try:
         tty.setcbreak(fd)
 
+        auto_play_next = False  # set True when a track ends naturally; auto-starts next track
+
         while True:
             # Kick off download of the first track before the loop starts
             vlog(f"[prefetch] starting download of track 1/{len(tracks)}")
@@ -1509,10 +1511,18 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                     engine.mixer.clear()
                     engine.mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
                     engine.mixer.reset()
-                    engine.mixer.set_playing(False)  # start paused; recording begins on first play
-                    recording_active = False
-                    click.echo(f"  Ready — press [space] to start recording")
-                    streamdeck.update_inspiration(False, f"{artist} - {title}")
+                    if auto_play_next:
+                        engine.start_recording(rec_path)
+                        engine.mixer.set_playing(True)
+                        recording_active = True
+                        auto_play_next = False
+                        click.echo(f"  [rec] Auto-recording take {take_num}: {fname}")
+                        streamdeck.update_inspiration(True, f"{artist} - {title}")
+                    else:
+                        engine.mixer.set_playing(False)
+                        recording_active = False
+                        click.echo(f"  Ready — press [space] to start recording")
+                        streamdeck.update_inspiration(False, f"{artist} - {title}")
                     if i + 1 < len(tracks):
                         vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                         _wait_download = _prefetch(tracks[i + 1])
@@ -1581,9 +1591,11 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                         track_entry.set_preferred_take(instrument, take)
                         project.save_setlist()
                         click.echo(f"  [rec] Saved take: {fname}")
+                        auto_play_next = True   # carry momentum into next track
                     else:
                         if rec_path.exists():
                             rec_path.unlink()
+                        auto_play_next = False  # skipped — pause and wait for input
                     if tmp_path.exists():
                         tmp_path.unlink()
                 else:
