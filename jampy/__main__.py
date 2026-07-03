@@ -1591,11 +1591,11 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                         track_entry.set_preferred_take(instrument, take)
                         project.save_setlist()
                         click.echo(f"  [rec] Saved take: {fname}")
-                        auto_play_next = True   # carry momentum into next track
+                        auto_play_next = True
                     else:
                         if rec_path.exists():
                             rec_path.unlink()
-                        auto_play_next = False  # skipped — pause and wait for input
+                        auto_play_next = True  # skipped — keep music going
                     if tmp_path.exists():
                         tmp_path.unlink()
                 else:
