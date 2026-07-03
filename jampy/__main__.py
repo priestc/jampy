@@ -1403,7 +1403,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     streamdeck = StreamDeckController()
     if streamdeck.connect(sd_keys.put):
         click.echo("StreamDeck connected.")
-        streamdeck.use_inspiration_layout()
+        streamdeck.use_inspiration_layout(recording=is_recording)
 
     from wakepy import keep as _keep
     import threading as _threading
@@ -1508,11 +1508,11 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                     rec_path = project.completed_takes_dir / fname
                     engine.mixer.clear()
                     engine.mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
-                    engine.start_recording(rec_path)
                     engine.mixer.reset()
-                    engine.mixer.set_playing(True)
-                    click.echo(f"  [rec] Recording take {take_num}: {fname}")
-                    streamdeck.update_inspiration(True, f"{artist} - {title}")
+                    engine.mixer.set_playing(False)  # start paused; recording begins on first play
+                    recording_active = False
+                    click.echo(f"  Ready — press [space] to start recording")
+                    streamdeck.update_inspiration(False, f"{artist} - {title}")
                     if i + 1 < len(tracks):
                         vlog(f"  [prefetch] starting download of track {i + 2}/{len(tracks)}")
                         _wait_download = _prefetch(tracks[i + 1])
@@ -1525,7 +1525,8 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 key = sys.stdin.read(1).lower()
                         if key == "q":
                             engine.mixer.set_playing(False)
-                            engine.stop_recording()
+                            if recording_active:
+                                engine.stop_recording()
                             if rec_path.exists():
                                 rec_path.unlink()
                             click.echo("\nQuitting inspiration mode.")
@@ -1539,9 +1540,27 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 engine.mixer.set_playing(False)
                                 click.echo("  || Paused")
                             else:
+                                if not recording_active:
+                                    engine.start_recording(rec_path)
+                                    click.echo(f"  [rec] Recording take {take_num}: {fname}")
+                                    recording_active = True
                                 engine.mixer.set_playing(True)
                                 click.echo("  >> Playing")
                             streamdeck.update_inspiration(engine.mixer.is_playing, f"{artist} - {title}")
+                        elif key == "b":
+                            # Restart: discard current take, reset to beginning, wait for play
+                            engine.mixer.set_playing(False)
+                            if recording_active:
+                                engine.stop_recording()
+                                if rec_path.exists():
+                                    rec_path.unlink()
+                                recording_active = False
+                            take_num = next_take_number(project.completed_takes_dir, track_entry.name, instrument)
+                            fname = take_filename(track_entry.name, instrument, take_num, "flac")
+                            rec_path = project.completed_takes_dir / fname
+                            engine.mixer.reset()
+                            click.echo("  >> Restarted — press [space] to record again")
+                            streamdeck.update_inspiration(False, f"{artist} - {title}")
                         elif key == "l":
                             volume = max(0.0, volume - 0.1)
                             engine.mixer.set_volume("inspiration", volume * rg_linear)
@@ -1554,8 +1573,9 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                             config.inspiration_volume = volume
                             config.save()
                             click.echo(f"  Volume: {int(volume * 100)}%")
-                    engine.stop_recording()
-                    if not skip:
+                    if recording_active:
+                        engine.stop_recording()
+                    if not skip and recording_active:
                         from .project import TakeInfo
                         take = TakeInfo(instrument=instrument, take_number=take_num, filename=fname)
                         track_entry.set_preferred_take(instrument, take)

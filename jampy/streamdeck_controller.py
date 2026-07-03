@@ -40,14 +40,17 @@ _VOLUME_BUTTONS: list[tuple] = [
 
 # Inspiration mode — play/pause at 0 is rendered dynamically by update_inspiration().
 _INSPIRATION_BUTTONS: list[tuple] = [
-    (0, None, None,   " ", None, None,           None),           # play/pause — rendered by update_inspiration
-    (1, "S",  "Skip", "s", None, (0,  120, 200), (0,  120, 200)),
-    (2, "Q",  "Quit", "q", None, (200,  30,  30), (200, 30,  30)),
+    (0, None, None,      " ", None, None,            None),
+    (1, "S",  "Skip",    "s", None, (0,  120, 200),  (0,  120, 200)),
+    (2, "Q",  "Quit",    "q", None, (200,  30,  30),  (200, 30,  30)),
 ]
 
+# Only added in recording mode — restart = stop take, reset to start, wait for play
+_INSPIRATION_RESTART_BUTTON: tuple = (3, "B", "Restart", "b", None, (255, 140, 0), (255, 140, 0))
+
 _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
-    (3, "L",  "Vol -", "l", None, (0,  120, 200), (0,  120, 200)),
-    (4, "U",  "Vol +", "u", None, (0,  120, 200), (0,  120, 200)),
+    (4, "L",  "Vol -", "l", None, (0,  120, 200), (0,  120, 200)),
+    (5, "U",  "Vol +", "u", None, (0,  120, 200), (0,  120, 200)),
 ]
 
 # Default dial map for recording session
@@ -119,9 +122,11 @@ class StreamDeckController:
             self._deck = None
             return False
 
-    def use_inspiration_layout(self) -> None:
+    def use_inspiration_layout(self, recording: bool = False) -> None:
         """Switch to inspiration mode button layout and dial map."""
         self._buttons = list(_INSPIRATION_BUTTONS)
+        if recording:
+            self._buttons.append(_INSPIRATION_RESTART_BUTTON)
         if not self._has_dials:
             self._buttons += _INSPIRATION_VOLUME_BUTTONS
         self._dial_map = dict(_INSPIRATION_DIAL_MAP)
