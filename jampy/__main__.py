@@ -26,6 +26,7 @@ from .config import (
     VALID_BUFFER_SIZES,
 )
 from .project import Project, Setlist, TrackEntry
+from .audio.devices import resolve_device as _resolve_device
 from .audio.formats import get_duration
 from .session import Session, SessionState
 from .utils import format_duration, take_filename, next_take_number, ensure_dir
@@ -437,21 +438,6 @@ def update_setlist() -> None:
 
     project.save_setlist()
     click.echo(f"\nSetlist updated: {added} added, {removed} removed, {len(kept_tracks)} total.")
-
-
-def _resolve_device(sd: object, device_name: str, kind: str) -> int | None:
-    """Resolve a device name to its index. Returns None if not found."""
-    if not device_name:
-        return None
-    devices = sd.query_devices()  # type: ignore[union-attr]
-    for i, d in enumerate(devices):
-        if d["name"] == device_name:
-            return i
-    # Partial match fallback
-    for i, d in enumerate(devices):
-        if device_name.lower() in d["name"].lower():
-            return i
-    return None
 
 
 @main.command()
