@@ -90,16 +90,25 @@ class VideoRecorder:
         return self._proc is not None and self._proc.poll() is None
 
 
-def mux_video_audio(video_path: Path, audio_path: Path, output_path: Path) -> bool:
-    """Combine a silent video file with an audio file into one output file."""
+def mux_video_audio(
+    video_path: Path, mix_audio_path: Path, instrument_audio_path: Path, output_path: Path,
+) -> bool:
+    """Combine a silent video file with two audio tracks: a compressed mix
+    (backing track + instrument, for easy playback/sharing) and a lossless
+    instrument-only track (for anyone who wants to remix or isolate it)."""
     if not ffmpeg_available():
         return False
     cmd = [
         "ffmpeg", "-y",
         "-i", str(video_path),
-        "-i", str(audio_path),
+        "-i", str(mix_audio_path),
+        "-i", str(instrument_audio_path),
+        "-map", "0:v", "-map", "1:a", "-map", "2:a",
         "-c:v", "copy",
-        "-c:a", "aac",
+        "-c:a:0", "aac",
+        "-c:a:1", "flac",
+        "-metadata:s:a:0", "title=Mix",
+        "-metadata:s:a:1", "title=Instrument Only",
         "-shortest",
         "-movflags", "+faststart",
         str(output_path),

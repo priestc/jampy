@@ -532,7 +532,7 @@ class RecordFrame(ttk.Frame):
         if self._video_recorder:
             self._video_recorder.stop()
             from ..video.capture import mux_video_audio
-            if mux_video_audio(self._video_raw, self._mix_flac, self._final_video):
+            if mux_video_audio(self._video_raw, self._mix_flac, self._rec_path, self._final_video):
                 self._video_raw.unlink(missing_ok=True)
                 self._mix_flac.unlink(missing_ok=True)
                 self.status_var.set(f"Saved take {self._current_take_num} + video for '{self._current_track.name}'")

@@ -701,7 +701,7 @@ def start_session(instrument: str) -> None:
                 video_recorder.stop()
                 from .video.capture import mux_video_audio
                 session_video = session.session_dir / "session_video.mp4"
-                if mux_video_audio(session_video_raw, session_mix_flac, session_video):
+                if mux_video_audio(session_video_raw, session_mix_flac, session_flac, session_video):
                     session_video_raw.unlink(missing_ok=True)
                     session_mix_flac.unlink(missing_ok=True)
                     click.echo(f"Session video saved to {session_video}")

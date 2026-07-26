@@ -86,8 +86,9 @@ The session plays the backing track through your speakers, monitors your instrum
 **Volume adjustments** are saved back to `setlist.json` at the end of the session.
 
 **Video:** if a camera is configured (`jampy setup-recording-devices`), the whole session is
-also recorded on video, muxed with the full monitor mix (backing track + your instrument), and
-saved as `session_video.mp4` alongside `session.flac` once the session ends.
+also recorded on video, saved as `session_video.mp4` alongside `session.flac` once the session
+ends. The video has two audio tracks: a compressed (AAC) mix of the backing track + your
+instrument for easy playback, and a lossless (FLAC) track of just your instrument alone.
 
 ### Multi-Instrument Layering
 
