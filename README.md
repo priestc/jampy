@@ -32,6 +32,15 @@ jampy setup-instruments         # assign instruments to input channels
 `setup-recording-devices` also lets you pick a camera. If one is configured, every session
 records video alongside the audio (see [Recording Session](#recording-session)).
 
+### Graphical Interface
+
+```bash
+jampy ui
+```
+
+Opens a desktop window (built with tkinter). Currently implements the Studio Setup screen —
+the same fields as `jampy setup-studio` — with more screens to follow.
+
 ### Creating a Project
 
 ```bash

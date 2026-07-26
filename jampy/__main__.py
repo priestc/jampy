@@ -244,6 +244,13 @@ def setup_recording_devices() -> None:
         click.echo("Camera: none (video recording disabled)")
 
 
+@main.command(name="ui")
+def ui_command() -> None:
+    """Launch the graphical Jam.py interface."""
+    from .ui.app import run
+    run()
+
+
 @main.command()
 def setup_instruments() -> None:
     """Configure instruments and their input assignments."""
