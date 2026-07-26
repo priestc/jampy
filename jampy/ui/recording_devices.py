@@ -1,36 +1,24 @@
 """Recording Devices screen: sample rate, buffer, output device, input labels, camera.
 
-Mirrors the fields configured by the `jampy setup-recording-devices` CLI command.
+Mirrors the fields configured by the `jampy setup-recording-devices` CLI
+command. Reads/writes whichever machine's config `app_state.backend`
+currently points at, and queries that same machine's audio/camera devices.
 """
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from ..backend import BackendError
 from ..config import (
-    DEFAULT_CONFIG_PATH,
     InputLabel,
     StudioConfig,
     VALID_BUFFER_SIZES,
     VALID_SAMPLE_RATES,
 )
-
-
-def _query_audio_devices() -> list[dict]:
-    try:
-        import sounddevice as sd
-        return list(sd.query_devices())
-    except Exception:
-        return []
-
-
-def _query_cameras() -> list[tuple[str, str]]:
-    from ..video.devices import list_cameras
-    try:
-        return list_cameras()
-    except Exception:
-        return []
+from .app_state import AppState
 
 
 class _InputRow(ttk.Frame):
@@ -91,28 +79,61 @@ class _InputRow(ttk.Frame):
 class RecordingDevicesFrame(ttk.Frame):
     """Form for sample rate, buffer, output device, input labels, and camera."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
-        self.config_obj = StudioConfig.load()
+        self.app_state = app_state
+        self.config_obj: StudioConfig | None = None
         self.devices: list[dict] = []
         self.output_devices: list[dict] = []
         self.input_devices: list[dict] = []
         self._camera_choices: list[tuple[str, str]] = []
         self._input_rows: list[_InputRow] = []
-        self._requery_devices()
+
+        ttk.Label(self, text="Loading...").pack(anchor="w")
+        self._initial_load()
+
+    # --- loading ---
+
+    def _initial_load(self) -> None:
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                config = backend.get_config()
+                devices = backend.list_audio_devices()
+                cameras = backend.list_cameras()
+                error = None
+            except BackendError as e:
+                config, devices, cameras, error = None, [], [], str(e)
+            self.after(0, lambda: self._on_initial_loaded(config, devices, cameras, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_initial_loaded(
+        self, config: StudioConfig | None, devices: list[dict], cameras: list[tuple[str, str]], error: str | None,
+    ) -> None:
+        if not self.winfo_exists():
+            return
+        for child in self.winfo_children():
+            child.destroy()
+        if error or config is None:
+            ttk.Label(self, text=error or "Could not load configuration.", foreground="#b00020").pack(anchor="w")
+            return
+        self.config_obj = config
+        self._set_devices(devices, cameras)
+        self._input_rows = []
         self._build()
 
-    def _requery_devices(self) -> None:
-        self.devices = _query_audio_devices()
-        self.output_devices = [d for d in self.devices if d["max_output_channels"] > 0]
-        self.input_devices = [d for d in self.devices if d["max_input_channels"] > 0]
-        self._camera_choices = [("", "None")] + _query_cameras()
+    def _set_devices(self, devices: list[dict], cameras: list[tuple[str, str]]) -> None:
+        self.devices = devices
+        self.output_devices = [d for d in devices if d["max_output_channels"] > 0]
+        self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
+        self._camera_choices = [("", "None")] + cameras
 
     def _build(self) -> None:
         row = 0
-        ttk.Button(self, text="Reload Devices", command=self._on_reload_devices).grid(
-            row=row, column=0, sticky="w", pady=(0, 10)
-        )
+        self.reload_button = ttk.Button(self, text="Reload Devices", command=self._on_reload_devices)
+        self.reload_button.grid(row=row, column=0, sticky="w", pady=(0, 10))
         row += 1
 
         if not self.devices:
@@ -209,7 +230,8 @@ class RecordingDevicesFrame(ttk.Frame):
 
         button_row = ttk.Frame(self)
         button_row.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(button_row, text="Save", command=self._on_save).pack(side="right")
+        self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
+        self.save_button.pack(side="right")
 
         self._refresh_device_choices()
 
@@ -236,6 +258,8 @@ class RecordingDevicesFrame(ttk.Frame):
         row_widget.destroy()
         self._input_rows.remove(row_widget)
 
+    # --- reload devices ---
+
     def _on_reload_devices(self) -> None:
         """Re-query audio/camera devices without discarding unsaved edits.
 
@@ -245,7 +269,28 @@ class RecordingDevicesFrame(ttk.Frame):
         is changed on a widget that's already been rendered or clicked.
         """
         self._apply_form_to_config()
-        self._requery_devices()
+        self.reload_button.state(["disabled"])
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                devices = backend.list_audio_devices()
+                cameras = backend.list_cameras()
+                error = None
+            except BackendError as e:
+                devices, cameras, error = [], [], str(e)
+            self.after(0, lambda: self._on_reloaded(devices, cameras, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_reloaded(self, devices: list[dict], cameras: list[tuple[str, str]], error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        if error:
+            messagebox.showerror("Reload failed", error)
+            self.reload_button.state(["!disabled"])
+            return
+        self._set_devices(devices, cameras)
         for child in self.winfo_children():
             child.destroy()
         self._input_rows = []
@@ -302,5 +347,26 @@ class RecordingDevicesFrame(ttk.Frame):
             messagebox.showerror("Invalid configuration", "\n".join(errors))
             return
 
-        self.config_obj.save()
-        self.status_var.set(f"Saved to {DEFAULT_CONFIG_PATH}")
+        backend = self.app_state.backend
+        config = self.config_obj
+        self.save_button.state(["disabled"])
+
+        def worker() -> None:
+            try:
+                backend.save_config(config)
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_saved(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_saved(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.save_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("Save failed", error)
+            return
+        target = f"remote ({self.app_state.remote_name})" if self.app_state.backend.is_remote() else "local config"
+        self.status_var.set(f"Saved to {target}")

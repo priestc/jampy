@@ -20,6 +20,26 @@ except ImportError:
     _HAVE_PIL = False
 
 
+def _skip_hidapi_exit_crash() -> None:
+    """python-elgato-streamdeck registers libhidapi's hid_exit() via atexit the
+    first time it opens the HID transport (StreamDeck/Transport/LibUSBHIDAPI.py).
+    On recent macOS (Apple Silicon, pointer authentication) calling hid_exit()
+    during Python's interpreter-shutdown atexit phase reliably crashes with
+    SIGTRAP inside IOHIDManagerUnscheduleFromRunLoop — by that point the run
+    loop the HID devices were scheduled on is already gone. We already close
+    our own device handle in disconnect(); skip the library's redundant
+    global teardown call so the process exits cleanly instead (the OS
+    reclaims the HID subsystem's handles on process exit regardless)."""
+    try:
+        import atexit
+        from StreamDeck.Transport.LibUSBHIDAPI import LibUSBHIDAPI
+        hidapi = LibUSBHIDAPI.Library.HIDAPI_INSTANCE
+        if hidapi is not None:
+            atexit.unregister(hidapi.hid_exit)
+    except Exception:
+        pass
+
+
 # Button tuple: (key_index, icon_name, label, key_char, active_state_name, active_color, dim_color)
 # active_state_name=None → always shown in active color.
 _SESSION_BUTTONS: list[tuple] = [
@@ -48,6 +68,18 @@ _INSPIRATION_RESTART_BUTTON: tuple = (3, "prev", "Restart", "b", None, (255, 140
 _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
     (4, "vol_dn", "Vol -", "l", None, (0,  120, 200), (0,  120, 200)),
     (5, "vol_up", "Vol +", "u", None, (0,  120, 200), (0,  120, 200)),
+]
+
+_UI_RECORD_BUTTONS: list[tuple] = [
+    (0, None,   None,   "r", None, None,            None),           # record/stop toggle — rendered by update_recording_toggle
+    (1, "skip", "Next", "n", None, (0,   160, 220), (0,   160, 220)),
+]
+
+_UI_RECORD_VOLUME_BUTTONS: list[tuple] = [
+    (2, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
+    (3, "vol_up",   "Vol +",   "u", None, (0,   120, 200), (0,   120, 200)),
+    (4, "takes_dn", "Takes -", "[", None, (120,   0, 200), (120,   0, 200)),
+    (5, "takes_up", "Takes +", "]", None, (120,   0, 200), (120,   0, 200)),
 ]
 
 _SESSION_DIAL_MAP: dict[int, tuple[str, str, str]] = {
@@ -156,6 +188,7 @@ class StreamDeckController:
             return False
         try:
             decks = DeviceManager().enumerate()
+            _skip_hidapi_exit_crash()
             if not decks:
                 return False
             self._deck = decks[0]
@@ -186,6 +219,34 @@ class StreamDeckController:
         if not self._has_dials:
             self._buttons += _INSPIRATION_VOLUME_BUTTONS
         self._dial_map = dict(_INSPIRATION_DIAL_MAP)
+
+    def use_ui_record_layout(self) -> None:
+        """Switch to the Tkinter Record page's layout: a Record/Unpause/Stop
+        toggle plus backing/takes volume controls (dials if available, else
+        buttons)."""
+        self._buttons = list(_UI_RECORD_BUTTONS)
+        if not self._has_dials:
+            self._buttons += _UI_RECORD_VOLUME_BUTTONS
+        self._dial_map = dict(_SESSION_DIAL_MAP)
+        if not self.connected:
+            return
+        with self._lock:
+            # Blank every key this layout doesn't use — on a dial deck (e.g. the
+            # Stream Deck Plus) that's most of them, and left untouched they'd
+            # keep showing the device's own default/branded image instead of
+            # looking deliberately off.
+            used_indices = {btn[0] for btn in self._buttons}
+            key_count = getattr(self._deck, "KEY_COUNT", 0)
+            for idx in range(key_count):
+                if idx not in used_indices:
+                    self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
+            for btn in self._buttons:
+                idx, icon, label, _key, _state, active_color, _dim = btn
+                if idx == 0 or icon is None:
+                    continue
+                self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
+            if self._has_dials:
+                self._update_touchscreen()
 
     def _on_key_change(self, deck, key_index: int, pressed: bool) -> None:
         if not pressed:
@@ -237,6 +298,26 @@ class StreamDeckController:
             if self._has_dials:
                 self._update_touchscreen(track_name)
 
+    def update_recording_toggle(self, phase: str) -> None:
+        """Refresh the Record/Unpause/Stop toggle and static buttons for the
+        UI Record page. `phase` is one of "idle", "waiting", "recording"."""
+        if not self.connected:
+            return
+        icon, label, color = {
+            "idle":      ("record", "Record",  (0,   200, 0)),
+            "waiting":   ("play",   "Unpause",  (230, 160, 0)),
+            "recording": ("stop",   "Stop",     (230, 60,  60)),
+        }[phase]
+        with self._lock:
+            self._deck.set_key_image(0, self._make_key_image(icon, label, color))
+            for btn in self._buttons:
+                idx, icon, label, _key, _state, active_color, _dim = btn
+                if idx == 0 or icon is None:
+                    continue
+                self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
+            if self._has_dials:
+                self._update_touchscreen()
+
     def disconnect(self) -> None:
         if self._deck:
             try:
@@ -278,4 +359,5 @@ class StreamDeckController:
             img_bytes = PILHelper.to_native_touchscreen_format(self._deck, img)
             self._deck.set_touchscreen_image(img_bytes, x_pos=0, y_pos=0, width=w, height=h)
         except Exception:
-            pass
+            import traceback
+            traceback.print_exc()

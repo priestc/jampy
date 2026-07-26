@@ -2,75 +2,180 @@
 project's playlist or from your inspiration library, preview the camera,
 and record a take.
 
-This is a first cut of the CLI's `start-session` / `inspiration` workflow:
-picking a track loads its backing track (and any other instruments'
-preferred takes) into the mixer and records a proper take file, the same
-way `jampy start-session` does for a single track. The full multi-track
-auto-advance flow (back-to-start / next-track) isn't wired up yet — start
-a new recording for the next track when you're ready.
+Everything here goes through `app_state.backend` — in local mode that's a
+`LocalBackend` talking directly to this machine's hardware; in remote mode
+it's a `RemoteBackend` talking over the network to another jampy instance.
+This frame itself never touches `sounddevice`/`cv2`/`ffmpeg` directly: all
+device/take/camera-preview work happens inside the backend, and this frame
+just reflects whatever state it reports back (via `recording_status`/
+`preview_paused`/`preview_resumed` events, and streamed preview frames).
 """
 
 from __future__ import annotations
 
+import io
 import threading
 import tkinter as tk
-from pathlib import Path
 from tkinter import messagebox, ttk
 
-from ..config import Instrument, InputLabel, StudioConfig
-from ..inspiration import (
-    InspirationError,
-    download_inspiration_track,
-    find_or_add_inspiration_track,
-    query_inspiration_tracks,
-)
-from ..project import Project, TakeInfo, TrackEntry
-from ..utils import format_duration, next_take_number, take_filename, wall_timestamp
-
-PREVIEW_WIDTH = 360
+from ..backend import BackendError, StartRecordingRequest
+from ..config import StudioConfig
+from ..project import Setlist, TrackEntry
+from ..streamdeck_controller import StreamDeckController
+from ..utils import format_duration
+from .app_state import AppState
 
 
 class RecordFrame(ttk.Frame):
     """Instrument/project/track picker, camera preview, and recording."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
-        self.config_obj = StudioConfig.load()
-        self._projects = Project.list_projects(Path(self.config_obj.projects_dir))
-        self._project: Project | None = None
+        self.app_state = app_state
+        self.config_obj: StudioConfig | None = None
+        self._project_names: list[str] = []
+        self._project_name: str | None = None
+        self._setlist: Setlist | None = None
 
         self._selected_track: TrackEntry | None = None
+        self._selected_track_index: int | None = None
         self._selected_inspiration_info: dict | None = None
         self._selected_track_source: str | None = None  # "playlist" | "inspiration"
         self._inspiration_tracks: list[dict] = []
 
-        self._engine = None
-        self._video_recorder = None
-        self._current_track: TrackEntry | None = None
-        self._current_inst: Instrument | None = None
-        self._current_take_num: int = 0
-        self._rec_path: Path | None = None
-        self._video_raw: Path | None = None
-        self._mix_flac: Path | None = None
-        self._final_video: Path | None = None
-        self._record_start_wall_time: str = ""
-        self._recording = False
-
-        self._cv2 = None
-        self._cap = None
-        self._preview_job: str | None = None
+        self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
+        self._preview_sub = None
         self._preview_imgtk = None
 
+        self._current_backend = None
+        self.app_state.add_listener(self._on_app_state_changed)
+        self.bind("<Destroy>", self._on_destroy)
+
+        ttk.Label(self, text="Loading...").pack(anchor="w")
+        self._attach_backend()
+
+        self._streamdeck = StreamDeckController()
+        threading.Thread(target=self._connect_streamdeck, daemon=True).start()
+
+    # --- StreamDeck (Record/Stop toggle + backing/takes volume) ---
+
+    def _connect_streamdeck(self) -> None:
+        if self._streamdeck.connect(self._on_streamdeck_key):
+            self._streamdeck.use_ui_record_layout()
+            self.after(0, lambda: self._streamdeck.update_recording_toggle(self._phase))
+
+    def _on_streamdeck_key(self, key: str) -> None:
+        self.after(0, lambda: self._handle_streamdeck_key(key))
+
+    def _handle_streamdeck_key(self, key: str) -> None:
+        if not self.winfo_exists():
+            return
+        if key == "r":
+            if hasattr(self, "record_button") and "disabled" not in self.record_button.state():
+                self._on_toggle_recording()
+        elif key == "n":
+            self._advance_to_next_track()
+        elif key in ("l", "u", "[", "]"):
+            self._adjust_streamdeck_volume(key)
+
+    def _advance_to_next_track(self) -> None:
+        """StreamDeck "Next" key: jump to the next playlist track that doesn't
+        already have a take for the current instrument, and start loading it —
+        lets a performer move song to song without touching the mouse."""
+        if self._phase != "idle" or not self._setlist:
+            return
+        inst_name = self.instrument_var.get()
+        if not inst_name:
+            return
+        start = 0
+        if self._selected_track_source == "playlist" and self._selected_track_index is not None:
+            start = self._selected_track_index + 1
+        tracks = self._setlist.tracks
+        for i in range(start, len(tracks)):
+            if tracks[i].get_take_for_instrument(inst_name) is None:
+                self._select_playlist_track(i)
+                self._start_recording()
+                return
+        self.status_var.set(f"All tracks already have a take for '{inst_name}'.")
+
+    def _select_playlist_track(self, index: int) -> None:
+        self.playlist_listbox.selection_clear(0, tk.END)
+        self.playlist_listbox.selection_set(index)
+        self.playlist_listbox.see(index)
+        self.inspiration_listbox.selection_clear(0, tk.END)
+        self._selected_track = self._setlist.tracks[index]
+        self._selected_track_index = index
+        self._selected_inspiration_info = None
+        self._selected_track_source = "playlist"
+        self.selection_var.set(f"Selected: {self._selected_track.name} (playlist)")
+        self._update_start_button_state()
+
+    def _adjust_streamdeck_volume(self, key: str) -> None:
+        if self._phase not in ("waiting", "recording"):
+            return
+        delta = 5 if key in ("u", "]") else -5
+        adjust = "adjust_takes_volume" if key in ("[", "]") else "adjust_backing_volume"
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                getattr(backend, adjust)(delta)
+            except BackendError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # --- backend attach / (re)load ---
+
+    def _attach_backend(self) -> None:
+        if self._current_backend is not None:
+            self._current_backend.off_event(self._on_backend_event)
+        self._stop_preview()
+        self._current_backend = self.app_state.backend
+        self._current_backend.on_event(self._on_backend_event)
+        self._clear_selection()
+        self._load()
+
+    def _on_app_state_changed(self) -> None:
+        if self.app_state.backend is not self._current_backend:
+            self._attach_backend()
+
+    def _load(self) -> None:
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                config = backend.get_config()
+                projects = backend.list_projects()
+                error = None
+            except BackendError as e:
+                config, projects, error = None, [], str(e)
+            self.after(0, lambda: self._on_loaded(config, projects, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_loaded(self, config: StudioConfig | None, projects: list[str], error: str | None) -> None:
+        if not self.winfo_exists():
+            return  # app closed (or frame torn down) before this load finished
+        for child in self.winfo_children():
+            child.destroy()
+        if error or config is None:
+            ttk.Label(self, text=error or "Could not load configuration.", foreground="#b00020").pack(anchor="w")
+            return
+        self.config_obj = config
+        self._project_names = projects
+
         left = ttk.Frame(self)
-        left.grid(row=0, column=0, sticky="n")
+        left.grid(row=0, column=0, sticky="new", padx=(0, 10))
         right = ttk.Frame(self)
-        right.grid(row=0, column=1, sticky="nsew", padx=(20, 0))
-        self.columnconfigure(1, weight=1)
+        right.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        self.columnconfigure(0, weight=1, uniform="record_halves")
+        self.columnconfigure(1, weight=1, uniform="record_halves")
+        self.rowconfigure(0, weight=1)
 
         self._build_left(left)
         self._build_right(right)
 
-        self.bind("<Destroy>", self._on_destroy)
         self._start_preview()
         self._on_project_change()
 
@@ -93,11 +198,10 @@ class RecordFrame(ttk.Frame):
         self.instrument_combo.bind("<<ComboboxSelected>>", self._on_instrument_change)
         row += 1
 
-        project_names = [p.name for p in self._projects]
         ttk.Label(left, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.project_var = tk.StringVar(value=project_names[0] if project_names else "")
+        self.project_var = tk.StringVar(value=self._project_names[0] if self._project_names else "")
         self.project_combo = ttk.Combobox(
-            left, textvariable=self.project_var, values=project_names, state="readonly", width=28,
+            left, textvariable=self.project_var, values=self._project_names, state="readonly", width=28,
         )
         self.project_combo.grid(row=row, column=1, sticky="w")
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_change)
@@ -109,14 +213,14 @@ class RecordFrame(ttk.Frame):
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
-        if not project_names:
+        if not self._project_names:
             ttk.Label(
                 left, text=f"No projects found in {self.config_obj.projects_dir}.",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 
-        self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white")
+        self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white", text="No camera preview")
         self.preview_label.grid(row=row, column=0, columnspan=2, pady=(12, 12))
         row += 1
 
@@ -125,25 +229,37 @@ class RecordFrame(ttk.Frame):
         row += 1
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(left, textvariable=self.status_var, foreground="#2a7d2a", wraplength=PREVIEW_WIDTH).grid(
+        ttk.Label(left, textvariable=self.status_var, foreground="#2a7d2a", wraplength=360).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         row += 1
 
         self.record_button = ttk.Button(left, text="Start Recording", command=self._on_toggle_recording)
         self.record_button.grid(row=row, column=0, columnspan=2, pady=(8, 0))
-        if not instrument_names or not project_names:
+        if not instrument_names or not self._project_names:
             self.record_button.state(["disabled"])
 
-    # --- right column: playlist + inspiration lists ---
+    # --- right column: Setlist / Inspiration tabs ---
 
     def _build_right(self, right: ttk.Frame) -> None:
-        ttk.Label(right, text="Playlist", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
-        playlist_wrap = ttk.Frame(right)
-        playlist_wrap.pack(fill="both", expand=True, pady=(4, 16))
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(0, weight=1)
+
+        notebook = ttk.Notebook(right)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        setlist_tab = ttk.Frame(notebook)
+        inspiration_tab = ttk.Frame(notebook)
+        notebook.add(setlist_tab, text="Setlist")
+        notebook.add(inspiration_tab, text="Inspiration")
+
+        setlist_tab.columnconfigure(0, weight=1)
+        setlist_tab.rowconfigure(0, weight=1)
+        playlist_wrap = ttk.Frame(setlist_tab)
+        playlist_wrap.grid(row=0, column=0, sticky="nsew", pady=(8, 0))
         playlist_scroll = ttk.Scrollbar(playlist_wrap, orient="vertical")
         self.playlist_listbox = tk.Listbox(
-            playlist_wrap, height=10, width=44, exportselection=False,
+            playlist_wrap, height=10, exportselection=False,
             yscrollcommand=playlist_scroll.set,
         )
         playlist_scroll.configure(command=self.playlist_listbox.yview)
@@ -151,19 +267,23 @@ class RecordFrame(ttk.Frame):
         playlist_scroll.pack(side="right", fill="y")
         self.playlist_listbox.bind("<<ListboxSelect>>", self._on_playlist_select)
 
-        inspiration_header = ttk.Frame(right)
-        inspiration_header.pack(fill="x")
+        inspiration_tab.columnconfigure(0, weight=1)
+        inspiration_tab.rowconfigure(2, weight=1)
+        inspiration_header = ttk.Frame(inspiration_tab)
+        inspiration_header.grid(row=0, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(inspiration_header, text="Inspiration Tracks", font=("TkDefaultFont", 11, "bold")).pack(side="left")
         ttk.Button(inspiration_header, text="↻ Refresh", command=self._refresh_inspiration).pack(side="right")
 
         self.inspiration_status_var = tk.StringVar(value="")
-        ttk.Label(right, textvariable=self.inspiration_status_var, foreground="#666666").pack(anchor="w", pady=(2, 4))
+        ttk.Label(inspiration_tab, textvariable=self.inspiration_status_var, foreground="#666666").grid(
+            row=1, column=0, sticky="w", pady=(2, 4)
+        )
 
-        inspiration_wrap = ttk.Frame(right)
-        inspiration_wrap.pack(fill="both", expand=True)
+        inspiration_wrap = ttk.Frame(inspiration_tab)
+        inspiration_wrap.grid(row=2, column=0, sticky="nsew")
         inspiration_scroll = ttk.Scrollbar(inspiration_wrap, orient="vertical")
         self.inspiration_listbox = tk.Listbox(
-            inspiration_wrap, height=10, width=44, exportselection=False,
+            inspiration_wrap, height=10, exportselection=False,
             yscrollcommand=inspiration_scroll.set,
         )
         inspiration_scroll.configure(command=self.inspiration_listbox.yview)
@@ -186,26 +306,26 @@ class RecordFrame(ttk.Frame):
 
     def _refresh_playlist(self) -> None:
         self.playlist_listbox.delete(0, tk.END)
-        if not self._project:
+        if not self._setlist:
             return
         inst_name = self.instrument_var.get()
-        for track in self._project.setlist.tracks:
+        for track in self._setlist.tracks:
             self.playlist_listbox.insert(tk.END, self._track_display(track, inst_name))
 
     def _refresh_inspiration(self) -> None:
         self.inspiration_listbox.delete(0, tk.END)
         self._inspiration_tracks = []
-        if not self._project:
+        if not self._project_name:
             return
         self.inspiration_status_var.set("Loading inspiration tracks...")
+        backend = self.app_state.backend
+        project_name = self._project_name
 
         def worker() -> None:
             try:
-                tracks = query_inspiration_tracks(self._project, self.config_obj)
-                error = None
-            except InspirationError as e:
-                tracks = []
-                error = str(e)
+                tracks, error = backend.query_inspiration_tracks(project_name), None
+            except BackendError as e:
+                tracks, error = [], str(e)
             self.after(0, lambda: self._on_inspiration_loaded(tracks, error))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -222,18 +342,65 @@ class RecordFrame(ttk.Frame):
 
     def _clear_selection(self) -> None:
         self._selected_track = None
+        self._selected_track_index = None
         self._selected_inspiration_info = None
         self._selected_track_source = None
-        self.selection_var.set("No track selected")
+        if hasattr(self, "selection_var"):
+            self.selection_var.set("No track selected")
         self._update_start_button_state()
 
     def _on_project_change(self, _event: object = None) -> None:
-        project_name = self.project_var.get()
-        project_path = next((p for p in self._projects if p.name == project_name), None)
-        self._project = Project.open(project_path) if project_path else None
         self._clear_selection()
+        if hasattr(self, "playlist_listbox"):
+            self.playlist_listbox.delete(0, tk.END)
+        self._setlist = None
+        project_name = self.project_var.get() if hasattr(self, "project_var") else ""
+        self._project_name = project_name or None
+        if not self._project_name:
+            self._refresh_inspiration()
+            return
+
+        backend = self.app_state.backend
+        project_name = self._project_name
+
+        def worker() -> None:
+            try:
+                data, error = backend.get_setlist(project_name), None
+            except BackendError as e:
+                data, error = None, str(e)
+            self.after(0, lambda: self._on_setlist_loaded(data, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_setlist_loaded(self, data: dict | None, error: str | None) -> None:
+        if error or data is None:
+            self.selection_var.set(f"Could not load project: {error}")
+            return
+        self._setlist = Setlist.from_dict(data)
         self._refresh_playlist()
         self._refresh_inspiration()
+
+    def _refresh_playlist_from_server(self) -> None:
+        """Re-fetch just the current project's setlist (e.g. after a take
+        finishes) without disturbing the current project/instrument selection
+        or re-querying inspiration tracks."""
+        if not self._project_name:
+            return
+        backend = self.app_state.backend
+        project_name = self._project_name
+
+        def worker() -> None:
+            try:
+                data = backend.get_setlist(project_name)
+            except BackendError:
+                return
+            self.after(0, lambda: self._apply_refreshed_setlist(data))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_refreshed_setlist(self, data: dict) -> None:
+        self._setlist = Setlist.from_dict(data)
+        self._refresh_playlist()
 
     def _on_instrument_change(self, _event: object = None) -> None:
         self._refresh_playlist()
@@ -241,9 +408,10 @@ class RecordFrame(ttk.Frame):
 
     def _on_playlist_select(self, _event: object = None) -> None:
         sel = self.playlist_listbox.curselection()
-        if not sel or not self._project:
+        if not sel or not self._setlist:
             return
-        self._selected_track = self._project.setlist.tracks[sel[0]]
+        self._selected_track = self._setlist.tracks[sel[0]]
+        self._selected_track_index = sel[0]
         self._selected_inspiration_info = None
         self._selected_track_source = "playlist"
         self.inspiration_listbox.selection_clear(0, tk.END)
@@ -256,6 +424,7 @@ class RecordFrame(ttk.Frame):
             return
         info = self._inspiration_tracks[sel[0]]
         self._selected_track = None
+        self._selected_track_index = None
         self._selected_inspiration_info = info
         self._selected_track_source = "inspiration"
         self.playlist_listbox.selection_clear(0, tk.END)
@@ -265,12 +434,14 @@ class RecordFrame(ttk.Frame):
         self._update_start_button_state()
 
     def _update_start_button_state(self) -> None:
-        if self._recording:
+        if not hasattr(self, "record_button"):
+            return
+        if self._phase != "idle":
             self.record_button.state(["!disabled"])
             return
         ready = (
             bool(self.instrument_var.get())
-            and self._project is not None
+            and self._project_name is not None
             and self._selected_track_source is not None
         )
         self.record_button.state(["!disabled"] if ready else ["disabled"])
@@ -283,274 +454,160 @@ class RecordFrame(ttk.Frame):
         self.playlist_listbox.configure(state=list_state)
         self.inspiration_listbox.configure(state=list_state)
 
-    # --- camera preview ---
+    # --- camera preview (frames streamed from the backend, local or remote) ---
 
     def _start_preview(self) -> None:
-        if not self.config_obj.camera_device:
+        if self._preview_sub is not None:
+            return
+        if self.config_obj is not None and not self.config_obj.camera_device:
             self.preview_label.configure(text="No camera configured", image="")
             return
+        self.preview_label.configure(text="Waiting for camera preview...", image="")
+        self._preview_sub = self.app_state.backend.open_camera_preview(self._on_preview_frame)
+
+    def _on_preview_frame(self, jpeg: bytes) -> None:
+        self.after(0, lambda: self._render_preview_frame(jpeg))
+
+    def _render_preview_frame(self, jpeg: bytes) -> None:
+        if self._preview_sub is None:
+            return  # unsubscribed since this frame was queued onto the Tk thread
+        from PIL import Image, ImageTk
         try:
-            import cv2
-        except ImportError:
-            self.preview_label.configure(
-                text="Camera preview unavailable\n(pip install jampy[camera-preview])",
-                image="",
-            )
+            image = Image.open(io.BytesIO(jpeg))
+        except Exception:
             return
-
-        self._cv2 = cv2
-        device = self.config_obj.camera_device
-        index = int(device) if device.isdigit() else device
-        self._cap = cv2.VideoCapture(index)
-        if not self._cap.isOpened():
-            self.preview_label.configure(text="Could not open camera", image="")
-            self._cap = None
-            return
-        self._schedule_preview_frame()
-
-    def _schedule_preview_frame(self) -> None:
-        self._preview_job = self.after(33, self._update_preview)
-
-    def _update_preview(self) -> None:
-        if not self._cap:
-            return
-        ok, frame = self._cap.read()
-        if ok:
-            from PIL import Image, ImageTk
-            cv2 = self._cv2
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            h, w = frame.shape[:2]
-            new_h = max(1, int(PREVIEW_WIDTH * h / w))
-            image = Image.fromarray(frame).resize((PREVIEW_WIDTH, new_h))
-            self._preview_imgtk = ImageTk.PhotoImage(image)
-            self.preview_label.configure(image=self._preview_imgtk, text="")
-        self._schedule_preview_frame()
+        self._preview_imgtk = ImageTk.PhotoImage(image)
+        self.preview_label.configure(image=self._preview_imgtk, text="")
 
     def _stop_preview(self) -> None:
-        if self._preview_job is not None:
-            self.after_cancel(self._preview_job)
-            self._preview_job = None
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
+        if self._preview_sub is not None:
+            self._preview_sub.close()
+            self._preview_sub = None
 
     def _on_destroy(self, _event: object) -> None:
         self._stop_preview()
-        self._stop_recording_internal()
+        if self._current_backend is not None:
+            self._current_backend.off_event(self._on_backend_event)
+        self.app_state.remove_listener(self._on_app_state_changed)
+        self._streamdeck.disconnect()
 
     # --- recording ---
 
     def _on_toggle_recording(self) -> None:
-        if self._recording:
-            self._stop_recording()
-        else:
+        if self._phase == "idle":
             self._start_recording()
-
-    def _resolve_target(self) -> tuple[TrackEntry | None, bool, Path | None]:
-        """Return (track, needs_download, backing_path) for the current selection."""
-        if self._selected_track_source == "playlist" and self._selected_track is not None:
-            track = self._selected_track
-        elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
-            track = find_or_add_inspiration_track(self._project, self._selected_inspiration_info)
-            self._project.save_setlist()
-            self._refresh_playlist()
-        else:
-            return None, False, None
-        backing_path = self._project.backing_tracks_dir / track.backing_track
-        needs_download = bool(track.inspiration_track_id) and not backing_path.exists()
-        return track, needs_download, backing_path
+        elif self._phase == "waiting":
+            self._unpause_recording()
+        elif self._phase == "recording":
+            self._stop_recording()
 
     def _start_recording(self) -> None:
         instrument_name = self.instrument_var.get()
-        inst = self.config_obj.get_instrument(instrument_name)
-        if inst is None or self._project is None:
+        if not instrument_name or not self._project_name:
             messagebox.showerror("Cannot start", "Select an instrument and a project first.")
             return
 
-        track, needs_download, backing_path = self._resolve_target()
-        if track is None:
+        if self._selected_track_source == "playlist" and self._selected_track_index is not None:
+            req = StartRecordingRequest(
+                project_name=self._project_name, instrument_name=instrument_name,
+                track_source="playlist", track_index=self._selected_track_index,
+            )
+        elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
+            req = StartRecordingRequest(
+                project_name=self._project_name, instrument_name=instrument_name,
+                track_source="inspiration", inspiration_info=self._selected_inspiration_info,
+            )
+        else:
             messagebox.showerror("Cannot start", "Select a track from the Playlist or Inspiration list first.")
-            return
-
-        input_info = self.config_obj.resolve_input(inst.input_label)
-        if input_info is None:
-            messagebox.showerror("Cannot start", f"Input label '{inst.input_label}' not found in config.")
             return
 
         self.record_button.state(["disabled"])
         self._set_controls_enabled(False)
+        self.status_var.set("Loading...")
+        backend = self.app_state.backend
 
-        if needs_download:
-            self.status_var.set(f"Downloading '{track.name}'...")
+        def worker() -> None:
+            try:
+                backend.start_recording(req)
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_start_result(error))
 
-            def worker() -> None:
-                try:
-                    download_inspiration_track(track, backing_path, self.config_obj)
-                    error = None
-                except InspirationError as e:
-                    error = str(e)
-                self.after(0, lambda: self._continue_start(inst, input_info, track, error))
+        threading.Thread(target=worker, daemon=True).start()
 
-            threading.Thread(target=worker, daemon=True).start()
-        else:
-            self._continue_start(inst, input_info, track, None)
-
-    def _continue_start(
-        self, inst: Instrument, input_info: InputLabel, track: TrackEntry, error: str | None,
-    ) -> None:
+    def _on_start_result(self, error: str | None) -> None:
+        # On success, the "recording_status" event the backend emits before
+        # start_recording() returns already updated button/state via
+        # _handle_backend_event — nothing left to do here.
         if error:
-            messagebox.showerror("Download failed", error)
+            messagebox.showerror("Cannot start", error)
             self._set_controls_enabled(True)
+            self.status_var.set("")
             self._update_start_button_state()
-            return
 
-        try:
-            import sounddevice as sd
-        except Exception as e:
-            messagebox.showerror("Cannot start", f"sounddevice unavailable: {e}")
-            self._set_controls_enabled(True)
-            self._update_start_button_state()
-            return
+    def _unpause_recording(self) -> None:
+        self.record_button.state(["disabled"])
+        backend = self.app_state.backend
 
-        from ..audio.devices import resolve_device
-        out_dev = resolve_device(sd, self.config_obj.output_device, "output")
-        in_dev = resolve_device(sd, input_info.device, "input")
-        if in_dev is None:
-            messagebox.showerror("Cannot start", f"Input device '{input_info.device}' not found.")
-            self._set_controls_enabled(True)
-            self._update_start_button_state()
-            return
+        def worker() -> None:
+            try:
+                backend.unpause_recording()
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_unpause_result(error))
 
-        in_info = sd.query_devices(in_dev, "input")
-        out_info = sd.query_devices(out_dev, "output")
-        max_in = in_info["max_input_channels"]
-        if input_info.channel > max_in:
-            messagebox.showerror(
-                "Cannot start",
-                f"Instrument '{inst.name}' needs input channel {input_info.channel} "
-                f"but device only has {max_in} channels.",
-            )
-            self._set_controls_enabled(True)
-            self._update_start_button_state()
-            return
-        output_channels = min(self.config_obj.output_channels, out_info["max_output_channels"])
+        threading.Thread(target=worker, daemon=True).start()
 
-        from ..audio.engine import AudioEngine
-        engine = AudioEngine(
-            sample_rate=self.config_obj.sample_rate,
-            buffer_size=self.config_obj.buffer_size,
-            input_device=in_dev,
-            output_device=out_dev,
-            input_channels=max(input_info.channel, 1),
-            output_channels=max(1, output_channels),
-            monitor_channel=input_info.channel - 1,
-        )
-
-        backing_path = self._project.backing_tracks_dir / track.backing_track
-        if backing_path.exists():
-            engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
-
-        # Layer in other instruments' preferred takes, same as jampy start-session.
-        trim = int(self.config_obj.latency_compensation_ms / 1000.0 * self.config_obj.sample_rate)
-        for other_inst, take_info in track.preferred_takes.items():
-            if other_inst.lower() == inst.name.lower():
-                continue
-            take_path = self._project.completed_takes_dir / take_info.filename
-            if take_path.exists():
-                effective_vol = take_info.volume * (track.takes_volume / 100.0)
-                engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
-
-        # Release the preview's camera handle so ffmpeg can open it exclusively.
-        self._stop_preview()
-
-        self._record_start_wall_time = wall_timestamp()
-        engine.start()
-        engine.mixer.reset()
-        engine.mixer.set_playing(True)
-
-        take_num = next_take_number(self._project.completed_takes_dir, track.name, inst.name)
-        fname = take_filename(track.name, inst.name, take_num, "flac")
-        rec_path = self._project.completed_takes_dir / fname
-        engine.start_recording(rec_path)
-
-        video_recorder = None
-        video_raw = mix_flac = final_video = None
-        if self.config_obj.camera_device:
-            from ..video.capture import VideoRecorder, ffmpeg_available
-            if ffmpeg_available():
-                video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
-                mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
-                final_video = rec_path.with_suffix(".mp4")
-                video_recorder = VideoRecorder(self.config_obj.camera_device, video_raw)
-                if video_recorder.start():
-                    engine.start_mix_recording(mix_flac)
-                else:
-                    video_recorder = None
-                    self.status_var.set("Warning: could not start camera recording.")
-
-        self._engine = engine
-        self._video_recorder = video_recorder
-        self._current_track = track
-        self._current_inst = inst
-        self._current_take_num = take_num
-        self._rec_path = rec_path
-        self._video_raw = video_raw
-        self._mix_flac = mix_flac
-        self._final_video = final_video
-
-        self._recording = True
-        self.record_button.configure(text="Stop Recording")
-        self.record_button.state(["!disabled"])
-        self.status_var.set(f"Recording '{track.name}' — take {take_num}")
+    def _on_unpause_result(self, error: str | None) -> None:
+        # On success, the "recording_status" event already updated the button
+        # via _handle_backend_event — nothing left to do here.
+        if error:
+            messagebox.showerror("Cannot unpause", error)
+            self.record_button.state(["!disabled"])
 
     def _stop_recording(self) -> None:
-        self._stop_recording_internal()
-        self.record_button.configure(text="Start Recording")
-        self._set_controls_enabled(True)
-        self._refresh_playlist()
-        self._start_preview()
+        self.record_button.state(["disabled"])
+        backend = self.app_state.backend
 
-    def _stop_recording_internal(self) -> None:
-        if not self._recording:
-            return
-        self._recording = False
+        def worker() -> None:
+            try:
+                backend.stop_recording()
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_stop_result(error))
 
-        engine = self._engine
-        self._engine = None
-        if engine:
-            engine.stop_recording()
-            engine.mixer.set_playing(False)
+        threading.Thread(target=worker, daemon=True).start()
 
-        take_info = TakeInfo(
-            instrument=self._current_inst.name, take_number=self._current_take_num,
-            filename=self._rec_path.name,
-        )
-        self._current_track.set_preferred_take(self._current_inst.name, take_info)
-        self._project.save_setlist()
+    def _on_stop_result(self, error: str | None) -> None:
+        self.record_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("Stop failed", error)
 
-        if engine:
-            engine.stop()
+    # --- backend events (recording_status / preview_paused / preview_resumed) ---
 
-        if self._video_recorder:
-            self._video_recorder.stop()
-            from ..video.capture import format_watermark_text, mux_video_audio
-            musician = self._current_inst.musician or self.config_obj.studio_musician
-            watermark_text = format_watermark_text(
-                musician, self._current_inst.name, self._record_start_wall_time, self._current_track.name,
-            )
-            if mux_video_audio(
-                self._video_raw, self._mix_flac, self._rec_path, self._final_video,
-                watermark_text=watermark_text,
-            ):
-                self._video_raw.unlink(missing_ok=True)
-                self._mix_flac.unlink(missing_ok=True)
-                self.status_var.set(f"Saved take {self._current_take_num} + video for '{self._current_track.name}'")
-            else:
-                self.status_var.set(
-                    f"Saved take {self._current_take_num} for '{self._current_track.name}'; video mux failed"
-                )
-            self._video_recorder = None
-        else:
-            self.status_var.set(f"Saved take {self._current_take_num} for '{self._current_track.name}'")
+    def _on_backend_event(self, event: str, data: dict) -> None:
+        self.after(0, lambda: self._handle_backend_event(event, data))
 
-        self._update_start_button_state()
+    _PHASE_BUTTON_TEXT = {"idle": "Start Recording", "waiting": "Unpause", "recording": "Stop Recording"}
+
+    def _handle_backend_event(self, event: str, data: dict) -> None:
+        if event == "recording_status":
+            if "status" in data:
+                self.status_var.set(data["status"])
+            if "phase" in data:
+                self._phase = data["phase"]
+                self.app_state.recording_active = self._phase in ("waiting", "recording")
+                self.record_button.configure(text=self._PHASE_BUTTON_TEXT[self._phase])
+                self.record_button.state(["!disabled"])
+                self._set_controls_enabled(self._phase == "idle")
+                if self._phase == "idle":
+                    self._refresh_playlist_from_server()
+                self._update_start_button_state()
+                self._streamdeck.update_recording_toggle(self._phase)
+        elif event == "preview_paused":
+            self.preview_label.configure(text="Recording — preview paused", image="")
+        elif event == "preview_resumed":
+            self.preview_label.configure(text="Waiting for camera preview...", image="")

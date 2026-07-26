@@ -40,12 +40,18 @@ class StudioConfig:
     inspiration_server: str = ""  # e.g. "http://myserver:8000"
     inspiration_api_key: str = ""
     inspiration_volume: float = 1.0
+    last_backing_volume: int = 70  # remembered mixer level, seeded onto every newly loaded track
+    last_takes_volume: int = 100
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
     camera_device: str = ""  # platform-specific ffmpeg device id, e.g. avfoundation index or /dev/video0
     camera_label: str = ""   # human-friendly camera name, for display only
+    remote_server_enabled: bool = False  # accept incoming remote-control connections
+    remote_server_port: int = 51823
+    remote_token: str = ""  # shared secret: required of incoming connections, presented to outgoing ones
+    remote_last_host: str = ""  # last IP/host connected to, for prefilling the Remote tab
     input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 
@@ -72,18 +78,25 @@ class StudioConfig:
                 return il
         return None
 
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> StudioConfig:
+        data = dict(data)
+        input_labels = [InputLabel(**il) for il in data.pop("input_labels", [])]
+        instruments = [Instrument(**i) for i in data.pop("instruments", [])]
+        filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+        return cls(**filtered, input_labels=input_labels, instruments=instruments)
+
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
-        path.write_text(json.dumps(asdict(self), indent=2))
+        path.write_text(json.dumps(self.to_dict(), indent=2))
 
     @classmethod
     def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> StudioConfig:
         if not path.exists():
             return cls()
-        data = json.loads(path.read_text())
-        input_labels = [InputLabel(**il) for il in data.pop("input_labels", [])]
-        instruments = [Instrument(**i) for i in data.pop("instruments", [])]
-        filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        return cls(**filtered, input_labels=input_labels, instruments=instruments)
+        return cls.from_dict(json.loads(path.read_text()))
 
     @classmethod
     def exists(cls, path: Path = DEFAULT_CONFIG_PATH) -> bool:
