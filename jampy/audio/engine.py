@@ -40,6 +40,7 @@ class AudioEngine:
 
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
+        self.mix_recorder: Recorder | None = None
         self.mixer = Mixer(sample_rate)
         self._stream: sd.Stream | None = None
         self._running = False
@@ -64,6 +65,18 @@ class AudioEngine:
         if self.session_recorder:
             self.session_recorder.stop()
             self.session_recorder = None
+
+    def start_mix_recording(self, output_path: Path) -> None:
+        """Start recording the full monitor mix (backing track + input), for
+        muxing with a session video recording."""
+        self.mix_recorder = Recorder(output_path, self.sample_rate, self.output_channels)
+        self.mix_recorder.start()
+
+    def stop_mix_recording(self) -> None:
+        """Stop the monitor-mix recorder."""
+        if self.mix_recorder:
+            self.mix_recorder.stop()
+            self.mix_recorder = None
 
     def start_recording(self, output_path: Path) -> None:
         """Create and start the per-take recorder."""
@@ -111,6 +124,9 @@ class AudioEngine:
 
         np.clip(outdata, -1.0, 1.0, out=outdata)
 
+        if self.mix_recorder:
+            self.mix_recorder.write(outdata)
+
         # Check if song ended
         if self.mixer.is_playing and self.mixer.is_finished:
             self.mixer.set_playing(False)
@@ -145,6 +161,7 @@ class AudioEngine:
             self._stream = None
         self.stop_recording()
         self.stop_session_recording()
+        self.stop_mix_recording()
 
     @property
     def is_running(self) -> bool:

@@ -44,6 +44,8 @@ class StudioConfig:
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""
+    camera_device: str = ""  # platform-specific ffmpeg device id, e.g. avfoundation index or /dev/video0
+    camera_label: str = ""   # human-friendly camera name, for display only
     input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 

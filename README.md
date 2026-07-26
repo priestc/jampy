@@ -25,9 +25,12 @@ Configure your studio in three steps. Each command reads and updates `~/studio_c
 
 ```bash
 jampy setup-studio              # studio name, location, musician, backup server
-jampy setup-recording-devices   # sample rate, buffer size, output device, input labels
+jampy setup-recording-devices   # sample rate, buffer size, output device, input labels, camera
 jampy setup-instruments         # assign instruments to input channels
 ```
+
+`setup-recording-devices` also lets you pick a camera. If one is configured, every session
+records video alongside the audio (see [Recording Session](#recording-session)).
 
 ### Creating a Project
 
@@ -73,6 +76,10 @@ The session plays the backing track through your speakers, monitors your instrum
 
 **Volume adjustments** are saved back to `setlist.json` at the end of the session.
 
+**Video:** if a camera is configured (`jampy setup-recording-devices`), the whole session is
+also recorded on video, muxed with the full monitor mix (backing track + your instrument), and
+saved as `session_video.mp4` alongside `session.flac` once the session ends.
+
 ### Multi-Instrument Layering
 
 Start a new session with a different instrument (e.g. "bass"). The backing track plays mixed with your previously recorded preferred takes, so you hear everything together while recording the new part.
@@ -98,9 +105,10 @@ My Album/
 └── sessions/
     └── 2025-01-15_14-30-00_guitar/
         ├── session.flac
+        ├── session_video.mp4
         └── session_log.json
 ```
 
 - `completed_takes/` — individual per-song recordings, one file per take
-- `sessions/` — continuous raw recording (`session.flac`) spanning the full session, plus the session log with musician, studio, and event data
+- `sessions/` — continuous raw recording (`session.flac`) spanning the full session, plus the session log with musician, studio, and event data. `session_video.mp4` is only present when a camera is configured.
 - Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.

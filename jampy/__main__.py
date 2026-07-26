@@ -190,12 +190,41 @@ def setup_recording_devices() -> None:
             if new_labels:
                 input_labels = new_labels
 
+    # --- Camera Setup ---
+    click.echo("\n--- Camera Setup ---")
+    from .video.devices import list_cameras, ffmpeg_available
+    camera_device = existing.camera_device
+    camera_label = existing.camera_label
+    if not ffmpeg_available():
+        click.echo("ffmpeg not found; camera recording will be unavailable.")
+    else:
+        cameras = list_cameras()
+        if cameras:
+            click.echo("Available cameras:")
+            for device_id, name in cameras:
+                marker = " *" if device_id == existing.camera_device else ""
+                click.echo(f"  [{device_id}] {name}{marker}")
+            sel = click.prompt(
+                "Select camera device id (leave empty to disable camera recording)",
+                default=existing.camera_device, show_default=bool(existing.camera_device),
+            ).strip()
+            if not sel:
+                camera_device = ""
+                camera_label = ""
+            else:
+                camera_device = sel
+                camera_label = next((name for dev_id, name in cameras if dev_id == sel), "")
+        else:
+            click.echo("No cameras detected.")
+
     existing.sample_rate = int(sample_rate)
     existing.buffer_size = int(buffer_size)
     existing.output_device = output_device_name
     existing.output_channels = output_channels
     existing.latency_compensation_ms = latency_compensation_ms
     existing.input_labels = input_labels
+    existing.camera_device = camera_device
+    existing.camera_label = camera_label
 
     errors = existing.validate()
     if errors:
@@ -209,6 +238,10 @@ def setup_recording_devices() -> None:
         click.echo("Inputs:")
         for il in input_labels:
             click.echo(f"  - {il.label} ({il.device} ch{il.channel})")
+    if camera_device:
+        click.echo(f"Camera: {camera_label} ({camera_device})")
+    else:
+        click.echo("Camera: none (video recording disabled)")
 
 
 @main.command()
@@ -641,11 +674,43 @@ def start_session(instrument: str) -> None:
     session_flac = session.session_dir / "session.flac" if session.session_dir else None
     if session_flac:
         engine.start_session_recording(session_flac)
+
+    video_recorder = None
+    session_video_raw = None
+    session_mix_flac = None
+    if config.camera_device and session.session_dir:
+        from .video.capture import VideoRecorder, ffmpeg_available
+        if ffmpeg_available():
+            session_video_raw = session.session_dir / "session_video_raw.mp4"
+            session_mix_flac = session.session_dir / "session_mix.flac"
+            video_recorder = VideoRecorder(config.camera_device, session_video_raw)
+            if video_recorder.start():
+                engine.start_mix_recording(session_mix_flac)
+                click.echo(f"Recording video from '{config.camera_label or config.camera_device}'.")
+            else:
+                click.echo("Warning: could not start camera recording.")
+                video_recorder = None
+        else:
+            click.echo("Warning: ffmpeg not found, skipping camera recording.")
+
     with _recording_context(project, config) as (streamdeck, sd_keys):
         try:
             _run_session_loop(session, engine, streamdeck, sd_keys)
         finally:
             engine.stop()
+            if video_recorder:
+                video_recorder.stop()
+                from .video.capture import mux_video_audio
+                session_video = session.session_dir / "session_video.mp4"
+                if mux_video_audio(session_video_raw, session_mix_flac, session_video):
+                    session_video_raw.unlink(missing_ok=True)
+                    session_mix_flac.unlink(missing_ok=True)
+                    click.echo(f"Session video saved to {session_video}")
+                else:
+                    click.echo(
+                        f"Warning: could not mux session video; "
+                        f"raw files kept in {session.session_dir}"
+                    )
             # Clean up downloaded inspiration backing tracks before sync
             for track in project.setlist.tracks:
                 if track.inspiration_track_id:
