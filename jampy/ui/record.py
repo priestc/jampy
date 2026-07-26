@@ -25,7 +25,7 @@ from ..inspiration import (
     query_inspiration_tracks,
 )
 from ..project import Project, TakeInfo, TrackEntry
-from ..utils import format_duration, next_take_number, take_filename
+from ..utils import format_duration, next_take_number, take_filename, wall_timestamp
 
 PREVIEW_WIDTH = 360
 
@@ -53,6 +53,7 @@ class RecordFrame(ttk.Frame):
         self._video_raw: Path | None = None
         self._mix_flac: Path | None = None
         self._final_video: Path | None = None
+        self._record_start_wall_time: str = ""
         self._recording = False
 
         self._cv2 = None
@@ -462,6 +463,7 @@ class RecordFrame(ttk.Frame):
         # Release the preview's camera handle so ffmpeg can open it exclusively.
         self._stop_preview()
 
+        self._record_start_wall_time = wall_timestamp()
         engine.start()
         engine.mixer.reset()
         engine.mixer.set_playing(True)
@@ -531,8 +533,15 @@ class RecordFrame(ttk.Frame):
 
         if self._video_recorder:
             self._video_recorder.stop()
-            from ..video.capture import mux_video_audio
-            if mux_video_audio(self._video_raw, self._mix_flac, self._rec_path, self._final_video):
+            from ..video.capture import format_watermark_text, mux_video_audio
+            musician = self._current_inst.musician or self.config_obj.studio_musician
+            watermark_text = format_watermark_text(
+                musician, self._current_inst.name, self._record_start_wall_time, self._current_track.name,
+            )
+            if mux_video_audio(
+                self._video_raw, self._mix_flac, self._rec_path, self._final_video,
+                watermark_text=watermark_text,
+            ):
                 self._video_raw.unlink(missing_ok=True)
                 self._mix_flac.unlink(missing_ok=True)
                 self.status_var.set(f"Saved take {self._current_take_num} + video for '{self._current_track.name}'")

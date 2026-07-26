@@ -35,7 +35,7 @@ from .inspiration import (
     query_inspiration_tracks,
 )
 from .session import Session, SessionState
-from .utils import format_duration, take_filename, next_take_number, ensure_dir
+from .utils import format_duration, take_filename, next_take_number, ensure_dir, wall_timestamp
 
 
 @click.group()
@@ -677,6 +677,8 @@ def start_session(instrument: str) -> None:
     video_recorder = None
     session_video_raw = None
     session_mix_flac = None
+    video_start_wall_time = None
+    video_start_track_name = ""
     if config.camera_device and session.session_dir:
         from .video.capture import VideoRecorder, ffmpeg_available
         if ffmpeg_available():
@@ -685,6 +687,8 @@ def start_session(instrument: str) -> None:
             video_recorder = VideoRecorder(config.camera_device, session_video_raw)
             if video_recorder.start():
                 engine.start_mix_recording(session_mix_flac)
+                video_start_wall_time = wall_timestamp()
+                video_start_track_name = session.current_track.name if session.current_track else ""
                 click.echo(f"Recording video from '{config.camera_label or config.camera_device}'.")
             else:
                 click.echo("Warning: could not start camera recording.")
@@ -699,9 +703,17 @@ def start_session(instrument: str) -> None:
             engine.stop()
             if video_recorder:
                 video_recorder.stop()
-                from .video.capture import mux_video_audio
+                from .video.capture import format_watermark_text, mux_video_audio
                 session_video = session.session_dir / "session_video.mp4"
-                if mux_video_audio(session_video_raw, session_mix_flac, session_flac, session_video):
+                # Best-effort label: a session can move through several tracks, so
+                # this reflects whichever track was current when recording started.
+                watermark_text = format_watermark_text(
+                    session.musician, session.instrument, video_start_wall_time or "", video_start_track_name,
+                )
+                if mux_video_audio(
+                    session_video_raw, session_mix_flac, session_flac, session_video,
+                    watermark_text=watermark_text,
+                ):
                     session_video_raw.unlink(missing_ok=True)
                     session_mix_flac.unlink(missing_ok=True)
                     click.echo(f"Session video saved to {session_video}")
