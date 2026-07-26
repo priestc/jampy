@@ -46,6 +46,7 @@ class RecordFrame(ttk.Frame):
         self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
         self._preview_sub = None
         self._preview_imgtk = None
+        self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
 
         self._current_backend = None
         self.app_state.add_listener(self._on_app_state_changed)
@@ -220,8 +221,10 @@ class RecordFrame(ttk.Frame):
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 
+        left.columnconfigure(1, weight=1)
         self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white", text="No camera preview")
-        self.preview_label.grid(row=row, column=0, columnspan=2, pady=(12, 12))
+        self.preview_label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(12, 12))
+        self.preview_label.bind("<Configure>", self._on_preview_label_resize)
         row += 1
 
         self.selection_var = tk.StringVar(value="No track selected")
@@ -465,6 +468,9 @@ class RecordFrame(ttk.Frame):
         self.preview_label.configure(text="Waiting for camera preview...", image="")
         self._preview_sub = self.app_state.backend.open_camera_preview(self._on_preview_frame)
 
+    def _on_preview_label_resize(self, event: object) -> None:
+        self._preview_width = event.width  # type: ignore[attr-defined]
+
     def _on_preview_frame(self, jpeg: bytes) -> None:
         self.after(0, lambda: self._render_preview_frame(jpeg))
 
@@ -476,6 +482,13 @@ class RecordFrame(ttk.Frame):
             image = Image.open(io.BytesIO(jpeg))
         except Exception:
             return
+        # Camera frames come in at a fixed, deliberately small capture size (see
+        # backend.py) to keep local/remote streaming cheap. Upscale to fill the
+        # width Tk has actually given the label, preserving aspect ratio.
+        target_width = self._preview_width
+        if target_width and target_width != image.width:
+            new_height = max(1, round(image.height * target_width / image.width))
+            image = image.resize((target_width, new_height), Image.LANCZOS)
         self._preview_imgtk = ImageTk.PhotoImage(image)
         self.preview_label.configure(image=self._preview_imgtk, text="")
 
