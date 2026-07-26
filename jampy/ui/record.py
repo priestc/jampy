@@ -1,39 +1,58 @@
-"""Record page: pick an instrument + project, preview the camera, and
-start/stop a continuous recording.
+"""Record page: pick an instrument + project, choose a track from the
+project's playlist or from your inspiration library, preview the camera,
+and record a take.
 
-This is a first cut of the CLI's `start-session` workflow: it captures a
-continuous take (audio + optional video) for the selected instrument, the
-same way session.flac / session_video.mp4 work under `jampy start-session`.
-The per-track backing-track flow (record/back/end/next-track) isn't wired
-up yet — this just runs a single continuous take.
+This is a first cut of the CLI's `start-session` / `inspiration` workflow:
+picking a track loads its backing track (and any other instruments'
+preferred takes) into the mixer and records a proper take file, the same
+way `jampy start-session` does for a single track. The full multi-track
+auto-advance flow (back-to-start / next-track) isn't wired up yet — start
+a new recording for the next track when you're ready.
 """
 
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
-from ..config import StudioConfig
-from ..project import Project
-from ..utils import ensure_dir, wall_timestamp
+from ..config import Instrument, InputLabel, StudioConfig
+from ..inspiration import (
+    InspirationError,
+    download_inspiration_track,
+    find_or_add_inspiration_track,
+    query_inspiration_tracks,
+)
+from ..project import Project, TakeInfo, TrackEntry
+from ..utils import format_duration, next_take_number, take_filename
 
 PREVIEW_WIDTH = 360
 
 
 class RecordFrame(ttk.Frame):
-    """Instrument/project picker, camera preview, and start/stop recording."""
+    """Instrument/project/track picker, camera preview, and recording."""
 
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
         self.config_obj = StudioConfig.load()
         self._projects = Project.list_projects(Path(self.config_obj.projects_dir))
+        self._project: Project | None = None
+
+        self._selected_track: TrackEntry | None = None
+        self._selected_inspiration_info: dict | None = None
+        self._selected_track_source: str | None = None  # "playlist" | "inspiration"
+        self._inspiration_tracks: list[dict] = []
 
         self._engine = None
         self._video_recorder = None
-        self._session_dir: Path | None = None
-        self._session_video_raw: Path | None = None
-        self._session_mix_flac: Path | None = None
+        self._current_track: TrackEntry | None = None
+        self._current_inst: Instrument | None = None
+        self._current_take_num: int = 0
+        self._rec_path: Path | None = None
+        self._video_raw: Path | None = None
+        self._mix_flac: Path | None = None
+        self._final_video: Path | None = None
         self._recording = False
 
         self._cv2 = None
@@ -41,58 +60,227 @@ class RecordFrame(ttk.Frame):
         self._preview_job: str | None = None
         self._preview_imgtk = None
 
+        left = ttk.Frame(self)
+        left.grid(row=0, column=0, sticky="n")
+        right = ttk.Frame(self)
+        right.grid(row=0, column=1, sticky="nsew", padx=(20, 0))
+        self.columnconfigure(1, weight=1)
+
+        self._build_left(left)
+        self._build_right(right)
+
+        self.bind("<Destroy>", self._on_destroy)
+        self._start_preview()
+        self._on_project_change()
+
+    # --- left column: instrument/project/preview/controls ---
+
+    def _build_left(self, left: ttk.Frame) -> None:
         row = 0
-        ttk.Label(self, text="Record", font=("TkDefaultFont", 14, "bold")).grid(
+        ttk.Label(left, text="Record", font=("TkDefaultFont", 14, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(0, 12)
         )
         row += 1
 
         instrument_names = [inst.name for inst in self.config_obj.instruments]
-        ttk.Label(self, text="Instrument").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(left, text="Instrument").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.instrument_var = tk.StringVar(value=instrument_names[0] if instrument_names else "")
-        ttk.Combobox(
-            self, textvariable=self.instrument_var, values=instrument_names, state="readonly", width=28,
-        ).grid(row=row, column=1, sticky="w")
+        self.instrument_combo = ttk.Combobox(
+            left, textvariable=self.instrument_var, values=instrument_names, state="readonly", width=28,
+        )
+        self.instrument_combo.grid(row=row, column=1, sticky="w")
+        self.instrument_combo.bind("<<ComboboxSelected>>", self._on_instrument_change)
         row += 1
 
         project_names = [p.name for p in self._projects]
-        ttk.Label(self, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(left, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
         self.project_var = tk.StringVar(value=project_names[0] if project_names else "")
-        ttk.Combobox(
-            self, textvariable=self.project_var, values=project_names, state="readonly", width=28,
-        ).grid(row=row, column=1, sticky="w")
+        self.project_combo = ttk.Combobox(
+            left, textvariable=self.project_var, values=project_names, state="readonly", width=28,
+        )
+        self.project_combo.grid(row=row, column=1, sticky="w")
+        self.project_combo.bind("<<ComboboxSelected>>", self._on_project_change)
         row += 1
 
         if not instrument_names:
             ttk.Label(
-                self, text="No instruments configured. Set them up on the Instruments tab first.",
+                left, text="No instruments configured. Set them up on the Instruments tab first.",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
         if not project_names:
             ttk.Label(
-                self, text=f"No projects found in {self.config_obj.projects_dir}.",
+                left, text=f"No projects found in {self.config_obj.projects_dir}.",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
 
-        self.preview_label = tk.Label(self, background="#1a1a1a", foreground="white")
+        self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white")
         self.preview_label.grid(row=row, column=0, columnspan=2, pady=(12, 12))
         row += 1
 
+        self.selection_var = tk.StringVar(value="No track selected")
+        ttk.Label(left, textvariable=self.selection_var).grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
         self.status_var = tk.StringVar(value="")
-        ttk.Label(self, textvariable=self.status_var, foreground="#2a7d2a").grid(
-            row=row, column=0, columnspan=2, sticky="w"
+        ttk.Label(left, textvariable=self.status_var, foreground="#2a7d2a", wraplength=PREVIEW_WIDTH).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
         row += 1
 
-        self.record_button = ttk.Button(self, text="Start Recording", command=self._on_toggle_recording)
+        self.record_button = ttk.Button(left, text="Start Recording", command=self._on_toggle_recording)
         self.record_button.grid(row=row, column=0, columnspan=2, pady=(8, 0))
         if not instrument_names or not project_names:
             self.record_button.state(["disabled"])
 
-        self.bind("<Destroy>", self._on_destroy)
-        self._start_preview()
+    # --- right column: playlist + inspiration lists ---
+
+    def _build_right(self, right: ttk.Frame) -> None:
+        ttk.Label(right, text="Playlist", font=("TkDefaultFont", 11, "bold")).pack(anchor="w")
+        playlist_wrap = ttk.Frame(right)
+        playlist_wrap.pack(fill="both", expand=True, pady=(4, 16))
+        playlist_scroll = ttk.Scrollbar(playlist_wrap, orient="vertical")
+        self.playlist_listbox = tk.Listbox(
+            playlist_wrap, height=10, width=44, exportselection=False,
+            yscrollcommand=playlist_scroll.set,
+        )
+        playlist_scroll.configure(command=self.playlist_listbox.yview)
+        self.playlist_listbox.pack(side="left", fill="both", expand=True)
+        playlist_scroll.pack(side="right", fill="y")
+        self.playlist_listbox.bind("<<ListboxSelect>>", self._on_playlist_select)
+
+        inspiration_header = ttk.Frame(right)
+        inspiration_header.pack(fill="x")
+        ttk.Label(inspiration_header, text="Inspiration Tracks", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Button(inspiration_header, text="↻ Refresh", command=self._refresh_inspiration).pack(side="right")
+
+        self.inspiration_status_var = tk.StringVar(value="")
+        ttk.Label(right, textvariable=self.inspiration_status_var, foreground="#666666").pack(anchor="w", pady=(2, 4))
+
+        inspiration_wrap = ttk.Frame(right)
+        inspiration_wrap.pack(fill="both", expand=True)
+        inspiration_scroll = ttk.Scrollbar(inspiration_wrap, orient="vertical")
+        self.inspiration_listbox = tk.Listbox(
+            inspiration_wrap, height=10, width=44, exportselection=False,
+            yscrollcommand=inspiration_scroll.set,
+        )
+        inspiration_scroll.configure(command=self.inspiration_listbox.yview)
+        self.inspiration_listbox.pack(side="left", fill="both", expand=True)
+        inspiration_scroll.pack(side="right", fill="y")
+        self.inspiration_listbox.bind("<<ListboxSelect>>", self._on_inspiration_select)
+
+    def _track_display(self, track: TrackEntry, inst_name: str) -> str:
+        dur = format_duration(track.duration_seconds)
+        mark = " ✓" if track.get_take_for_instrument(inst_name) else ""
+        return f"{track.name}  ({dur}){mark}"
+
+    def _inspiration_display(self, t: dict) -> str:
+        artist = t.get("artist", "Unknown")
+        title = t.get("title", "Unknown")
+        year = t.get("year", "")
+        dur = format_duration(t.get("duration") or 0)
+        year_str = f" ({year})" if year else ""
+        return f"{artist} - {title}{year_str}  {dur}"
+
+    def _refresh_playlist(self) -> None:
+        self.playlist_listbox.delete(0, tk.END)
+        if not self._project:
+            return
+        inst_name = self.instrument_var.get()
+        for track in self._project.setlist.tracks:
+            self.playlist_listbox.insert(tk.END, self._track_display(track, inst_name))
+
+    def _refresh_inspiration(self) -> None:
+        self.inspiration_listbox.delete(0, tk.END)
+        self._inspiration_tracks = []
+        if not self._project:
+            return
+        self.inspiration_status_var.set("Loading inspiration tracks...")
+
+        def worker() -> None:
+            try:
+                tracks = query_inspiration_tracks(self._project, self.config_obj)
+                error = None
+            except InspirationError as e:
+                tracks = []
+                error = str(e)
+            self.after(0, lambda: self._on_inspiration_loaded(tracks, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_inspiration_loaded(self, tracks: list[dict], error: str | None) -> None:
+        self._inspiration_tracks = tracks
+        self.inspiration_listbox.delete(0, tk.END)
+        if error:
+            self.inspiration_status_var.set(error)
+            return
+        self.inspiration_status_var.set(f"{len(tracks)} tracks")
+        for t in tracks:
+            self.inspiration_listbox.insert(tk.END, self._inspiration_display(t))
+
+    def _clear_selection(self) -> None:
+        self._selected_track = None
+        self._selected_inspiration_info = None
+        self._selected_track_source = None
+        self.selection_var.set("No track selected")
+        self._update_start_button_state()
+
+    def _on_project_change(self, _event: object = None) -> None:
+        project_name = self.project_var.get()
+        project_path = next((p for p in self._projects if p.name == project_name), None)
+        self._project = Project.open(project_path) if project_path else None
+        self._clear_selection()
+        self._refresh_playlist()
+        self._refresh_inspiration()
+
+    def _on_instrument_change(self, _event: object = None) -> None:
+        self._refresh_playlist()
+        self._update_start_button_state()
+
+    def _on_playlist_select(self, _event: object = None) -> None:
+        sel = self.playlist_listbox.curselection()
+        if not sel or not self._project:
+            return
+        self._selected_track = self._project.setlist.tracks[sel[0]]
+        self._selected_inspiration_info = None
+        self._selected_track_source = "playlist"
+        self.inspiration_listbox.selection_clear(0, tk.END)
+        self.selection_var.set(f"Selected: {self._selected_track.name} (playlist)")
+        self._update_start_button_state()
+
+    def _on_inspiration_select(self, _event: object = None) -> None:
+        sel = self.inspiration_listbox.curselection()
+        if not sel:
+            return
+        info = self._inspiration_tracks[sel[0]]
+        self._selected_track = None
+        self._selected_inspiration_info = info
+        self._selected_track_source = "inspiration"
+        self.playlist_listbox.selection_clear(0, tk.END)
+        artist = info.get("artist", "Unknown")
+        title = info.get("title", "Unknown")
+        self.selection_var.set(f"Selected: {artist} - {title} (inspiration)")
+        self._update_start_button_state()
+
+    def _update_start_button_state(self) -> None:
+        if self._recording:
+            self.record_button.state(["!disabled"])
+            return
+        ready = (
+            bool(self.instrument_var.get())
+            and self._project is not None
+            and self._selected_track_source is not None
+        )
+        self.record_button.state(["!disabled"] if ready else ["disabled"])
+
+    def _set_controls_enabled(self, enabled: bool) -> None:
+        state = "readonly" if enabled else "disabled"
+        self.instrument_combo.configure(state=state)
+        self.project_combo.configure(state=state)
+        list_state = "normal" if enabled else "disabled"
+        self.playlist_listbox.configure(state=list_state)
+        self.inspiration_listbox.configure(state=list_state)
 
     # --- camera preview ---
 
@@ -157,13 +345,30 @@ class RecordFrame(ttk.Frame):
         else:
             self._start_recording()
 
+    def _resolve_target(self) -> tuple[TrackEntry | None, bool, Path | None]:
+        """Return (track, needs_download, backing_path) for the current selection."""
+        if self._selected_track_source == "playlist" and self._selected_track is not None:
+            track = self._selected_track
+        elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
+            track = find_or_add_inspiration_track(self._project, self._selected_inspiration_info)
+            self._project.save_setlist()
+            self._refresh_playlist()
+        else:
+            return None, False, None
+        backing_path = self._project.backing_tracks_dir / track.backing_track
+        needs_download = bool(track.inspiration_track_id) and not backing_path.exists()
+        return track, needs_download, backing_path
+
     def _start_recording(self) -> None:
         instrument_name = self.instrument_var.get()
-        project_name = self.project_var.get()
         inst = self.config_obj.get_instrument(instrument_name)
-        project_path = next((p for p in self._projects if p.name == project_name), None)
-        if inst is None or project_path is None:
+        if inst is None or self._project is None:
             messagebox.showerror("Cannot start", "Select an instrument and a project first.")
+            return
+
+        track, needs_download, backing_path = self._resolve_target()
+        if track is None:
+            messagebox.showerror("Cannot start", "Select a track from the Playlist or Inspiration list first.")
             return
 
         input_info = self.config_obj.resolve_input(inst.input_label)
@@ -171,10 +376,39 @@ class RecordFrame(ttk.Frame):
             messagebox.showerror("Cannot start", f"Input label '{inst.input_label}' not found in config.")
             return
 
+        self.record_button.state(["disabled"])
+        self._set_controls_enabled(False)
+
+        if needs_download:
+            self.status_var.set(f"Downloading '{track.name}'...")
+
+            def worker() -> None:
+                try:
+                    download_inspiration_track(track, backing_path, self.config_obj)
+                    error = None
+                except InspirationError as e:
+                    error = str(e)
+                self.after(0, lambda: self._continue_start(inst, input_info, track, error))
+
+            threading.Thread(target=worker, daemon=True).start()
+        else:
+            self._continue_start(inst, input_info, track, None)
+
+    def _continue_start(
+        self, inst: Instrument, input_info: InputLabel, track: TrackEntry, error: str | None,
+    ) -> None:
+        if error:
+            messagebox.showerror("Download failed", error)
+            self._set_controls_enabled(True)
+            self._update_start_button_state()
+            return
+
         try:
             import sounddevice as sd
         except Exception as e:
             messagebox.showerror("Cannot start", f"sounddevice unavailable: {e}")
+            self._set_controls_enabled(True)
+            self._update_start_button_state()
             return
 
         from ..audio.devices import resolve_device
@@ -182,6 +416,8 @@ class RecordFrame(ttk.Frame):
         in_dev = resolve_device(sd, input_info.device, "input")
         if in_dev is None:
             messagebox.showerror("Cannot start", f"Input device '{input_info.device}' not found.")
+            self._set_controls_enabled(True)
+            self._update_start_button_state()
             return
 
         in_info = sd.query_devices(in_dev, "input")
@@ -193,13 +429,13 @@ class RecordFrame(ttk.Frame):
                 f"Instrument '{inst.name}' needs input channel {input_info.channel} "
                 f"but device only has {max_in} channels.",
             )
+            self._set_controls_enabled(True)
+            self._update_start_button_state()
             return
         output_channels = min(self.config_obj.output_channels, out_info["max_output_channels"])
 
-        project = Project.open(project_path)
-
         from ..audio.engine import AudioEngine
-        self._engine = AudioEngine(
+        engine = AudioEngine(
             sample_rate=self.config_obj.sample_rate,
             buffer_size=self.config_obj.buffer_size,
             input_device=in_dev,
@@ -209,54 +445,103 @@ class RecordFrame(ttk.Frame):
             monitor_channel=input_info.channel - 1,
         )
 
-        session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
-        self._session_dir = ensure_dir(project.sessions_dir / f"{session_name}_{inst.name}")
+        backing_path = self._project.backing_tracks_dir / track.backing_track
+        if backing_path.exists():
+            engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
+
+        # Layer in other instruments' preferred takes, same as jampy start-session.
+        trim = int(self.config_obj.latency_compensation_ms / 1000.0 * self.config_obj.sample_rate)
+        for other_inst, take_info in track.preferred_takes.items():
+            if other_inst.lower() == inst.name.lower():
+                continue
+            take_path = self._project.completed_takes_dir / take_info.filename
+            if take_path.exists():
+                effective_vol = take_info.volume * (track.takes_volume / 100.0)
+                engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
 
         # Release the preview's camera handle so ffmpeg can open it exclusively.
         self._stop_preview()
 
-        self._engine.start()
-        self._engine.start_session_recording(self._session_dir / "session.flac")
+        engine.start()
+        engine.mixer.reset()
+        engine.mixer.set_playing(True)
 
-        self._video_recorder = None
+        take_num = next_take_number(self._project.completed_takes_dir, track.name, inst.name)
+        fname = take_filename(track.name, inst.name, take_num, "flac")
+        rec_path = self._project.completed_takes_dir / fname
+        engine.start_recording(rec_path)
+
+        video_recorder = None
+        video_raw = mix_flac = final_video = None
         if self.config_obj.camera_device:
             from ..video.capture import VideoRecorder, ffmpeg_available
             if ffmpeg_available():
-                self._session_video_raw = self._session_dir / "session_video_raw.mp4"
-                self._session_mix_flac = self._session_dir / "session_mix.flac"
-                self._video_recorder = VideoRecorder(self.config_obj.camera_device, self._session_video_raw)
-                if self._video_recorder.start():
-                    self._engine.start_mix_recording(self._session_mix_flac)
+                video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
+                mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
+                final_video = rec_path.with_suffix(".mp4")
+                video_recorder = VideoRecorder(self.config_obj.camera_device, video_raw)
+                if video_recorder.start():
+                    engine.start_mix_recording(mix_flac)
                 else:
-                    self._video_recorder = None
+                    video_recorder = None
                     self.status_var.set("Warning: could not start camera recording.")
+
+        self._engine = engine
+        self._video_recorder = video_recorder
+        self._current_track = track
+        self._current_inst = inst
+        self._current_take_num = take_num
+        self._rec_path = rec_path
+        self._video_raw = video_raw
+        self._mix_flac = mix_flac
+        self._final_video = final_video
 
         self._recording = True
         self.record_button.configure(text="Stop Recording")
-        self.status_var.set(f"Recording to {self._session_dir}")
+        self.record_button.state(["!disabled"])
+        self.status_var.set(f"Recording '{track.name}' — take {take_num}")
 
     def _stop_recording(self) -> None:
         self._stop_recording_internal()
         self.record_button.configure(text="Start Recording")
-        self._start_preview()  # camera is free again
+        self._set_controls_enabled(True)
+        self._refresh_playlist()
+        self._start_preview()
 
     def _stop_recording_internal(self) -> None:
         if not self._recording:
             return
         self._recording = False
-        if self._engine:
-            self._engine.stop()
-            self._engine = None
+
+        engine = self._engine
+        self._engine = None
+        if engine:
+            engine.stop_recording()
+            engine.mixer.set_playing(False)
+
+        take_info = TakeInfo(
+            instrument=self._current_inst.name, take_number=self._current_take_num,
+            filename=self._rec_path.name,
+        )
+        self._current_track.set_preferred_take(self._current_inst.name, take_info)
+        self._project.save_setlist()
+
+        if engine:
+            engine.stop()
+
         if self._video_recorder:
             self._video_recorder.stop()
             from ..video.capture import mux_video_audio
-            session_video = self._session_dir / "session_video.mp4"
-            if mux_video_audio(self._session_video_raw, self._session_mix_flac, session_video):
-                self._session_video_raw.unlink(missing_ok=True)
-                self._session_mix_flac.unlink(missing_ok=True)
-                self.status_var.set(f"Saved to {session_video}")
+            if mux_video_audio(self._video_raw, self._mix_flac, self._final_video):
+                self._video_raw.unlink(missing_ok=True)
+                self._mix_flac.unlink(missing_ok=True)
+                self.status_var.set(f"Saved take {self._current_take_num} + video for '{self._current_track.name}'")
             else:
-                self.status_var.set(f"Saved; video mux failed (raw files kept in {self._session_dir})")
+                self.status_var.set(
+                    f"Saved take {self._current_take_num} for '{self._current_track.name}'; video mux failed"
+                )
             self._video_recorder = None
         else:
-            self.status_var.set(f"Saved to {self._session_dir / 'session.flac'}")
+            self.status_var.set(f"Saved take {self._current_take_num} for '{self._current_track.name}'")
+
+        self._update_start_button_state()

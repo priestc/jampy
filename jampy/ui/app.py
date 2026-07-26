@@ -24,7 +24,7 @@ TABS = [
 def run() -> None:
     root = tk.Tk()
     root.title("Jam.py")
-    root.geometry("820x600")
+    root.geometry("1100x650")
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True, padx=16, pady=16)

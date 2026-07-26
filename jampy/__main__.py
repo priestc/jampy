@@ -28,6 +28,12 @@ from .config import (
 from .project import Project, Setlist, TrackEntry
 from .audio.devices import resolve_device as _resolve_device
 from .audio.formats import get_duration
+from .inspiration import (
+    InspirationError,
+    download_inspiration_track,
+    find_or_add_inspiration_track,
+    query_inspiration_tracks,
+)
 from .session import Session, SessionState
 from .utils import format_duration, take_filename, next_take_number, ensure_dir
 
@@ -723,20 +729,12 @@ def _load_backing_track(session: Session, engine: AudioEngine) -> None:
 
     # Download inspiration tracks on demand
     if track.inspiration_track_id and not backing_path.exists():
-        import urllib.request
-        import urllib.error
         config = StudioConfig.load()
-        server = config.inspiration_server.rstrip("/")
-        url = f"{server}/library/api/tracks/{track.inspiration_track_id}/download/"
-        dl_req = urllib.request.Request(
-            url, headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
-        )
         click.echo(f"  Downloading: {track.name}...")
         try:
-            with urllib.request.urlopen(dl_req) as resp:
-                backing_path.write_bytes(resp.read())
-        except urllib.error.URLError as e:
-            click.echo(f"  Download failed: {e}")
+            download_inspiration_track(track, backing_path, config)
+        except InspirationError as e:
+            click.echo(f"  {e}")
 
     if backing_path.exists():
         engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
@@ -1208,48 +1206,19 @@ def _latency_adjust_phase(
 
 def _query_inspiration_tracks() -> tuple[list[dict], StudioConfig]:
     """Query inspiration tracks from radioserver. Returns (tracks, config)."""
-    import json
-    import urllib.request
-    import urllib.error
-
     cwd = Path.cwd()
     if not (cwd / "setlist.json").exists():
         click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
         raise SystemExit(1)
 
     project = Project.open(cwd)
-    if not project.setlist.inspiration:
-        click.echo("Error: No inspiration filters in setlist.json.", err=True)
-        click.echo('Add an "inspiration" key with filter sets, e.g.:')
-        click.echo('  "inspiration": [{"genre": "Rock"}, {"artist": "Miles Davis"}]')
-        raise SystemExit(1)
-
     config = StudioConfig.load()
-    if not config.inspiration_server or not config.inspiration_api_key:
-        click.echo("Error: inspiration_server and inspiration_api_key must be set.", err=True)
-        click.echo("Run 'jampy setup-studio' to configure them.")
-        raise SystemExit(1)
-
-    server = config.inspiration_server.rstrip("/")
 
     click.echo("Querying inspiration tracks...")
-    payload = json.dumps({"filters": project.setlist.inspiration}).encode()
-    req = urllib.request.Request(
-        f"{server}/library/api/tracks/",
-        data=payload,
-        headers={"Authorization": f"Bearer {config.inspiration_api_key}", "Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req) as resp:
-            data = json.loads(resp.read())
-    except urllib.error.URLError as e:
-        click.echo(f"Error contacting server: {e}", err=True)
-        raise SystemExit(1)
-
-    tracks = data.get("tracks", [])
-    if not tracks:
-        click.echo("No tracks matched the inspiration filters.")
+        tracks = query_inspiration_tracks(project, config)
+    except InspirationError as e:
+        click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
     return tracks, config
@@ -1332,29 +1301,6 @@ def list_inspirations() -> None:
         year_str = f" ({year})" if year else ""
         album_str = f" [{album}]" if album else ""
         click.echo(f"  {i + 1:3}. {artist} - {title}{album_str}{year_str}  {dur}")
-
-
-def _find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
-    """Return the setlist entry for an inspiration track, creating it if absent."""
-    track_id = track_info["id"]
-    for entry in project.setlist.tracks:
-        if entry.inspiration_track_id == track_id:
-            return entry
-    artist = track_info.get("artist", "Unknown")
-    title = track_info.get("title", "Unknown")
-    year = track_info.get("year", "")
-    fmt = track_info.get("format", "flac") or "flac"
-    duration = float(track_info.get("duration") or 0)
-    year_str = f" ({year})" if year else ""
-    name = f"{artist} - {title}{year_str}"
-    entry = TrackEntry(
-        name=name,
-        backing_track=f"inspiration_{track_id}.{fmt}",
-        duration_seconds=duration,
-        inspiration_track_id=track_id,
-    )
-    project.setlist.add_track(entry)
-    return entry
 
 
 @main.command()
@@ -1574,7 +1520,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                     skip = False
 
                     if is_recording:
-                        track_entry = _find_or_add_inspiration_track(project, track_info)
+                        track_entry = find_or_add_inspiration_track(project, track_info)
                         take_num = next_take_number(project.completed_takes_dir, track_entry.name, instrument)
                         fname = take_filename(track_entry.name, instrument, take_num, "flac")
                         rec_path = project.completed_takes_dir / fname
