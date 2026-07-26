@@ -190,8 +190,11 @@ class RecordFrame(ttk.Frame):
         row += 1
 
         instrument_names = [inst.name for inst in self.config_obj.instruments]
+        default_instrument = self.config_obj.last_selected_instrument
+        if default_instrument not in instrument_names:
+            default_instrument = instrument_names[0] if instrument_names else ""
         ttk.Label(left, text="Instrument").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.instrument_var = tk.StringVar(value=instrument_names[0] if instrument_names else "")
+        self.instrument_var = tk.StringVar(value=default_instrument)
         self.instrument_combo = ttk.Combobox(
             left, textvariable=self.instrument_var, values=instrument_names, state="readonly", width=28,
         )
@@ -199,8 +202,11 @@ class RecordFrame(ttk.Frame):
         self.instrument_combo.bind("<<ComboboxSelected>>", self._on_instrument_change)
         row += 1
 
+        default_project = self.config_obj.last_selected_project
+        if default_project not in self._project_names:
+            default_project = self._project_names[0] if self._project_names else ""
         ttk.Label(left, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.project_var = tk.StringVar(value=self._project_names[0] if self._project_names else "")
+        self.project_var = tk.StringVar(value=default_project)
         self.project_combo = ttk.Combobox(
             left, textvariable=self.project_var, values=self._project_names, state="readonly", width=28,
         )
@@ -359,6 +365,8 @@ class RecordFrame(ttk.Frame):
         self._setlist = None
         project_name = self.project_var.get() if hasattr(self, "project_var") else ""
         self._project_name = project_name or None
+        if _event is not None:
+            self._persist_last_selection()
         if not self._project_name:
             self._refresh_inspiration()
             return
@@ -408,6 +416,18 @@ class RecordFrame(ttk.Frame):
     def _on_instrument_change(self, _event: object = None) -> None:
         self._refresh_playlist()
         self._update_start_button_state()
+        if _event is not None:
+            self._persist_last_selection()
+
+    def _persist_last_selection(self) -> None:
+        """Remembered so the Record tab reopens on the same pair next launch."""
+        if self.config_obj is None:
+            return
+        self.config_obj.last_selected_instrument = self.instrument_var.get()
+        self.config_obj.last_selected_project = self.project_var.get()
+        backend = self.app_state.backend
+        config = self.config_obj
+        threading.Thread(target=lambda: backend.save_config(config), daemon=True).start()
 
     def _on_playlist_select(self, _event: object = None) -> None:
         sel = self.playlist_listbox.curselection()
