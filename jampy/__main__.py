@@ -7,6 +7,7 @@ import sys
 import queue
 import select
 import termios
+import time
 import tty
 from contextlib import contextmanager
 from pathlib import Path
@@ -262,6 +263,54 @@ def ui_command(remote_ip: str | None) -> None:
     """Launch the graphical Jam.py interface."""
     from .ui.app import run
     run(remote_ip=remote_ip)
+
+
+@main.command(name="server")
+@click.option(
+    "--port", "port", type=int, default=None,
+    help="Port to listen on (defaults to the configured remote server port).",
+)
+def server_command(port: int | None) -> None:
+    """Run the remote-control server without launching the UI.
+
+    Lets other jampy instances connect to this machine (Remote tab),
+    same as toggling the server on in the UI's Remote tab.
+    """
+    from .backend import LocalBackend
+    from .remote.server import RemoteServer
+
+    backend = LocalBackend()
+    config = backend.get_config()
+    listen_port = port if port is not None else config.remote_server_port
+
+    def request_authorization(ip: str, client_name: str) -> bool:
+        click.echo(f"\nPairing request from '{client_name}' ({ip})")
+        return click.confirm("Approve this connection?", default=False)
+
+    server = RemoteServer(backend, listen_port, request_authorization)
+    try:
+        server.start()
+    except OSError as e:
+        click.echo(f"Error: could not start server: {e}", err=True)
+        raise SystemExit(1)
+
+    config.remote_server_enabled = True
+    config.remote_server_port = listen_port
+    backend.save_config(config)
+
+    click.echo(f"jampy server listening on port {listen_port} (host: {backend.hostname()})")
+    click.echo("Press Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        click.echo("\nStopping server...")
+        server.stop()
+        config.remote_server_enabled = False
+        backend.save_config(config)
 
 
 @main.command()
