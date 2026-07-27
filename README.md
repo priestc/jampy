@@ -8,6 +8,7 @@ Takeloom handles continuous audio recording, playback mixing, session logging, a
 
 - Python 3.9+
 - PortAudio, libsndfile, ffmpeg (system libraries)
+- yt-dlp (optional, system binary) — only needed to add YouTube URLs as backing tracks from the New Project dialog
 
 See [Prerequisites](docs/prerequisites.md) for install instructions for each operating system.
 

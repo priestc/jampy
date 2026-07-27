@@ -95,6 +95,27 @@ class Backend(ABC):
     @abstractmethod
     def save_setlist(self, project_name: str, setlist_data: dict) -> None: ...
 
+    @abstractmethod
+    def create_project(self, name: str) -> str:
+        """Create a new, empty project. Returns its final (sanitized) name."""
+        ...
+
+    @abstractmethod
+    def add_local_backing_track(
+        self, project_name: str, source_path: str, track_name: str | None = None,
+    ) -> dict:
+        """Add a local audio file as a backing track. `source_path` must be
+        reachable on the machine the backend actually runs on — RemoteBackend
+        refuses, since a path on the controlling client isn't reachable from
+        the remote studio's disk."""
+        ...
+
+    @abstractmethod
+    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
+        """Download a YouTube video's audio (via yt-dlp) and add it as a
+        backing track."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -388,6 +409,43 @@ class LocalBackend(Backend):
         project = self._open_project(project_name)
         project.setlist = Setlist.from_dict(setlist_data)
         project.save_setlist()
+
+    def create_project(self, name: str) -> str:
+        config = self.get_config()
+        projects_dir = Path(config.projects_dir)
+        from .utils import sanitize_filename
+        safe_name = sanitize_filename(name)
+        if not safe_name:
+            raise BackendError("Enter a project name.")
+        if (projects_dir / safe_name).exists():
+            raise BackendError(f"A project named '{safe_name}' already exists.")
+        project = Project.create_new(projects_dir, name)
+        return project.name
+
+    def add_local_backing_track(
+        self, project_name: str, source_path: str, track_name: str | None = None,
+    ) -> dict:
+        project = self._open_project(project_name)
+        src = Path(source_path)
+        if not src.exists():
+            raise BackendError(f"File not found: {source_path}")
+        from .audio.formats import get_duration
+        try:
+            duration = get_duration(src)
+        except Exception:
+            duration = 0.0
+        entry = project.add_backing_track(src, track_name=track_name, duration_seconds=duration)
+        return entry.to_dict()
+
+    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
+        project = self._open_project(project_name)
+        from .youtube import YouTubeDownloadError, download_youtube_audio
+        try:
+            dest_path, title, duration = download_youtube_audio(url, project.backing_tracks_dir)
+        except YouTubeDownloadError as e:
+            raise BackendError(str(e)) from e
+        entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration)
+        return entry.to_dict()
 
     # --- inspiration ---
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -59,6 +61,25 @@ def ensure_dir(path: Path) -> Path:
     """Create directory if it doesn't exist, return the path."""
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text via temp-file-then-rename, so a concurrent reader on
+    another thread/process never observes a truncated/partial file (as a
+    plain path.write_text() — which truncates before writing — can produce).
+    Uses mkstemp for a guaranteed-unique name, so concurrent writer threads
+    in the same process can't collide on the same temp file either."""
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def frames_to_seconds(frames: int, sample_rate: int) -> float:

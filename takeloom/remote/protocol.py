@@ -55,6 +55,12 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "save_setlist":
         backend.save_setlist(args["project_name"], args["setlist"])
         return {}
+    if op == "create_project":
+        return {"name": backend.create_project(args["name"])}
+    if op == "add_local_backing_track":
+        return backend.add_local_backing_track(args["project_name"], args["source_path"], args.get("track_name"))
+    if op == "add_youtube_backing_track":
+        return backend.add_youtube_backing_track(args["project_name"], args["url"])
     if op == "query_inspiration_tracks":
         return {"tracks": backend.query_inspiration_tracks(args["project_name"])}
     if op == "start_recording":

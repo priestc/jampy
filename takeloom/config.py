@@ -6,6 +6,8 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
+from .utils import atomic_write_text
+
 DEFAULT_CONFIG_PATH = Path.home() / "studio_config.json"
 
 VALID_SAMPLE_RATES = [44100, 48000, 96000]
@@ -121,7 +123,7 @@ class StudioConfig:
         )
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        atomic_write_text(path, json.dumps(self.to_dict(), indent=2))
 
     @classmethod
     def load(cls, path: Path = DEFAULT_CONFIG_PATH) -> StudioConfig:

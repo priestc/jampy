@@ -25,6 +25,7 @@ from ..streamdeck_controller import StreamDeckController
 from ..utils import format_duration
 from .app_state import AppState
 from .level_meter import LevelMeter
+from .new_project_dialog import NewProjectDialog
 
 
 class RecordFrame(ttk.Frame):
@@ -209,12 +210,15 @@ class RecordFrame(ttk.Frame):
         if default_project not in self._project_names:
             default_project = self._project_names[0] if self._project_names else ""
         ttk.Label(left, text="Project").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        project_row = ttk.Frame(left)
+        project_row.grid(row=row, column=1, sticky="w")
         self.project_var = tk.StringVar(value=default_project)
         self.project_combo = ttk.Combobox(
-            left, textvariable=self.project_var, values=self._project_names, state="readonly", width=28,
+            project_row, textvariable=self.project_var, values=self._project_names, state="readonly", width=22,
         )
-        self.project_combo.grid(row=row, column=1, sticky="w")
+        self.project_combo.pack(side="left")
         self.project_combo.bind("<<ComboboxSelected>>", self._on_project_change)
+        ttk.Button(project_row, text="+ New Project", command=self._on_new_project).pack(side="left", padx=(6, 0))
         row += 1
 
         if not instrument_names:
@@ -407,6 +411,30 @@ class RecordFrame(ttk.Frame):
             self.after(0, lambda: self._on_setlist_loaded(data, error))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _on_new_project(self) -> None:
+        NewProjectDialog(self, self.app_state.backend, self._on_project_created)
+
+    def _on_project_created(self, project_name: str) -> None:
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                projects = backend.list_projects()
+            except BackendError:
+                projects = self._project_names
+            self.after(0, lambda: self._apply_new_project_list(projects, project_name))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_new_project_list(self, projects: list[str], project_name: str) -> None:
+        if not self.winfo_exists():
+            return
+        self._project_names = projects
+        self.project_combo.configure(values=projects)
+        self.project_var.set(project_name)
+        self._on_project_change()
+        self._persist_last_selection()
 
     def _on_setlist_loaded(self, data: dict | None, error: str | None) -> None:
         if error or data is None:

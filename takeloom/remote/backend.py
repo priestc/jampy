@@ -22,6 +22,9 @@ from .client import RemoteClient
 # give them more room than simple config/device lookups.
 LONG_TIMEOUT = 20.0
 
+# yt-dlp downloads can take a while on a slow connection or a long video.
+DOWNLOAD_TIMEOUT = 300.0
+
 
 class RemoteBackend(Backend):
     def __init__(self, client: RemoteClient) -> None:
@@ -71,6 +74,22 @@ class RemoteBackend(Backend):
 
     def save_setlist(self, project_name: str, setlist_data: dict) -> None:
         self._client.call("save_setlist", {"project_name": project_name, "setlist": setlist_data})
+
+    def create_project(self, name: str) -> str:
+        return self._client.call("create_project", {"name": name}, timeout=LONG_TIMEOUT)["name"]
+
+    def add_local_backing_track(
+        self, project_name: str, source_path: str, track_name: str | None = None,
+    ) -> dict:
+        raise BackendError(
+            "Adding local files as backing tracks isn't available over Remote connections "
+            "yet — paste a YouTube URL instead."
+        )
+
+    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
+        return self._client.call(
+            "add_youtube_backing_track", {"project_name": project_name, "url": url}, timeout=DOWNLOAD_TIMEOUT,
+        )
 
     # --- inspiration ---
 

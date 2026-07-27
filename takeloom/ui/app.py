@@ -6,6 +6,8 @@ import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from tkinterdnd2 import TkinterDnD
+
 from .app_state import AppState
 from .instruments import InstrumentsFrame
 from .latency import LatencyFrame
@@ -30,7 +32,7 @@ TABS = [
 
 
 def run(remote_ip: str | None = None) -> None:
-    root = tk.Tk()
+    root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
     if sys.platform.startswith("linux"):
         # Many Linux setups (bad EDID physical-size data, VMs, some laptop
         # panels) make Tk miscompute the display DPI, so point-sized fonts

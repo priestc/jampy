@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
-from .utils import ensure_dir, sanitize_filename
+from .utils import atomic_write_text, ensure_dir, sanitize_filename
 
 
 @dataclass
@@ -131,21 +131,25 @@ class Project:
         return proj
 
     def save_setlist(self) -> None:
-        self.setlist_path.write_text(json.dumps(self.setlist.to_dict(), indent=2))
+        atomic_write_text(self.setlist_path, json.dumps(self.setlist.to_dict(), indent=2))
 
     def load_setlist(self) -> None:
         if self.setlist_path.exists():
             data = json.loads(_strip_json_comments(self.setlist_path.read_text()))
             self.setlist = Setlist.from_dict(data)
 
-    def add_backing_track(self, source_path: Path, track_name: str | None = None) -> TrackEntry:
-        """Add a backing track file to the project. Copies file to backing_tracks/."""
+    def add_backing_track(
+        self, source_path: Path, track_name: str | None = None, duration_seconds: float = 0.0,
+    ) -> TrackEntry:
+        """Add a backing track file to the project. Copies the file into
+        backing_tracks/, unless it's already sitting there (e.g. a file just
+        downloaded directly into that directory)."""
         import shutil
         dest = self.backing_tracks_dir / source_path.name
-        if not dest.exists():
+        if dest.resolve() != source_path.resolve():
             shutil.copy2(source_path, dest)
         name = track_name or source_path.stem
-        entry = TrackEntry(name=name, backing_track=source_path.name)
+        entry = TrackEntry(name=name, backing_track=dest.name, duration_seconds=duration_seconds)
         self.setlist.add_track(entry)
         self.save_setlist()
         return entry
