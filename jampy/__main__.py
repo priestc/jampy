@@ -255,7 +255,8 @@ def setup_recording_devices() -> None:
 @click.option(
     "--remote", "remote_ip", default=None,
     help="Connect to a remote jampy instance at this IP/host on launch (e.g. --remote=192.168.1.190). "
-         "Uses this machine's own configured remote port/token (set on the Remote tab).",
+         "Uses a stored token if this host is already a known remote (Remote tab); otherwise this "
+         "triggers a pairing request that the other machine's user must approve.",
 )
 def ui_command(remote_ip: str | None) -> None:
     """Launch the graphical Jam.py interface."""

@@ -7,29 +7,48 @@ connected client, not just the one that triggered them, so a second viewer
 stays in sync. Camera-preview frames are opt-in per connection via
 subscribe_preview/unsubscribe_preview, since they're the one bandwidth-heavy
 part of the protocol.
+
+Auth is a pairing-request flow rather than a single shared secret: a client
+with no token (or an unrecognized one) causes the handler thread to call
+`request_authorization(ip, client_name)` and block on its result — this is
+safe because every connection already runs on its own thread. The UI layer
+supplies that callback (typically: pop a dialog, wait for the user to click
+Approve/Deny, with its own timeout). On approval the handler mints a new
+per-client token, persists it to config, and returns it once in `hello_ack`.
 """
 
 from __future__ import annotations
 
 import base64
+import datetime
 import hmac
 import json
+import secrets
+import socket
 import socketserver
 import threading
+from typing import Callable
 
 from ..backend import Backend, BackendError
+from ..config import AuthorizedClient
 from .protocol import dispatch
 
 
 class RemoteServer:
-    def __init__(self, backend: Backend, port: int, token: str) -> None:
+    def __init__(
+        self,
+        backend: Backend,
+        port: int,
+        request_authorization: Callable[[str, str], bool],
+    ) -> None:
         self.backend = backend
         self.port = port
-        self.token = token
+        self.request_authorization = request_authorization
         self._tcp_server: _ThreadingTCPServer | None = None
         self._thread: threading.Thread | None = None
         self._connections_lock = threading.Lock()
         self._connections: list[_ClientHandler] = []
+        self._pending_ips: set[str] = set()
         backend.on_event(self._on_backend_event)
 
     @property
@@ -84,6 +103,14 @@ class RemoteServer:
     def _on_backend_event(self, event: str, data: dict) -> None:
         self._broadcast(event, data)
 
+    def disconnect_token(self, token: str) -> None:
+        """Close any live connection authenticated with this token (used when
+        the UI revokes an AuthorizedClient)."""
+        with self._connections_lock:
+            conns = [c for c in self._connections if c.token == token]
+        for conn in conns:
+            conn.close()
+
 
 class _ThreadingTCPServer(socketserver.ThreadingTCPServer):
     daemon_threads = True
@@ -95,6 +122,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         self._owner = server_owner
         self._write_lock = threading.Lock()
         self._preview_sub = None
+        self.token: str | None = None
         super().__init__(*args, **kwargs)  # runs handle() synchronously
 
     def handle(self) -> None:
@@ -107,13 +135,59 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             except ValueError:
                 return
 
-            token = hello.get("token", "")
-            if not hmac.compare_digest(token, self._owner.token):
-                self._write({"kind": "hello_ack", "ok": False, "error": "Invalid token."})
-                return
-            self._write({
-                "kind": "hello_ack", "ok": True, "hostname": self._owner.backend.hostname(),
-            })
+            token = hello.get("token") or ""
+            ip = self.client_address[0]
+            client_name = hello.get("client_name") or ip
+
+            config = self._owner.backend.get_config()
+            match = None
+            if token:
+                match = next(
+                    (c for c in config.remote_authorized_clients if hmac.compare_digest(token, c.token)),
+                    None,
+                )
+
+            if match is not None:
+                now = datetime.datetime.now().isoformat()
+                match.last_ip = ip
+                match.last_seen_at = now
+                self._owner.backend.save_config(config)
+                self.token = match.token
+                self._write({
+                    "kind": "hello_ack", "ok": True, "hostname": self._owner.backend.hostname(),
+                })
+            else:
+                with self._owner._connections_lock:
+                    already_pending = ip in self._owner._pending_ips
+                    if not already_pending:
+                        self._owner._pending_ips.add(ip)
+                if already_pending:
+                    self._write({
+                        "kind": "hello_ack", "ok": False,
+                        "error": "A request from this address is already pending approval.",
+                    })
+                    return
+                try:
+                    approved = self._owner.request_authorization(ip, client_name)
+                finally:
+                    with self._owner._connections_lock:
+                        self._owner._pending_ips.discard(ip)
+
+                if not approved:
+                    self._write({"kind": "hello_ack", "ok": False, "error": "Authorization denied."})
+                    return
+
+                new_token = secrets.token_hex(16)
+                now = datetime.datetime.now().isoformat()
+                config = self._owner.backend.get_config()  # re-fetch: avoid clobbering concurrent edits
+                config.remote_authorized_clients.append(
+                    AuthorizedClient(token=new_token, label=client_name, last_ip=ip, authorized_at=now, last_seen_at=now)
+                )
+                self._owner.backend.save_config(config)
+                self.token = new_token
+                self._write({
+                    "kind": "hello_ack", "ok": True, "hostname": self._owner.backend.hostname(), "token": new_token,
+                })
 
             self._owner._register(self)
             try:
@@ -172,6 +246,14 @@ class _ClientHandler(socketserver.StreamRequestHandler):
             self.wfile.write(data)
 
     def close(self) -> None:
+        # shutdown() first: unlike close(), it reliably unblocks a concurrent
+        # readline() this handler's own thread may be sitting in — closing
+        # the fd from another thread alone doesn't wake a blocked read on
+        # every platform (notably macOS/BSD).
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         try:
             self.connection.close()
         except OSError:

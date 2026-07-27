@@ -48,6 +48,7 @@ class RemoteClient:
         self._intentional_close = False
 
         self.hostname: str = host
+        self.issued_token: str | None = None
 
     def connect(self, timeout: float = DEFAULT_TIMEOUT) -> str:
         """Connect, authenticate, and start the reader thread. Returns the
@@ -61,7 +62,7 @@ class RemoteClient:
         self._file = sock.makefile("r", encoding="utf-8", newline="\n")
 
         try:
-            self._write_line({"kind": "hello", "token": self._token})
+            self._write_line({"kind": "hello", "token": self._token, "client_name": socket.gethostname()})
             line = self._file.readline()
         except OSError as e:
             self.close()
@@ -81,6 +82,7 @@ class RemoteClient:
             raise BackendError(ack.get("error") or "Authentication failed.")
 
         self.hostname = ack.get("hostname") or self._host
+        self.issued_token = ack.get("token")
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
         return self.hostname

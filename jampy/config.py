@@ -30,6 +30,26 @@ class Instrument:
 
 
 @dataclass
+class KnownRemote:
+    """A remote jampy instance this machine can connect to as a client."""
+    host: str
+    port: int
+    token: str = ""  # "" until the first successful pairing/authorization
+    label: str = ""  # defaults to the server's reported hostname once paired
+    always_connect: bool = False  # auto-connect to this remote on startup
+
+
+@dataclass
+class AuthorizedClient:
+    """A remote jampy instance authorized to connect to this machine's server."""
+    token: str
+    label: str  # client-reported machine name at authorization time
+    last_ip: str = ""
+    authorized_at: str = ""  # ISO timestamp
+    last_seen_at: str = ""
+
+
+@dataclass
 class StudioConfig:
     sample_rate: int = 48000
     buffer_size: int = 512
@@ -52,8 +72,8 @@ class StudioConfig:
     camera_label: str = ""   # human-friendly camera name, for display only
     remote_server_enabled: bool = False  # accept incoming remote-control connections
     remote_server_port: int = 51823
-    remote_token: str = ""  # shared secret: required of incoming connections, presented to outgoing ones
-    remote_last_host: str = ""  # last IP/host connected to, for prefilling the Remote tab
+    known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
+    remote_authorized_clients: list[AuthorizedClient] = field(default_factory=list)  # clients allowed to connect in
     input_labels: list[InputLabel] = field(default_factory=list)
     instruments: list[Instrument] = field(default_factory=list)
 
@@ -88,8 +108,16 @@ class StudioConfig:
         data = dict(data)
         input_labels = [InputLabel(**il) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**i) for i in data.pop("instruments", [])]
+        known_remotes = [KnownRemote(**r) for r in data.pop("known_remotes", [])]
+        remote_authorized_clients = [AuthorizedClient(**c) for c in data.pop("remote_authorized_clients", [])]
         filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
-        return cls(**filtered, input_labels=input_labels, instruments=instruments)
+        return cls(
+            **filtered,
+            input_labels=input_labels,
+            instruments=instruments,
+            known_remotes=known_remotes,
+            remote_authorized_clients=remote_authorized_clients,
+        )
 
     def save(self, path: Path = DEFAULT_CONFIG_PATH) -> None:
         path.write_text(json.dumps(self.to_dict(), indent=2))

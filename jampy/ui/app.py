@@ -77,16 +77,35 @@ def run(remote_ip: str | None = None) -> None:
     rebuild(containers[0])
     notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
 
+    # Auto-connect on launch: an explicit --remote=IP wins over a configured
+    # "always connect" remote. Either way, a host with no matching
+    # known_remotes entry connects with no token, kicking off the same
+    # pairing/approval flow as a first-time Connect click in the Remote tab.
+    target = None
+    config = app_state.local_backend.get_config()
     if remote_ip:
-        from .remote import connect_async
+        match = next((r for r in config.known_remotes if r.host == remote_ip), None)
+        target = (match.host, match.port, match.token) if match else (remote_ip, config.remote_server_port, "")
+    else:
+        always = next((r for r in config.known_remotes if r.always_connect), None)
+        if always is not None:
+            target = (always.host, always.port, always.token)
+
+    if target is not None:
+        from .remote import connect_async, remember_remote_token
+
+        host, port, token = target
 
         def on_remote_error(error: str) -> None:
-            messagebox.showerror("Could not connect", f"{remote_ip}: {error}")
+            messagebox.showerror("Could not connect", f"{host}: {error}")
 
-        config = app_state.backend.get_config()
+        def on_remote_done(client) -> None:
+            remember_remote_token(app_state, host, port, client)
+            notebook.select(len(containers) - 1)
+
         connect_async(
-            root, app_state, remote_ip, config.remote_server_port, config.remote_token,
-            on_done=lambda: notebook.select(len(containers) - 1),
+            root, app_state, host, port, token,
+            on_done=on_remote_done,
             on_error=on_remote_error,
         )
 

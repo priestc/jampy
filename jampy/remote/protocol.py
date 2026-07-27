@@ -1,8 +1,9 @@
 """Wire format for remote mode: newline-delimited JSON over a persistent TCP
 socket, one JSON object per line.
 
-    {"kind": "hello", "token": "..."}                                    client -> server, first line
-    {"kind": "hello_ack", "ok": true, "hostname": "..."}                 server -> client
+    {"kind": "hello", "token": "...", "client_name": "..."}             client -> server, first line
+    {"kind": "hello_ack", "ok": true, "hostname": "...", "token": "..."} server -> client, only on first-time pairing
+    {"kind": "hello_ack", "ok": true, "hostname": "..."}                 server -> client, known token
     {"kind": "hello_ack", "ok": false, "error": "..."}                   server -> client, then closes
 
     {"kind": "request",  "id": 17, "op": "get_config", "args": {}}       client -> server
@@ -12,9 +13,12 @@ socket, one JSON object per line.
     {"kind": "event", "event": "recording_status", "data": {...}}       server -> client, unsolicited
     {"kind": "event", "event": "preview_frame", "data": {"jpeg_b64": "..."}}
 
-No TLS. The token is a pre-shared secret compared with `hmac.compare_digest`;
-this is a LAN-trust feature (like the existing rsync-based backup_server),
-not meant for untrusted networks.
+No TLS. A client with no token (or an unrecognized one) triggers an
+interactive pairing request on the server — the local user approves or
+denies it, and on approval the server mints a token just for that client
+and returns it once in `hello_ack`. Recognized tokens are compared with
+`hmac.compare_digest`. This is a LAN-trust feature (like the existing
+rsync-based backup_server), not meant for untrusted networks.
 
 `dispatch()` is the server-side op table: every `Backend` method that's safe
 to expose directly over the wire. `subscribe_preview`/`unsubscribe_preview`
