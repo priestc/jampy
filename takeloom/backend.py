@@ -114,6 +114,13 @@ class Backend(ABC):
     @abstractmethod
     def is_recording(self) -> bool: ...
 
+    def get_levels(self) -> tuple[float, float]:
+        """Returns (instrument_peak, backing_peak), each 0.0-1.0, for the
+        Record tab's VU meters. Not every backend can report this cheaply
+        (e.g. RemoteBackend, absent a dedicated streaming RPC); the default
+        is silence rather than an error."""
+        return (0.0, 0.0)
+
     @abstractmethod
     def adjust_backing_volume(self, delta: int) -> None: ...
 
@@ -413,6 +420,12 @@ class LocalBackend(Backend):
 
     def is_recording(self) -> bool:
         return self._active_recording is not None
+
+    def get_levels(self) -> tuple[float, float]:
+        active = self._active_recording
+        if active is None:
+            return (0.0, 0.0)
+        return (active.engine.peak_level, active.engine.backing_peak_level)
 
     def adjust_backing_volume(self, delta: int) -> None:
         with self._record_lock:

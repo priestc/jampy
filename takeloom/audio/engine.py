@@ -45,11 +45,16 @@ class AudioEngine:
         self._stream: sd.Stream | None = None
         self._running = False
         self._peak_level: float = 0.0
+        self._backing_peak_level: float = 0.0
         self._on_song_end: Callable[[], None] | None = None
 
     @property
     def peak_level(self) -> float:
         return self._peak_level
+
+    @property
+    def backing_peak_level(self) -> float:
+        return self._backing_peak_level
 
     def set_on_song_end(self, callback: Callable[[], None] | None) -> None:
         """Set callback invoked when mixer reaches end of backing track."""
@@ -114,6 +119,7 @@ class AudioEngine:
 
         # Playback output: mix backing track + input monitoring
         mix = self.mixer.read(frames)
+        self._backing_peak_level = float(np.max(np.abs(mix)))
         if self.output_channels == 2:
             # Add mono input to both stereo channels
             outdata[:] = mix

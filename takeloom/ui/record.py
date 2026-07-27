@@ -24,6 +24,7 @@ from ..project import Setlist, TrackEntry
 from ..streamdeck_controller import StreamDeckController
 from ..utils import format_duration
 from .app_state import AppState
+from .level_meter import LevelMeter
 
 
 class RecordFrame(ttk.Frame):
@@ -57,6 +58,8 @@ class RecordFrame(ttk.Frame):
 
         self._streamdeck = StreamDeckController()
         threading.Thread(target=self._connect_streamdeck, daemon=True).start()
+
+        self.after(50, self._poll_levels)
 
     # --- StreamDeck (Record/Stop toggle + backing/takes volume) ---
 
@@ -237,6 +240,22 @@ class RecordFrame(ttk.Frame):
         self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white", text="No camera preview")
         self.preview_label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         self.preview_label.bind("<Configure>", self._on_preview_label_resize)
+        row += 1
+
+        ttk.Label(left, text="Instrument", foreground="#666666").grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+        self.instrument_meter = LevelMeter(left)
+        self.instrument_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        row += 1
+
+        ttk.Label(left, text="Backing Track", foreground="#666666").grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+        self.backing_meter = LevelMeter(left)
+        self.backing_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         row += 1
 
         self.selection_var = tk.StringVar(value="No track selected")
@@ -558,6 +577,22 @@ class RecordFrame(ttk.Frame):
         if self._preview_sub is not None:
             self._preview_sub.close()
             self._preview_sub = None
+
+    # --- VU meters (polled directly — get_levels() is cheap: a local attribute
+    # read for LocalBackend, and a no-op returning silence for RemoteBackend,
+    # so there's no need to hop to a worker thread like the other backend calls) ---
+
+    def _poll_levels(self) -> None:
+        if not self.winfo_exists():
+            return
+        if hasattr(self, "instrument_meter"):
+            try:
+                instrument_level, backing_level = self.app_state.backend.get_levels()
+            except BackendError:
+                instrument_level, backing_level = 0.0, 0.0
+            self.instrument_meter.set_level(instrument_level)
+            self.backing_meter.set_level(backing_level)
+        self.after(50, self._poll_levels)
 
     def _on_destroy(self, _event: object) -> None:
         self._stop_preview()

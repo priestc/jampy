@@ -20,11 +20,11 @@ from .studio_setup import StudioSetupFrame
 # for Latency, which holds the same during a camera latency test; and for
 # Remote, which holds the connected RemoteClient / hosted RemoteServer.
 TABS = [
+    ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
     ("Instruments", InstrumentsFrame, False),
     ("Latency", LatencyFrame, True),
-    ("Record", RecordFrame, True),
     ("Remote", RemoteFrame, True),
 ]
 
