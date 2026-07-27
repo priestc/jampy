@@ -58,6 +58,9 @@ class RemoteBackend(Backend):
     def list_cameras(self) -> list[tuple[str, str]]:
         return [tuple(c) for c in self._client.call("list_cameras", {})["cameras"]]
 
+    def refresh_devices(self) -> None:
+        self._client.call("refresh_devices", {})
+
     # --- projects / setlists ---
 
     def list_projects(self) -> list[str]:
@@ -126,6 +129,14 @@ class RemoteBackend(Backend):
                 except BackendError:
                     self._preview_subscribed = False
         return _RemotePreviewSubscription(self, on_frame)
+
+    # --- camera latency test (not supported over Remote; see LatencyFrame) ---
+
+    def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None:
+        raise BackendError("Camera latency measurement isn't available over Remote connections yet.")
+
+    def stop_latency_test(self) -> None:
+        raise BackendError("Camera latency measurement isn't available over Remote connections yet.")
 
     def _unsubscribe_preview(self, on_frame: FrameCallback) -> None:
         with self._preview_lock:

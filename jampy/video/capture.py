@@ -149,6 +149,7 @@ def mux_video_audio(
     instrument_audio_path: Path,
     output_path: Path,
     watermark_text: str | None = None,
+    video_offset_ms: float = 0.0,
 ) -> bool:
     """Combine a silent video file with two audio tracks: a compressed mix
     (backing track + instrument, for easy playback/sharing) and a lossless
@@ -158,6 +159,12 @@ def mux_video_audio(
     the bottom of the video. Rendered as a PNG overlay via Pillow rather than
     ffmpeg's drawtext filter, since drawtext requires ffmpeg to be built with
     libfreetype, which many default/minimal ffmpeg builds omit.
+
+    video_offset_ms comes from the Latency tab's camera test: positive means
+    the video needs to be delayed relative to the audio, negative means the
+    audio needs to be delayed relative to the video. Implemented as a
+    positive ffmpeg -itsoffset on whichever side needs delaying, since
+    negative -itsoffset isn't reliably supported across demuxers.
     """
     if not ffmpeg_available():
         return False
@@ -171,7 +178,19 @@ def mux_video_audio(
         except Exception:
             watermark_png = None
 
-    cmd = ["ffmpeg", "-y", "-i", str(video_path), "-i", str(mix_audio_path), "-i", str(instrument_audio_path)]
+    video_delay_s = max(0.0, video_offset_ms / 1000.0)
+    audio_delay_s = max(0.0, -video_offset_ms / 1000.0)
+
+    cmd = ["ffmpeg", "-y"]
+    if video_delay_s:
+        cmd += ["-itsoffset", f"{video_delay_s:.6f}"]
+    cmd += ["-i", str(video_path)]
+    if audio_delay_s:
+        cmd += ["-itsoffset", f"{audio_delay_s:.6f}"]
+    cmd += ["-i", str(mix_audio_path)]
+    if audio_delay_s:
+        cmd += ["-itsoffset", f"{audio_delay_s:.6f}"]
+    cmd += ["-i", str(instrument_audio_path)]
     if watermark_png is not None:
         cmd += [
             "-i", str(watermark_png),
@@ -195,3 +214,15 @@ def mux_video_audio(
     if watermark_png is not None:
         watermark_png.unlink(missing_ok=True)
     return result.returncode == 0
+
+
+def open_in_default_player(path: Path) -> None:
+    """Open a video file in the OS's default player, for reviewing a just-
+    finished latency-test recording."""
+    if sys.platform == "darwin":
+        subprocess.run(["open", str(path)])
+    elif sys.platform.startswith("linux"):
+        subprocess.run(["xdg-open", str(path)])
+    elif sys.platform.startswith("win"):
+        import os
+        os.startfile(str(path))  # type: ignore[attr-defined]

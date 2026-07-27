@@ -65,6 +65,7 @@ class StudioConfig:
     last_selected_project: str = ""  # prefilled on the Record tab at startup
     last_selected_instrument: str = ""
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback
+    video_latency_compensation_ms: float = 0.0  # ms to shift video relative to audio when muxing recordings
     studio_musician: str = ""
     studio_name: str = ""
     studio_location: str = ""

@@ -228,8 +228,14 @@ class RecordFrame(ttk.Frame):
             row += 1
 
         left.columnconfigure(1, weight=1)
+        self.refresh_devices_button = ttk.Button(
+            left, text="↻ Refresh Devices", command=self._on_refresh_devices,
+        )
+        self.refresh_devices_button.grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+
         self.preview_label = tk.Label(left, background="#1a1a1a", foreground="white", text="No camera preview")
-        self.preview_label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(12, 12))
+        self.preview_label.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         self.preview_label.bind("<Configure>", self._on_preview_label_resize)
         row += 1
 
@@ -476,6 +482,42 @@ class RecordFrame(ttk.Frame):
         list_state = "normal" if enabled else "disabled"
         self.playlist_listbox.configure(state=list_state)
         self.inspiration_listbox.configure(state=list_state)
+        self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
+
+    # --- refresh devices (camera/audio plugged in after the UI was launched) ---
+
+    def _on_refresh_devices(self) -> None:
+        if self._phase != "idle":
+            return  # camera's held exclusively by the active recording; nothing to refresh into
+        self.refresh_devices_button.state(["disabled"])
+        self.status_var.set("Refreshing devices...")
+        backend = self.app_state.backend
+
+        def worker() -> None:
+            try:
+                backend.refresh_devices()
+                error = None
+            except BackendError as e:
+                error = str(e)
+            self.after(0, lambda: self._on_refresh_devices_result(error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_refresh_devices_result(self, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.refresh_devices_button.state(["!disabled"])
+        if error:
+            self.status_var.set(f"Refresh failed: {error}")
+            return
+        self.status_var.set("Devices refreshed.")
+        # The backend's camera capture thread has been restarted by
+        # refresh_devices(); tear down and reopen this frame's own
+        # subscription so a preview that never came up (no camera at launch)
+        # gets a fresh "Waiting for camera preview..." rather than staying on
+        # "No camera preview" from before the config even had one attached.
+        self._stop_preview()
+        self._start_preview()
 
     # --- camera preview (frames streamed from the backend, local or remote) ---
 

@@ -17,6 +17,7 @@ be invoked from a non-UI thread for the same reason.
 from __future__ import annotations
 
 import socket
+import tempfile
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -25,7 +26,7 @@ from typing import Callable
 
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
-from .utils import next_take_number, take_filename, wall_timestamp
+from .utils import ensure_dir, next_take_number, take_filename, wall_timestamp
 
 
 class BackendError(Exception):
@@ -80,6 +81,9 @@ class Backend(ABC):
     @abstractmethod
     def list_cameras(self) -> list[tuple[str, str]]: ...
 
+    @abstractmethod
+    def refresh_devices(self) -> None: ...
+
     # --- projects / setlists ---
 
     @abstractmethod
@@ -127,6 +131,14 @@ class Backend(ABC):
     @abstractmethod
     def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription: ...
 
+    # --- camera latency test (local-only; RemoteBackend refuses) ---
+
+    @abstractmethod
+    def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None: ...
+
+    @abstractmethod
+    def stop_latency_test(self) -> None: ...
+
 
 class _CameraPreviewManager:
     """Owns the single physical camera's capture loop and fans JPEG frames out
@@ -166,6 +178,17 @@ class _CameraPreviewManager:
         with self._lock:
             self._paused = False
             if self._subscribers and self._thread is None:
+                self._start_thread_locked()
+
+    def restart(self) -> None:
+        """Force the capture thread to close and reopen the camera device —
+        used by refresh_devices() for a camera that wasn't plugged in yet
+        when a subscriber first opened the preview (in which case the
+        capture thread would have opened, immediately failed, and exited,
+        leaving nothing to retry the open on its own)."""
+        with self._lock:
+            self._stop_thread_locked()
+            if self._subscribers and not self._paused:
                 self._start_thread_locked()
 
     def _start_thread_locked(self) -> None:
@@ -245,6 +268,18 @@ class _ActiveRecording:
     record_start_wall_time: str | None = None
 
 
+@dataclass
+class _ActiveLatencyTest:
+    engine: object
+    video_recorder: object
+    metronome_wav: Path
+    take_path: Path
+    video_raw: Path
+    mix_flac: Path
+    final_video: Path
+    camera_paired_with_preview: bool  # True if this test's camera is the one open_camera_preview streams
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -254,6 +289,7 @@ class LocalBackend(Backend):
         self._event_callbacks: list[EventCallback] = []
         self._record_lock = threading.Lock()
         self._active_recording: _ActiveRecording | None = None
+        self._active_latency_test: _ActiveLatencyTest | None = None
         self._preview = _CameraPreviewManager(self._current_camera_device)
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -303,6 +339,26 @@ class LocalBackend(Backend):
             return list_cameras()
         except Exception:
             return []
+
+    def refresh_devices(self) -> None:
+        """Re-scan hardware for the case the UI was launched (or a remote
+        connection made) before the camera/audio interface was plugged in.
+
+        list_cameras() already shells out to ffmpeg fresh each call, so it
+        always sees current hardware. Audio is different: PortAudio snapshots
+        its device list once, at first use, so a plugged-in-later interface
+        stays invisible to sd.query_devices() until PortAudio is
+        re-initialized. The camera preview also needs a nudge of its own —
+        if the camera wasn't present when the preview was first opened, its
+        capture thread will have opened, failed, and exited for good.
+        """
+        try:
+            import sounddevice as sd
+            sd._terminate()
+            sd._initialize()
+        except Exception:
+            pass
+        self._preview.restart()
 
     # --- projects / setlists ---
 
@@ -389,7 +445,7 @@ class LocalBackend(Backend):
 
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
-            if self._active_recording is not None:
+            if self._active_recording is not None or self._active_latency_test is not None:
                 raise BackendError("Another recording is already in progress.")
 
             config = self.get_config()
@@ -626,7 +682,7 @@ class LocalBackend(Backend):
                 )
                 if mux_video_audio(
                     active.video_raw, active.mix_flac, active.rec_path, active.final_video,
-                    watermark_text=watermark_text,
+                    watermark_text=watermark_text, video_offset_ms=config.video_latency_compensation_ms,
                 ):
                     active.video_raw.unlink(missing_ok=True)
                     active.mix_flac.unlink(missing_ok=True)
@@ -645,3 +701,146 @@ class LocalBackend(Backend):
 
     def open_camera_preview(self, on_frame: FrameCallback) -> PreviewSubscription:
         return self._preview.subscribe(on_frame)
+
+    # --- camera latency test ---
+
+    def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None:
+        with self._record_lock:
+            if self._active_recording is not None or self._active_latency_test is not None:
+                raise BackendError("Another recording is already in progress.")
+            if not camera_device:
+                raise BackendError("Select a camera first.")
+
+            config = self.get_config()
+            inst = config.get_instrument(instrument_name)
+            if inst is None:
+                raise BackendError(f"Instrument '{instrument_name}' not found.")
+            input_info = config.resolve_input(inst.input_label)
+            if input_info is None:
+                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
+
+            from .video.capture import ffmpeg_available
+            if not ffmpeg_available():
+                raise BackendError("ffmpeg is required for the camera latency test.")
+
+            try:
+                import sounddevice as sd
+            except Exception as e:
+                raise BackendError(f"sounddevice unavailable: {e}") from e
+
+            from .audio.devices import resolve_device
+            out_dev = resolve_device(sd, config.output_device, "output")
+            in_dev = resolve_device(sd, input_info.device, "input")
+            if in_dev is None:
+                raise BackendError(f"Input device '{input_info.device}' not found.")
+
+            in_info = sd.query_devices(in_dev, "input")
+            out_info = sd.query_devices(out_dev, "output")
+            if input_info.channel > in_info["max_input_channels"]:
+                raise BackendError(
+                    f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                    f"but device only has {in_info['max_input_channels']} channels."
+                )
+            output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+            from .audio.engine import AudioEngine
+            from .audio.metronome import generate_metronome_wav
+            from .video.capture import VideoRecorder
+
+            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "jampy_latency_test")
+            metronome_wav = work_dir / "metronome.wav"
+            take_path = work_dir / "instrument.flac"
+            video_raw = work_dir / "video_raw.mp4"
+            mix_flac = work_dir / "mix.flac"
+            final_video = work_dir / "result.mp4"
+
+            if play_metronome:
+                generate_metronome_wav(metronome_wav, config.sample_rate)
+
+            engine = AudioEngine(
+                sample_rate=config.sample_rate,
+                buffer_size=config.buffer_size,
+                input_device=in_dev,
+                output_device=out_dev,
+                input_channels=max(input_info.channel, 1),
+                output_channels=max(1, output_channels),
+                monitor_channel=input_info.channel - 1,
+            )
+            if play_metronome:
+                engine.mixer.add_source("metronome", metronome_wav)
+            engine.start()
+            engine.mixer.reset()
+            engine.mixer.set_playing(True)
+            engine.start_recording(take_path)
+            engine.start_mix_recording(mix_flac)
+
+            # Same pause/resume dance as a real take (unpause_recording): if
+            # the chosen test camera is the one open_camera_preview streams,
+            # its cv2 capture has to let go before ffmpeg can open it exclusively.
+            camera_paired_with_preview = camera_device == config.camera_device
+            if camera_paired_with_preview:
+                self._preview.pause()
+                self._emit("preview_paused", {})
+
+            video_recorder = VideoRecorder(camera_device, video_raw)
+            if not video_recorder.start():
+                engine.stop()
+                if camera_paired_with_preview:
+                    self._preview.resume()
+                    self._emit("preview_resumed", {})
+                raise BackendError("Could not start camera capture.")
+
+            self._active_latency_test = _ActiveLatencyTest(
+                engine=engine, video_recorder=video_recorder, metronome_wav=metronome_wav,
+                take_path=take_path, video_raw=video_raw, mix_flac=mix_flac, final_video=final_video,
+                camera_paired_with_preview=camera_paired_with_preview,
+            )
+            self._emit("latency_test_status", {
+                "phase": "recording",
+                "status": "Recording — clap or hit your instrument along with the click, then Stop.",
+            })
+
+    def stop_latency_test(self) -> None:
+        with self._record_lock:
+            active = self._active_latency_test
+            if active is None:
+                raise BackendError("No latency test in progress.")
+            self._active_latency_test = None
+
+            active.engine.stop_recording()
+            active.engine.mixer.set_playing(False)
+            active.engine.stop()
+            active.video_recorder.stop()
+
+            if active.camera_paired_with_preview:
+                self._preview.resume()
+                self._emit("preview_resumed", {})
+
+            from .video.capture import mux_video_audio, open_in_default_player
+
+            # Muxed with the currently saved video offset applied, so this
+            # clip previews exactly what a real take would look like — the
+            # operator dials the offset in by re-running the test after each
+            # Save, not by eyeballing a fixed raw gap and doing the ms math
+            # themselves.
+            video_offset_ms = self.get_config().video_latency_compensation_ms
+            ok = mux_video_audio(
+                active.video_raw, active.mix_flac, active.take_path, active.final_video,
+                video_offset_ms=video_offset_ms,
+            )
+
+            active.video_raw.unlink(missing_ok=True)
+            active.mix_flac.unlink(missing_ok=True)
+            active.take_path.unlink(missing_ok=True)
+            active.metronome_wav.unlink(missing_ok=True)
+
+            if not ok:
+                self._emit("latency_test_status", {"phase": "idle", "status": "Video mux failed."})
+                raise BackendError("Could not combine video and audio.")
+
+            open_in_default_player(active.final_video)
+            self._emit("latency_test_status", {
+                "phase": "idle",
+                "status": "Test recording opened for review — adjust the offsets below and Save.",
+                "video_path": str(active.final_video),
+            })

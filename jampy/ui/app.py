@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 
 from .app_state import AppState
 from .instruments import InstrumentsFrame
+from .latency import LatencyFrame
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
 from .remote import RemoteFrame
@@ -15,12 +16,14 @@ from .studio_setup import StudioSetupFrame
 
 # (title, frame class, persistent). Persistent tabs are built once and never
 # torn down on tab switches — needed for Record, which holds a live audio
-# stream / ffmpeg process / camera handle that a rebuild would kill outright,
-# and for Remote, which holds the connected RemoteClient / hosted RemoteServer.
+# stream / ffmpeg process / camera handle that a rebuild would kill outright;
+# for Latency, which holds the same during a camera latency test; and for
+# Remote, which holds the connected RemoteClient / hosted RemoteServer.
 TABS = [
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
     ("Instruments", InstrumentsFrame, False),
+    ("Latency", LatencyFrame, True),
     ("Record", RecordFrame, True),
     ("Remote", RemoteFrame, True),
 ]
@@ -74,15 +77,22 @@ def run(remote_ip: str | None = None) -> None:
         index = notebook.index(notebook.select())
         rebuild(containers[index])
 
-    rebuild(containers[0])
     notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
+
+    # Land on Studio Setup until a studio has been configured (studio_name is
+    # the identity field CLI setup treats as "configured"); once one exists,
+    # open straight to Record, the tab actually used session to session.
+    config = app_state.local_backend.get_config()
+    initial_title = "Studio Setup" if not config.studio_name else "Record"
+    initial_index = next(i for i, (title, _, _) in enumerate(TABS) if title == initial_title)
+    notebook.select(initial_index)
+    rebuild(containers[initial_index])
 
     # Auto-connect on launch: an explicit --remote=IP wins over a configured
     # "always connect" remote. Either way, a host with no matching
     # known_remotes entry connects with no token, kicking off the same
     # pairing/approval flow as a first-time Connect click in the Remote tab.
     target = None
-    config = app_state.local_backend.get_config()
     if remote_ip:
         match = next((r for r in config.known_remotes if r.host == remote_ip), None)
         target = (match.host, match.port, match.token) if match else (remote_ip, config.remote_server_port, "")
