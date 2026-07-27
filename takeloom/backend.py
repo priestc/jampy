@@ -1,9 +1,9 @@
 """Backend abstraction: everything a UI tab needs, independent of whether the
-data/hardware lives on this machine or a remote jampy instance.
+data/hardware lives on this machine or a remote takeloom instance.
 
 `LocalBackend` talks directly to local config, disk, and audio/video
 hardware — this is the historical behavior of the UI tabs, just extracted
-behind an interface. `RemoteBackend` (in `jampy/remote/backend.py`) adapts
+behind an interface. `RemoteBackend` (in `takeloom/remote/backend.py`) adapts
 the same interface over the network to a `RemoteServer` running elsewhere,
 which itself wraps its own `LocalBackend`.
 
@@ -747,7 +747,7 @@ class LocalBackend(Backend):
             from .audio.metronome import generate_metronome_wav
             from .video.capture import VideoRecorder
 
-            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "jampy_latency_test")
+            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_latency_test")
             metronome_wav = work_dir / "metronome.wav"
             take_path = work_dir / "instrument.flac"
             video_raw = work_dir / "video_raw.mp4"

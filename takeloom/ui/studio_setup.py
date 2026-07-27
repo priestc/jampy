@@ -1,6 +1,6 @@
 """Studio Setup screen: studio identity and backup/inspiration server settings.
 
-Mirrors the fields configured by the `jampy setup-studio` CLI command.
+Mirrors the fields configured by the `takeloom setup-studio` CLI command.
 Reads/writes whichever machine's config `app_state.backend` currently points
 at — local by default, or a connected remote instance's config in remote mode.
 """

@@ -4,7 +4,7 @@ and record a take.
 
 Everything here goes through `app_state.backend` — in local mode that's a
 `LocalBackend` talking directly to this machine's hardware; in remote mode
-it's a `RemoteBackend` talking over the network to another jampy instance.
+it's a `RemoteBackend` talking over the network to another takeloom instance.
 This frame itself never touches `sounddevice`/`cv2`/`ffmpeg` directly: all
 device/take/camera-preview work happens inside the backend, and this frame
 just reflects whatever state it reports back (via `recording_status`/

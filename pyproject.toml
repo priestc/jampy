@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "jampy"
+name = "takeloom"
 version = "0.4.14"
 description = "Music Recording Session Manager"
 requires-python = ">=3.9"
@@ -25,4 +25,4 @@ camera-preview = [
 ]
 
 [project.scripts]
-jampy = "jampy.__main__:main"
+takeloom = "takeloom.__main__:main"

@@ -1,8 +1,8 @@
-# Jam.py
+# Takeloom
 
 A CLI application for musicians to record instruments over backing tracks, manage songs/albums, and track completed takes.
 
-Jam.py handles continuous audio recording, playback mixing, session logging, and per-take file management. Record one instrument at a time — each new session plays back your previous takes alongside the backing track so you can layer parts.
+Takeloom handles continuous audio recording, playback mixing, session logging, and per-take file management. Record one instrument at a time — each new session plays back your previous takes alongside the backing track so you can layer parts.
 
 ## Requirements
 
@@ -14,7 +14,7 @@ See [Prerequisites](docs/prerequisites.md) for install instructions for each ope
 ## Install
 
 ```bash
-pipx install git+https://github.com/priestc/jampy.git
+pipx install git+https://github.com/priestc/takeloom.git
 ```
 
 ## Usage
@@ -24,9 +24,9 @@ pipx install git+https://github.com/priestc/jampy.git
 Configure your studio in three steps. Each command reads and updates `~/studio_config.json` independently, so you can re-run one without redoing the others.
 
 ```bash
-jampy setup-studio              # studio name, location, musician, backup server
-jampy setup-recording-devices   # sample rate, buffer size, output device, input labels, camera
-jampy setup-instruments         # assign instruments to input channels
+takeloom setup-studio              # studio name, location, musician, backup server
+takeloom setup-recording-devices   # sample rate, buffer size, output device, input labels, camera
+takeloom setup-instruments         # assign instruments to input channels
 ```
 
 `setup-recording-devices` also lets you pick a camera. If one is configured, every session
@@ -35,27 +35,27 @@ records video alongside the audio (see [Recording Session](#recording-session)).
 ### Graphical Interface
 
 ```bash
-jampy ui
+takeloom ui
 ```
 
 Opens a desktop window (built with tkinter). Currently implements the Studio Setup screen —
-the same fields as `jampy setup-studio` — with more screens to follow.
+the same fields as `takeloom setup-studio` — with more screens to follow.
 
 ### Creating a Project
 
 ```bash
-jampy new-project
+takeloom new-project
 ```
 
-Enter a project name (e.g. "My Album"). Creates the project folder structure in `~/JamPy Projects/`.
+Enter a project name (e.g. "My Album"). Creates the project folder structure in `~/Takeloom Projects/`.
 
 ### Updating the Setlist
 
 Copy audio files (FLAC, WAV, MP3, M4A) into the project's `backing_tracks/` directory, then:
 
 ```bash
-cd ~/JamPy\ Projects/My\ Album
-jampy update-setlist
+cd ~/Takeloom\ Projects/My\ Album
+takeloom update-setlist
 ```
 
 Scans `backing_tracks/`, adds new files to `setlist.json`, and removes entries for deleted files. Each track in `setlist.json` includes a `volume` field (default 100%) that you can edit manually to adjust backing track playback level.
@@ -63,8 +63,8 @@ Scans `backing_tracks/`, adds new files to `setlist.json`, and removes entries f
 ### Recording Session
 
 ```bash
-cd ~/JamPy\ Projects/My\ Album
-jampy start-session guitar
+cd ~/Takeloom\ Projects/My\ Album
+takeloom start-session guitar
 ```
 
 The session plays the backing track through your speakers, monitors your instrument input in real-time, and records your take. Controls:
@@ -85,7 +85,7 @@ The session plays the backing track through your speakers, monitors your instrum
 
 **Volume adjustments** are saved back to `setlist.json` at the end of the session.
 
-**Video:** if a camera is configured (`jampy setup-recording-devices`), the whole session is
+**Video:** if a camera is configured (`takeloom setup-recording-devices`), the whole session is
 also recorded on video, saved as `session_video.mp4` alongside `session.flac` once the session
 ends. The video has two audio tracks: a compressed (AAC) mix of the backing track + your
 instrument for easy playback, and a lossless (FLAC) track of just your instrument alone.

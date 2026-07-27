@@ -1,4 +1,4 @@
-"""Remote tab: connect this jampy instance to another one's hardware/config,
+"""Remote tab: connect this takeloom instance to another one's hardware/config,
 and/or turn this instance's own remote server on/off so others can connect
 to it.
 
@@ -33,9 +33,9 @@ from .app_state import AppState
 
 
 def connect_async(widget, app_state: AppState, host: str, port: int, token: str, on_done=None, on_error=None) -> None:
-    """Connect to a remote jampy instance and swap it into app_state.backend.
+    """Connect to a remote takeloom instance and swap it into app_state.backend.
     Runs on a background thread; safe to call from the Tk main thread. Shared
-    by the Remote tab's Connect button and `jampy ui --remote=IP`.
+    by the Remote tab's Connect button and `takeloom ui --remote=IP`.
 
     `on_done`, if given, is called with the connected `RemoteClient` — check
     `client.issued_token` to see whether this was a first-time pairing that
@@ -158,7 +158,7 @@ class _AuthorizeDialog(tk.Toplevel):
         frame.pack(fill="both", expand=True)
         ttk.Label(
             frame,
-            text=f'"{client_name}" ({ip}) wants to connect to this Jam.py instance.',
+            text=f'"{client_name}" ({ip}) wants to connect to this Takeloom instance.',
             wraplength=320, justify="left",
         ).pack(anchor="w", pady=(0, 12))
 

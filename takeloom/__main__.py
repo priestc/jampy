@@ -1,4 +1,4 @@
-"""Entry point for Jam.py CLI."""
+"""Entry point for Takeloom CLI."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ from .utils import format_duration, take_filename, next_take_number, ensure_dir,
 
 @click.group()
 def main() -> None:
-    """Jam.py - Music Recording Session Manager."""
+    """Takeloom - Music Recording Session Manager."""
 
 
 @main.command()
@@ -255,12 +255,12 @@ def setup_recording_devices() -> None:
 @main.command(name="ui")
 @click.option(
     "--remote", "remote_ip", default=None,
-    help="Connect to a remote jampy instance at this IP/host on launch (e.g. --remote=192.168.1.190). "
+    help="Connect to a remote takeloom instance at this IP/host on launch (e.g. --remote=192.168.1.190). "
          "Uses a stored token if this host is already a known remote (Remote tab); otherwise this "
          "triggers a pairing request that the other machine's user must approve.",
 )
 def ui_command(remote_ip: str | None) -> None:
-    """Launch the graphical Jam.py interface."""
+    """Launch the graphical Takeloom interface."""
     from .ui.app import run
     run(remote_ip=remote_ip)
 
@@ -273,7 +273,7 @@ def ui_command(remote_ip: str | None) -> None:
 def server_command(port: int | None) -> None:
     """Run the remote-control server without launching the UI.
 
-    Lets other jampy instances connect to this machine (Remote tab),
+    Lets other takeloom instances connect to this machine (Remote tab),
     same as toggling the server on in the UI's Remote tab.
     """
     from .backend import LocalBackend
@@ -298,7 +298,7 @@ def server_command(port: int | None) -> None:
     config.remote_server_port = listen_port
     backend.save_config(config)
 
-    click.echo(f"jampy server listening on port {listen_port} (host: {backend.hostname()})")
+    click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
     click.echo("Press Ctrl+C to stop.\n")
 
     try:
@@ -326,7 +326,7 @@ def setup_instruments() -> None:
             click.echo(f"  [{i + 1}] {il.label}  ({il.device} ch{il.channel})")
         click.echo()
     else:
-        click.echo("No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+        click.echo("No inputs configured. Run 'takeloom setup-recording-devices' first.", err=True)
         raise SystemExit(1)
 
     if existing.instruments:
@@ -417,7 +417,7 @@ def sync_push() -> None:
     remote = project.setlist.backup_server or StudioConfig.load().backup_server
     if not remote:
         click.echo("Error: No backup server configured.", err=True)
-        click.echo("Set it in setlist.json or via 'jampy setup-studio'.")
+        click.echo("Set it in setlist.json or via 'takeloom setup-studio'.")
         raise SystemExit(1)
 
     from .sync import sync_up
@@ -436,7 +436,7 @@ def sync_pull() -> None:
     remote = project.setlist.backup_server or StudioConfig.load().backup_server
     if not remote:
         click.echo("Error: No backup server configured.", err=True)
-        click.echo("Set it in setlist.json or via 'jampy setup-studio'.")
+        click.echo("Set it in setlist.json or via 'takeloom setup-studio'.")
         raise SystemExit(1)
 
     from .sync import sync_down
@@ -608,7 +608,7 @@ def start_session(instrument: str) -> None:
     inst = config.get_instrument(instrument)
     if inst is None:
         if not config.input_labels:
-            click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+            click.echo("Error: No inputs configured. Run 'takeloom setup-recording-devices' first.", err=True)
             raise SystemExit(1)
         click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
         click.echo("Available inputs:")
@@ -644,7 +644,7 @@ def start_session(instrument: str) -> None:
         project.load_setlist()  # reload after sync may have updated it
 
     if not project.setlist.tracks:
-        click.echo("Error: Setlist is empty. Run 'jampy update-setlist' first.", err=True)
+        click.echo("Error: Setlist is empty. Run 'takeloom update-setlist' first.", err=True)
         raise SystemExit(1)
 
     # Import AudioEngine here to avoid top-level sounddevice import
@@ -1091,7 +1091,7 @@ def measure_latency(instrument: str) -> None:
     inst = config.get_instrument(instrument)
     if inst is None:
         if not config.input_labels:
-            click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+            click.echo("Error: No inputs configured. Run 'takeloom setup-recording-devices' first.", err=True)
             raise SystemExit(1)
         click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
         click.echo("Available inputs:")
@@ -1146,7 +1146,7 @@ def measure_latency(instrument: str) -> None:
         raise SystemExit(1)
 
     import tempfile
-    tmp_recording = Path(tempfile.mktemp(suffix=".flac", prefix="jampy_latency_"))
+    tmp_recording = Path(tempfile.mktemp(suffix=".flac", prefix="takeloom_latency_"))
 
     engine = AudioEngine(
         sample_rate=config.sample_rate,
@@ -1414,7 +1414,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
         inst_obj = config.get_instrument(instrument)
         if inst_obj is None:
             if not config.input_labels:
-                click.echo("Error: No inputs configured. Run 'jampy setup-recording-devices' first.", err=True)
+                click.echo("Error: No inputs configured. Run 'takeloom setup-recording-devices' first.", err=True)
                 raise SystemExit(1)
             click.echo(f"Instrument '{instrument}' not found in config. Let's set it up.\n")
             click.echo("Available inputs:")
@@ -1478,7 +1478,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
         click.echo("Controls: [space] pause/play  [s]kip  [l]ower volume  [u]p volume  [q]uit\n")
     vlog(f"[audio] device={out_info['name']!r}  channels={out_channels}  sample_rate={playback_sr} Hz")
 
-    tmpdir = tempfile.mkdtemp(prefix="jampy_inspiration_")
+    tmpdir = tempfile.mkdtemp(prefix="takeloom_inspiration_")
     vlog(f"[audio] tmp dir: {tmpdir}")
     volume = config.inspiration_volume
 

@@ -1,5 +1,5 @@
 """RemoteServer: threaded TCP server exposing one LocalBackend to remote
-jampy clients.
+takeloom clients.
 
 Each connection gets its own handler thread. `LocalBackend` events
 (recording_status, preview_paused, preview_resumed) are broadcast to every

@@ -1,6 +1,6 @@
 # Prerequisites
 
-Jam.py requires a few system libraries that can't be installed via pip. Install these before running `pip install`.
+Takeloom requires a few system libraries that can't be installed via pip. Install these before running `pip install`.
 
 ## Python
 

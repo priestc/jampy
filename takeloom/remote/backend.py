@@ -1,6 +1,6 @@
-"""RemoteBackend: adapts jampy.backend.Backend over a RemoteClient, so UI
+"""RemoteBackend: adapts takeloom.backend.Backend over a RemoteClient, so UI
 tabs can't tell whether they're talking to local hardware or a remote
-jampy instance."""
+takeloom instance."""
 
 from __future__ import annotations
 

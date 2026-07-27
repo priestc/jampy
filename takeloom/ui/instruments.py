@@ -1,6 +1,6 @@
 """Instruments screen: instrument name-to-input assignment.
 
-Mirrors the `jampy setup-instruments` CLI command. Reads/writes whichever
+Mirrors the `takeloom setup-instruments` CLI command. Reads/writes whichever
 machine's config `app_state.backend` currently points at.
 """
 

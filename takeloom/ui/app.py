@@ -1,4 +1,4 @@
-"""Jam.py graphical interface entry point."""
+"""Takeloom graphical interface entry point."""
 
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ def run(remote_ip: str | None = None) -> None:
         # DPI assumption to 96, what a 100%-scaled Linux desktop actually
         # uses, so text comes out the same size as on macOS.
         root.tk.call("tk", "scaling", 96 / 72)
-    root.title("Jam.py")
+    root.title("Takeloom")
     root.geometry("1100x650")
 
     app_state = AppState()

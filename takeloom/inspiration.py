@@ -24,7 +24,7 @@ def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dic
         )
     if not config.inspiration_server or not config.inspiration_api_key:
         raise InspirationError(
-            "inspiration_server and inspiration_api_key must be set (jampy setup-studio)."
+            "inspiration_server and inspiration_api_key must be set (takeloom setup-studio)."
         )
 
     server = config.inspiration_server.rstrip("/")

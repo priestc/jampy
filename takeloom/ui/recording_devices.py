@@ -1,6 +1,6 @@
 """Recording Devices screen: sample rate, buffer, output device, input labels, camera.
 
-Mirrors the fields configured by the `jampy setup-recording-devices` CLI
+Mirrors the fields configured by the `takeloom setup-recording-devices` CLI
 command. Reads/writes whichever machine's config `app_state.backend`
 currently points at, and queries that same machine's audio/camera devices.
 """

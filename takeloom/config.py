@@ -31,7 +31,7 @@ class Instrument:
 
 @dataclass
 class KnownRemote:
-    """A remote jampy instance this machine can connect to as a client."""
+    """A remote takeloom instance this machine can connect to as a client."""
     host: str
     port: int
     token: str = ""  # "" until the first successful pairing/authorization
@@ -41,7 +41,7 @@ class KnownRemote:
 
 @dataclass
 class AuthorizedClient:
-    """A remote jampy instance authorized to connect to this machine's server."""
+    """A remote takeloom instance authorized to connect to this machine's server."""
     token: str
     label: str  # client-reported machine name at authorization time
     last_ip: str = ""
@@ -55,7 +55,7 @@ class StudioConfig:
     buffer_size: int = 512
     output_device: str = ""
     output_channels: int = 2
-    projects_dir: str = str(Path.home() / "JamPy Projects")
+    projects_dir: str = str(Path.home() / "Takeloom Projects")
     backup_server: str = ""  # e.g. "user@host:/path/to/backups"
     inspiration_server: str = ""  # e.g. "http://myserver:8000"
     inspiration_api_key: str = ""
