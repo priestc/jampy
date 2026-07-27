@@ -1,5 +1,8 @@
-"""New Project dialog: a name entry plus a drop zone for local audio files
-and YouTube URLs, used to seed a fresh project's backing tracks in one step.
+"""New Project dialog: a name entry plus a drop zone for local audio/video
+files and YouTube URLs, used to seed a fresh project's backing tracks in one
+step. YouTube URLs are downloaded as full video files (see takeloom/youtube.py);
+audio for playback/mixing is pulled out of them the same way it is for any
+other video-file backing track.
 
 All the actual work (creating the project directory, copying files, running
 yt-dlp) happens through `app_state.backend`, so this dialog behaves the same
@@ -63,13 +66,16 @@ class NewProjectDialog(tk.Toplevel):
         ttk.Button(button_row, text="Add YouTube URL...", command=self._on_add_url).pack(side="left", padx=(8, 0))
         ttk.Button(button_row, text="Remove Selected", command=self._on_remove_selected).pack(side="left", padx=(8, 0))
 
+        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
+        self.progress.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
         self.status_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.status_var, foreground="#2a7d2a", wraplength=400).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(8, 0)
+            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
         footer = ttk.Frame(frame)
-        footer.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        footer.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.cancel_button = ttk.Button(footer, text="Cancel", command=self.destroy)
         self.cancel_button.pack(side="left", padx=(0, 8))
         self.create_button = ttk.Button(footer, text="Create", command=self._on_create)
@@ -127,7 +133,11 @@ class NewProjectDialog(tk.Toplevel):
     def _on_browse_files(self) -> None:
         paths = filedialog.askopenfilenames(
             title="Add Backing Tracks",
-            filetypes=[("Audio files", "*.flac *.wav *.mp3 *.m4a *.aac *.ogg *.opus"), ("All files", "*.*")],
+            filetypes=[
+                ("Audio/video files", "*.flac *.wav *.mp3 *.m4a *.aac *.ogg *.opus "
+                                       "*.mp4 *.m4v *.mov *.mkv *.webm *.avi"),
+                ("All files", "*.*"),
+            ],
             parent=self,
         )
         for p in paths:
@@ -187,14 +197,19 @@ class NewProjectDialog(tk.Toplevel):
 
             for item in items:
                 self.after(0, lambda i=item: self._set_item_status(i, "Working..."))
+                self.after(0, self._reset_progress)
                 try:
                     if item["kind"] == "youtube":
-                        backend.add_youtube_backing_track(project_name, item["source"])
+                        def on_progress(percent: float | None, message: str) -> None:
+                            self.after(0, lambda: self._update_progress(percent, message))
+                        backend.add_youtube_backing_track(project_name, item["source"], on_progress=on_progress)
                     else:
                         backend.add_local_backing_track(project_name, item["source"])
                     self.after(0, lambda i=item: self._set_item_status(i, "Done"))
                 except BackendError as e:
                     self.after(0, lambda i=item, err=str(e): self._set_item_status(i, f"Failed: {err}"))
+                finally:
+                    self.after(0, self._reset_progress)
 
             self.after(0, lambda: self._on_create_finished(project_name))
 
@@ -204,6 +219,17 @@ class NewProjectDialog(tk.Toplevel):
         item["status"] = status
         if self.winfo_exists():
             self._refresh_list()
+
+    def _reset_progress(self) -> None:
+        if self.winfo_exists():
+            self.progress["value"] = 0
+
+    def _update_progress(self, percent: float | None, message: str) -> None:
+        if not self.winfo_exists():
+            return
+        if percent is not None:
+            self.progress["value"] = percent
+        self.status_var.set(message)
 
     def _on_create_failed(self, error: str) -> None:
         self._working = False

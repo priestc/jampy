@@ -104,16 +104,25 @@ class Backend(ABC):
     def add_local_backing_track(
         self, project_name: str, source_path: str, track_name: str | None = None,
     ) -> dict:
-        """Add a local audio file as a backing track. `source_path` must be
-        reachable on the machine the backend actually runs on — RemoteBackend
-        refuses, since a path on the controlling client isn't reachable from
-        the remote studio's disk."""
+        """Add a local audio or video file as a backing track (a video's
+        audio stream is extracted for playback/mixing). `source_path` must
+        be reachable on the machine the backend actually runs on —
+        RemoteBackend refuses, since a path on the controlling client isn't
+        reachable from the remote studio's disk."""
         ...
 
     @abstractmethod
-    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
-        """Download a YouTube video's audio (via yt-dlp) and add it as a
-        backing track."""
+    def add_youtube_backing_track(
+        self, project_name: str, url: str, on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        """Download a full YouTube video (via yt-dlp) and add it as a backing
+        track; its audio stream is extracted for playback/mixing as needed.
+
+        If given, on_progress(percent, message) reports live download
+        progress — percent is 0-100 when known, else None with just a
+        status message. RemoteBackend can't stream this live over its
+        simple request/response RPC, so it calls on_progress once with a
+        placeholder message instead."""
         ...
 
     # --- inspiration ---
@@ -437,11 +446,15 @@ class LocalBackend(Backend):
         entry = project.add_backing_track(src, track_name=track_name, duration_seconds=duration)
         return entry.to_dict()
 
-    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
+    def add_youtube_backing_track(
+        self, project_name: str, url: str, on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
         project = self._open_project(project_name)
-        from .youtube import YouTubeDownloadError, download_youtube_audio
+        from .youtube import YouTubeDownloadError, download_youtube_video
         try:
-            dest_path, title, duration = download_youtube_audio(url, project.backing_tracks_dir)
+            dest_path, title, duration = download_youtube_video(
+                url, project.backing_tracks_dir, on_progress=on_progress,
+            )
         except YouTubeDownloadError as e:
             raise BackendError(str(e)) from e
         entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration)

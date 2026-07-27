@@ -1,4 +1,4 @@
-"""Audio format handling: decode MP3/M4A via ffmpeg, read/write FLAC/WAV."""
+"""Audio format handling: decode MP3/M4A/video via ffmpeg, read/write FLAC/WAV."""
 
 from __future__ import annotations
 
@@ -7,15 +7,29 @@ import numpy as np
 import soundfile as sf
 from pathlib import Path
 
+# Anything soundfile can't read natively goes through ffmpeg/ffprobe instead:
+# compressed audio containers, and video containers (a video backing track's
+# audio stream is extracted from it the same way).
+_FFMPEG_EXTS = (
+    ".mp3", ".m4a", ".aac", ".ogg", ".opus",
+    ".mp4", ".m4v", ".mov", ".mkv", ".webm", ".avi",
+)
+
+# Every file type read_audio()/get_duration() can handle — native (soundfile)
+# formats plus everything decoded via ffmpeg above. Used wherever the app
+# needs to recognize "this can be used as a backing track."
+SUPPORTED_EXTS = frozenset({".wav", ".flac"} | set(_FFMPEG_EXTS))
+
 
 def read_audio(path: Path, sample_rate: int | None = None) -> tuple[np.ndarray, int]:
     """Read an audio file, returning (float32 array, sample_rate).
 
-    Supports FLAC, WAV natively. MP3/M4A decoded via ffmpeg.
+    Supports FLAC, WAV natively. Compressed audio and video files (their
+    audio stream) decoded via ffmpeg.
     Output is always float32. Mono files returned as (N,1), stereo as (N,2).
     """
     suffix = path.suffix.lower()
-    if suffix in (".mp3", ".m4a", ".aac", ".ogg", ".opus"):
+    if suffix in _FFMPEG_EXTS:
         return _decode_with_ffmpeg(path, sample_rate)
     # Native soundfile formats
     data, sr = sf.read(str(path), dtype="float32", always_2d=True)
@@ -49,9 +63,9 @@ def write_flac(path: Path, data: np.ndarray, sample_rate: int) -> None:
 
 
 def get_duration(path: Path) -> float:
-    """Get duration of an audio file in seconds."""
+    """Get duration of an audio (or video) file in seconds."""
     suffix = path.suffix.lower()
-    if suffix in (".mp3", ".m4a", ".aac", ".ogg", ".opus"):
+    if suffix in _FFMPEG_EXTS:
         cmd = [
             "ffprobe", "-i", str(path),
             "-show_entries", "format=duration",

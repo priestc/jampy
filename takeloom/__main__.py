@@ -28,7 +28,7 @@ from .config import (
 )
 from .project import Project, Setlist, TrackEntry
 from .audio.devices import resolve_device as _resolve_device
-from .audio.formats import get_duration
+from .audio.formats import SUPPORTED_EXTS, get_duration
 from .inspiration import (
     InspirationError,
     download_inspiration_track,
@@ -462,11 +462,10 @@ def update_setlist() -> None:
     project = Project.open(cwd)
     existing_files = {t.backing_track for t in project.setlist.tracks}
 
-    # Scan for audio files
-    audio_exts = {".wav", ".flac", ".mp3", ".m4a", ".aac", ".ogg", ".opus"}
+    # Scan for backing-track-able files (audio, or video for its audio stream)
     found_files = {
         f.name for f in backing_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in audio_exts
+        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTS
     }
 
     # Add new tracks

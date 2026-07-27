@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import base64
 import threading
+from typing import Callable
 
 from ..backend import (
     Backend,
@@ -86,7 +87,11 @@ class RemoteBackend(Backend):
             "yet — paste a YouTube URL instead."
         )
 
-    def add_youtube_backing_track(self, project_name: str, url: str) -> dict:
+    def add_youtube_backing_track(
+        self, project_name: str, url: str, on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        if on_progress:
+            on_progress(None, "Downloading on the remote studio (live progress isn't available over Remote yet)...")
         return self._client.call(
             "add_youtube_backing_track", {"project_name": project_name, "url": url}, timeout=DOWNLOAD_TIMEOUT,
         )
