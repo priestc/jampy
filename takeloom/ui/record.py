@@ -121,12 +121,22 @@ class RecordFrame(ttk.Frame):
         delta = 5 if key in ("u", "]") else -5
         adjust = "adjust_takes_volume" if key in ("[", "]") else "adjust_backing_volume"
         backend = self.app_state.backend
+        self._run_backend(lambda: getattr(backend, adjust)(delta))
 
+    # --- async backend calls (thread hop + marshal back onto the Tk thread) ---
+
+    def _run_backend(self, fn, on_done=None) -> None:
+        """Run `fn()` on a worker thread and, once it finishes, call
+        `on_done(result, error)` back on the Tk thread (`error` is a message
+        string if `fn` raised BackendError, else None and `result` holds
+        whatever `fn` returned). Pass no `on_done` for fire-and-forget calls."""
         def worker() -> None:
             try:
-                getattr(backend, adjust)(delta)
-            except BackendError:
-                pass
+                result, error = fn(), None
+            except BackendError as e:
+                result, error = None, str(e)
+            if on_done is not None:
+                self.after(0, lambda: on_done(result, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -148,16 +158,11 @@ class RecordFrame(ttk.Frame):
     def _load(self) -> None:
         backend = self.app_state.backend
 
-        def worker() -> None:
-            try:
-                config = backend.get_config()
-                projects = backend.list_projects()
-                error = None
-            except BackendError as e:
-                config, projects, error = None, [], str(e)
-            self.after(0, lambda: self._on_loaded(config, projects, error))
+        def on_done(result: tuple | None, error: str | None) -> None:
+            config, projects = result if result is not None else (None, [])
+            self._on_loaded(config, projects, error)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(lambda: (backend.get_config(), backend.list_projects()), on_done)
 
     def _on_loaded(self, config: StudioConfig | None, projects: list[str], error: str | None) -> None:
         if not self.winfo_exists():
@@ -365,14 +370,10 @@ class RecordFrame(ttk.Frame):
         backend = self.app_state.backend
         project_name = self._project_name
 
-        def worker() -> None:
-            try:
-                tracks, error = backend.query_inspiration_tracks(project_name), None
-            except BackendError as e:
-                tracks, error = [], str(e)
-            self.after(0, lambda: self._on_inspiration_loaded(tracks, error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(
+            lambda: backend.query_inspiration_tracks(project_name),
+            lambda tracks, error: self._on_inspiration_loaded(tracks or [], error),
+        )
 
     def _on_inspiration_loaded(self, tracks: list[dict], error: str | None) -> None:
         self._inspiration_tracks = tracks
@@ -408,30 +409,19 @@ class RecordFrame(ttk.Frame):
 
         backend = self.app_state.backend
         project_name = self._project_name
-
-        def worker() -> None:
-            try:
-                data, error = backend.get_setlist(project_name), None
-            except BackendError as e:
-                data, error = None, str(e)
-            self.after(0, lambda: self._on_setlist_loaded(data, error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(lambda: backend.get_setlist(project_name), self._on_setlist_loaded)
 
     def _on_new_project(self) -> None:
         NewProjectDialog(self, self.app_state.backend, self._on_project_created)
 
     def _on_project_created(self, project_name: str) -> None:
         backend = self.app_state.backend
-
-        def worker() -> None:
-            try:
-                projects = backend.list_projects()
-            except BackendError:
-                projects = self._project_names
-            self.after(0, lambda: self._apply_new_project_list(projects, project_name))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(
+            lambda: backend.list_projects(),
+            lambda projects, error: self._apply_new_project_list(
+                projects if error is None else self._project_names, project_name
+            ),
+        )
 
     def _apply_new_project_list(self, projects: list[str], project_name: str) -> None:
         if not self.winfo_exists():
@@ -458,15 +448,10 @@ class RecordFrame(ttk.Frame):
             return
         backend = self.app_state.backend
         project_name = self._project_name
-
-        def worker() -> None:
-            try:
-                data = backend.get_setlist(project_name)
-            except BackendError:
-                return
-            self.after(0, lambda: self._apply_refreshed_setlist(data))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(
+            lambda: backend.get_setlist(project_name),
+            lambda data, error: None if error else self._apply_refreshed_setlist(data),
+        )
 
     def _apply_refreshed_setlist(self, data: dict) -> None:
         self._setlist = Setlist.from_dict(data)
@@ -486,7 +471,7 @@ class RecordFrame(ttk.Frame):
         self.config_obj.last_selected_project = self.project_var.get()
         backend = self.app_state.backend
         config = self.config_obj
-        threading.Thread(target=lambda: backend.save_config(config), daemon=True).start()
+        self._run_backend(lambda: backend.save_config(config))
 
     def _on_playlist_select(self, _event: object = None) -> None:
         sel = self.playlist_listbox.curselection()
@@ -545,16 +530,9 @@ class RecordFrame(ttk.Frame):
         self.refresh_devices_button.state(["disabled"])
         self.status_var.set("Refreshing devices...")
         backend = self.app_state.backend
-
-        def worker() -> None:
-            try:
-                backend.refresh_devices()
-                error = None
-            except BackendError as e:
-                error = str(e)
-            self.after(0, lambda: self._on_refresh_devices_result(error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(
+            lambda: backend.refresh_devices(), lambda _result, error: self._on_refresh_devices_result(error)
+        )
 
     def _on_refresh_devices_result(self, error: str | None) -> None:
         if not self.winfo_exists():
@@ -669,16 +647,7 @@ class RecordFrame(ttk.Frame):
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
         backend = self.app_state.backend
-
-        def worker() -> None:
-            try:
-                backend.start_recording(req)
-                error = None
-            except BackendError as e:
-                error = str(e)
-            self.after(0, lambda: self._on_start_result(error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(lambda: backend.start_recording(req), lambda _result, error: self._on_start_result(error))
 
     def _on_start_result(self, error: str | None) -> None:
         # On success, the "recording_status" event the backend emits before
@@ -693,16 +662,9 @@ class RecordFrame(ttk.Frame):
     def _unpause_recording(self) -> None:
         self.record_button.state(["disabled"])
         backend = self.app_state.backend
-
-        def worker() -> None:
-            try:
-                backend.unpause_recording()
-                error = None
-            except BackendError as e:
-                error = str(e)
-            self.after(0, lambda: self._on_unpause_result(error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(
+            lambda: backend.unpause_recording(), lambda _result, error: self._on_unpause_result(error)
+        )
 
     def _on_unpause_result(self, error: str | None) -> None:
         # On success, the "recording_status" event already updated the button
@@ -714,16 +676,7 @@ class RecordFrame(ttk.Frame):
     def _stop_recording(self) -> None:
         self.record_button.state(["disabled"])
         backend = self.app_state.backend
-
-        def worker() -> None:
-            try:
-                backend.stop_recording()
-                error = None
-            except BackendError as e:
-                error = str(e)
-            self.after(0, lambda: self._on_stop_result(error))
-
-        threading.Thread(target=worker, daemon=True).start()
+        self._run_backend(lambda: backend.stop_recording(), lambda _result, error: self._on_stop_result(error))
 
     def _on_stop_result(self, error: str | None) -> None:
         self.record_button.state(["!disabled"])
