@@ -16,6 +16,10 @@ class TakeInfo:
     take_number: int
     filename: str
     volume: float = 1.0
+    # Derived fresh from disk by Project.open() (see _sync_has_video) rather
+    # than trusted as persisted truth — self-heals if the video mux failed,
+    # was never attempted, or the .mp4 was later removed by hand.
+    has_video: bool = False
 
 
 @dataclass
@@ -120,7 +124,19 @@ class Project:
         if proj.setlist_path.exists():
             data = json.loads(proj.setlist_path.read_text())
             proj.setlist = Setlist.from_dict(data)
+            proj._sync_has_video()
         return proj
+
+    def _sync_has_video(self) -> None:
+        """Set each take's has_video flag from whether its companion .mp4
+        actually exists in completed_takes_dir, rather than from whatever
+        was last persisted — so a take is correctly flagged "audio only"
+        whether video was never recorded, muxing failed, or the file was
+        since deleted."""
+        for track in self.setlist.tracks:
+            for take in track.preferred_takes.values():
+                video_path = self.completed_takes_dir / (Path(take.filename).stem + ".mp4")
+                take.has_video = video_path.exists()
 
     @classmethod
     def create_new(cls, parent_dir: Path, name: str) -> Project:

@@ -183,9 +183,15 @@ class _CameraPreviewManager:
     access during recording (mirrors RecordFrame's old _stop_preview/
     _start_preview dance, just headless)."""
 
-    def __init__(self, get_camera_device: Callable[[], str], fps: float = 10.0) -> None:
+    def __init__(
+        self,
+        get_camera_device: Callable[[], str],
+        fps: float = 10.0,
+        on_error: Callable[[str], None] | None = None,
+    ) -> None:
         self._get_camera_device = get_camera_device
         self._fps = fps
+        self._on_error = on_error
         self._lock = threading.Lock()
         self._subscribers: list[FrameCallback] = []
         self._thread: threading.Thread | None = None
@@ -240,22 +246,43 @@ class _CameraPreviewManager:
         self._stop_event.set()
         self._thread = None  # the running thread notices stop_event and exits/releases the camera itself
 
+    def _report_error(self, message: str) -> None:
+        if self._on_error is not None:
+            try:
+                self._on_error(message)
+            except Exception:
+                pass
+
     def _run(self, device: str) -> None:
         try:
             import cv2
         except ImportError:
+            self._report_error("Camera preview requires opencv-python (cv2), which is not installed.")
             return
         index = int(device) if device.isdigit() else device
         cap = cv2.VideoCapture(index)
         if not cap.isOpened():
             cap.release()
+            self._report_error(
+                f"Could not open camera device '{device}'. It may be disconnected, in use by "
+                "another app, or lacking camera permission. Reconnect/grant access, then use "
+                "↻ Refresh Devices."
+            )
             return
         interval = 1.0 / self._fps
         target_width = 320
+        # Some failure modes (e.g. macOS denying camera permission to this
+        # process) leave isOpened() True but every read() failing forever —
+        # treat a long unbroken run of failed reads the same as a failed open.
+        consecutive_failures = 0
+        max_consecutive_failures = round(self._fps * 3)  # ~3 seconds of nothing but failures
+        ever_succeeded = False
         try:
             while not self._stop_event.is_set():
                 ok, frame = cap.read()
                 if ok:
+                    ever_succeeded = True
+                    consecutive_failures = 0
                     h, w = frame.shape[:2]
                     new_h = max(1, int(target_width * h / w))
                     frame = cv2.resize(frame, (target_width, new_h))
@@ -271,6 +298,14 @@ class _CameraPreviewManager:
                                 cb(jpeg)
                             except Exception:
                                 pass
+                else:
+                    consecutive_failures += 1
+                    if not ever_succeeded and consecutive_failures >= max_consecutive_failures:
+                        self._report_error(
+                            f"Camera device '{device}' opened but never produced a frame — "
+                            "check camera permissions for this app, then use ↻ Refresh Devices."
+                        )
+                        return
                 self._stop_event.wait(interval)
         finally:
             cap.release()
@@ -327,7 +362,7 @@ class LocalBackend(Backend):
         self._record_lock = threading.Lock()
         self._active_recording: _ActiveRecording | None = None
         self._active_latency_test: _ActiveLatencyTest | None = None
-        self._preview = _CameraPreviewManager(self._current_camera_device)
+        self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
         # mixing-console fader), instead of each track reverting to its own
@@ -349,6 +384,9 @@ class LocalBackend(Backend):
 
     def _current_camera_device(self) -> str:
         return self.get_config().camera_device
+
+    def _on_preview_error(self, message: str) -> None:
+        self._emit("preview_error", {"message": message})
 
     # --- config ---
 

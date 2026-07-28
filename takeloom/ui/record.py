@@ -331,7 +331,13 @@ class RecordFrame(ttk.Frame):
 
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         dur = format_duration(track.duration_seconds)
-        mark = " ✓" if track.get_take_for_instrument(inst_name) else ""
+        take = track.get_take_for_instrument(inst_name)
+        if take is None:
+            mark = ""
+        elif take.has_video:
+            mark = " ✓"
+        else:
+            mark = " ✓ (audio only)"
         return f"{track.name}  ({dur}){mark}"
 
     def _inspiration_display(self, t: dict) -> str:
@@ -749,3 +755,5 @@ class RecordFrame(ttk.Frame):
             self.preview_label.configure(text="Recording — preview paused", image="")
         elif event == "preview_resumed":
             self.preview_label.configure(text="Waiting for camera preview...", image="")
+        elif event == "preview_error":
+            self.preview_label.configure(text=data.get("message", "Camera preview error."), image="")
