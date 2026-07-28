@@ -275,7 +275,7 @@ def server_command() -> None:
     see that module for why), and only accepts connections from the local
     network.
     """
-    from .backend import BackendError, LocalBackend
+    from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
     from .streamdeck_controller import StreamDeckController
@@ -310,26 +310,65 @@ def server_command() -> None:
     click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
     click.echo("Press Ctrl+C to stop.\n")
 
-    # Optional attached StreamDeck: mirrors recording phase onto its Record/
-    # Unpause/Stop button and lets it unpause/stop a take and adjust volume —
-    # same controls the UI's Record tab wires up. It can't *start* a take
-    # (that needs a project/instrument/track picked from a connected client
-    # first) or skip tracks (no setlist is selected headless), so those
-    # presses just print an explanation instead of silently doing nothing.
+    # Optional attached StreamDeck: fully drives a session with no UI client
+    # needed at all. Start Recording auto-picks the last-used project +
+    # instrument (from config) and the first track in its playlist that
+    # doesn't have a take yet for that instrument — same search
+    # RecordFrame's own "Next" StreamDeck key already does. Once actually
+    # recording, Next Track discards the in-progress take (same as a manual
+    # stop always does — a take is only ever kept if the backing track
+    # played to its natural end) and advances to the next untaken track;
+    # Restart discards and redoes the current take from 0:00 without
+    # changing track. Both only mean anything while recording, so they're
+    # dimmed and no-op otherwise.
     streamdeck = StreamDeckController()
     phase = {"value": "idle"}
+
+    def _start_next_untaken_track(project_name: str, instrument_name: str, start_index: int = 0) -> None:
+        setlist = Setlist.from_dict(backend.get_setlist(project_name))
+        for i in range(start_index, len(setlist.tracks)):
+            if setlist.tracks[i].get_take_for_instrument(instrument_name) is None:
+                backend.start_recording(StartRecordingRequest(
+                    project_name=project_name, instrument_name=instrument_name,
+                    track_source="playlist", track_index=i,
+                ))
+                return
+        click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
 
     def on_streamdeck_key(key: str) -> None:
         try:
             if key == "r":
-                if phase["value"] == "waiting":
+                if phase["value"] == "idle":
+                    cfg = backend.get_config()
+                    project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
+                    if not project_name or not instrument_name:
+                        click.echo("StreamDeck: no last-used project/instrument — start one from a connected client first.")
+                    else:
+                        _start_next_untaken_track(project_name, instrument_name)
+                elif phase["value"] == "waiting":
                     backend.unpause_recording()
                 elif phase["value"] == "recording":
                     backend.stop_recording()
-                else:
-                    click.echo("StreamDeck: nothing to unpause/stop yet — start a take from a connected client first.")
             elif key == "n":
-                click.echo("StreamDeck: track selection isn't available headless — advance tracks from a connected client.")
+                if phase["value"] != "recording":
+                    return  # dimmed/no-op outside an active take
+                target = backend.get_active_recording_target()
+                backend.stop_recording()
+                if target is not None:
+                    # stop_recording() just closed the audio stream and
+                    # start_recording() (below) opens a brand new one on the
+                    # same physical interface — every normal session already
+                    # does this between songs, but always with a natural
+                    # human-paced gap. Doing it at machine speed, back to
+                    # back, is the one new pattern this feature introduces;
+                    # give the audio driver a moment to fully settle rather
+                    # than slamming it shut and immediately back open.
+                    time.sleep(0.5)
+                    project_name, instrument_name, current_index = target
+                    _start_next_untaken_track(project_name, instrument_name, start_index=current_index + 1)
+            elif key == "b":
+                if phase["value"] == "recording":
+                    backend.restart_take()
             elif key in ("l", "u", "[", "]"):
                 delta = 5 if key in ("u", "]") else -5
                 if key in ("[", "]"):
@@ -342,11 +381,11 @@ def server_command() -> None:
     def on_backend_event(event: str, data: dict) -> None:
         if event == "recording_status" and "phase" in data:
             phase["value"] = data["phase"]
-            streamdeck.update_recording_toggle(phase["value"])
+            streamdeck.update_headless_toggle(phase["value"])
 
     if streamdeck.connect(on_streamdeck_key):
-        streamdeck.use_ui_record_layout()
-        streamdeck.update_recording_toggle(phase["value"])
+        streamdeck.use_headless_layout()
+        streamdeck.update_headless_toggle(phase["value"])
         backend.on_event(on_backend_event)
         click.echo("StreamDeck connected.")
 

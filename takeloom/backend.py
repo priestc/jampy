@@ -690,50 +690,100 @@ class LocalBackend(Backend):
             if active is None or active.phase != "waiting":
                 raise BackendError("Not ready to unpause.")
 
-            config = self.get_config()
-            take_num = next_take_number(active.project.completed_takes_dir, active.track.name, active.inst.name)
-            fname = take_filename(active.track.name, active.inst.name, take_num, "flac")
-            rec_path = active.project.completed_takes_dir / fname
-
             # Release the preview capture so ffmpeg can open the camera exclusively.
             self._preview.pause()
             self._emit("preview_paused", {})
 
-            record_start_wall_time = wall_timestamp()
-            active.engine.mixer.reset()
-            active.engine.mixer.set_playing(True)
-            active.engine.start_recording(rec_path)
-            active.engine.set_on_song_end(self._on_song_naturally_ended)
-
-            video_recorder = None
-            video_raw = mix_flac = final_video = None
-            if config.camera_device:
-                from .video.capture import VideoRecorder, ffmpeg_available
-                if ffmpeg_available():
-                    video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
-                    mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
-                    final_video = rec_path.with_suffix(".mp4")
-                    video_recorder = VideoRecorder(config.camera_device, video_raw)
-                    if video_recorder.start():
-                        active.engine.start_mix_recording(mix_flac)
-                    else:
-                        video_recorder = None
-
-            active.phase = "recording"
-            active.take_num = take_num
-            active.rec_path = rec_path
-            active.video_recorder = video_recorder
-            active.video_raw = video_raw
-            active.mix_flac = mix_flac
-            active.final_video = final_video
-            active.record_start_wall_time = record_start_wall_time
-
+            take_num = self._begin_take(active, self.get_config())
             self._emit("recording_status", {
                 "phase": "recording",
                 "status": f"Recording '{active.track.name}' — take {take_num}",
                 "track_name": active.track.name,
                 "take_number": take_num,
             })
+
+    def restart_take(self) -> None:
+        """Discard the take in progress and start it over from 0:00 — same
+        track/instrument/session, a fresh take number. Only valid while
+        actually recording (unlike stop_recording(), the active session
+        itself survives this — it's a redo, not a cancel)."""
+        with self._record_lock:
+            active = self._active_recording
+            if active is None or active.phase != "recording":
+                raise BackendError("Not currently recording.")
+
+            active.engine.set_on_song_end(None)
+            active.engine.stop_recording()
+            active.engine.mixer.set_playing(False)
+            active.rec_path.unlink(missing_ok=True)
+            if active.video_recorder:
+                active.video_recorder.stop()
+                if active.video_raw:
+                    active.video_raw.unlink(missing_ok=True)
+                if active.mix_flac:
+                    active.mix_flac.unlink(missing_ok=True)
+
+            take_num = self._begin_take(active, self.get_config())
+            self._emit("recording_status", {
+                "phase": "recording",
+                "status": f"Restarted '{active.track.name}' from the beginning — take {take_num}",
+                "track_name": active.track.name,
+                "take_number": take_num,
+            })
+
+    def _begin_take(self, active: "_ActiveRecording", config: StudioConfig) -> int:
+        """Allocate a fresh take file and (re)start the per-take audio/video
+        recorders against the given active session, from mixer position 0.
+        Shared by unpause_recording() (first time) and restart_take()
+        (discard and redo) — called with self._record_lock held."""
+        take_num = next_take_number(active.project.completed_takes_dir, active.track.name, active.inst.name)
+        fname = take_filename(active.track.name, active.inst.name, take_num, "flac")
+        rec_path = active.project.completed_takes_dir / fname
+
+        record_start_wall_time = wall_timestamp()
+        active.engine.mixer.reset()
+        active.engine.mixer.set_playing(True)
+        active.engine.start_recording(rec_path)
+        active.engine.set_on_song_end(self._on_song_naturally_ended)
+
+        video_recorder = None
+        video_raw = mix_flac = final_video = None
+        if config.camera_device:
+            from .video.capture import VideoRecorder, ffmpeg_available
+            if ffmpeg_available():
+                video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
+                mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
+                final_video = rec_path.with_suffix(".mp4")
+                video_recorder = VideoRecorder(config.camera_device, video_raw)
+                if video_recorder.start():
+                    active.engine.start_mix_recording(mix_flac)
+                else:
+                    video_recorder = None
+
+        active.phase = "recording"
+        active.take_num = take_num
+        active.rec_path = rec_path
+        active.video_recorder = video_recorder
+        active.video_raw = video_raw
+        active.mix_flac = mix_flac
+        active.final_video = final_video
+        active.record_start_wall_time = record_start_wall_time
+        return take_num
+
+    def get_active_recording_target(self) -> tuple[str, str, int] | None:
+        """Returns (project_name, instrument_name, track_index) for the take
+        currently loaded/recording, or None if idle. Lets a driver with no
+        track-selection UI of its own (the headless server's StreamDeck)
+        figure out "what's next" regardless of whether the current take was
+        started by it or by a connected remote client."""
+        with self._record_lock:
+            active = self._active_recording
+            if active is None:
+                return None
+            if active.track not in active.project.setlist.tracks:
+                return None  # defensive; shouldn't happen
+            index = active.project.setlist.tracks.index(active.track)
+            return active.project.name, active.inst.name, index
 
     def _on_song_naturally_ended(self) -> None:
         """Called (off the audio thread) when the backing track plays to its

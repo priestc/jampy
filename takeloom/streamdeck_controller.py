@@ -82,6 +82,23 @@ _UI_RECORD_VOLUME_BUTTONS: list[tuple] = [
     (5, "takes_up", "Takes +", "]", None, (120,   0, 200), (120,   0, 200)),
 ]
 
+# `active_state_name` here is a recording *phase* ("idle"/"waiting"/
+# "recording"), reusing the same dim-unless-matching mechanism `update_state`
+# already uses for the old CLI session states — Next Track/Restart only mean
+# anything while a take is actively recording, so they're dimmed otherwise.
+_HEADLESS_BUTTONS: list[tuple] = [
+    (0, None,   None,        "r", None,        None,            None),           # toggle — rendered by update_headless_toggle
+    (1, "skip", "Next Track", "n", "recording", (0,   160, 220), (15,  35,  45)),
+    (2, "prev", "Restart",    "b", "recording", (255, 140,   0), (55,  35,  10)),
+]
+
+_HEADLESS_VOLUME_BUTTONS: list[tuple] = [
+    (3, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
+    (4, "vol_up",   "Vol +",   "u", None, (0,   120, 200), (0,   120, 200)),
+    (5, "takes_dn", "Takes -", "[", None, (120,   0, 200), (120,   0, 200)),
+    (6, "takes_up", "Takes +", "]", None, (120,   0, 200), (120,   0, 200)),
+]
+
 _SESSION_DIAL_MAP: dict[int, tuple[str, str, str]] = {
     0: ("l", "u", "Backing\nVol"),
     1: ("[", "]", "Takes\nVol"),
@@ -245,6 +262,58 @@ class StreamDeckController:
                 if idx == 0 or icon is None:
                     continue
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
+            if self._has_dials:
+                self._update_touchscreen()
+
+    def use_headless_layout(self) -> None:
+        """Switch to the headless `takeloom server` layout: a Start Recording
+        / Begin / Stop Recording toggle, plus Next Track and Restart (back to
+        the beginning of the current take) — both only lit while a take is
+        actually recording, since that's the only time pressing them does
+        anything — plus volume controls (dials if available, else buttons)."""
+        self._buttons = list(_HEADLESS_BUTTONS)
+        if not self._has_dials:
+            self._buttons += _HEADLESS_VOLUME_BUTTONS
+        self._dial_map = dict(_SESSION_DIAL_MAP)
+        if not self.connected:
+            return
+        with self._lock:
+            used_indices = {btn[0] for btn in self._buttons}
+            key_count = getattr(self._deck, "KEY_COUNT", 0)
+            for idx in range(key_count):
+                if idx not in used_indices:
+                    self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
+            for btn in self._buttons:
+                idx, icon, label, _key, _state, active_color, dim_color = btn
+                if idx == 0 or icon is None:
+                    continue
+                # Freshly applying the layout with no phase known yet — treat
+                # as "idle" (dimmed) until the first update_headless_toggle().
+                color = dim_color if _state is not None else active_color
+                self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
+            if self._has_dials:
+                self._update_touchscreen()
+
+    def update_headless_toggle(self, phase: str) -> None:
+        """Refresh the primary toggle (icon/label driven by phase) and
+        dim/light Next Track + Restart depending on whether a take is
+        actually recording right now. `phase` is one of "idle", "waiting",
+        "recording"."""
+        if not self.connected:
+            return
+        icon, label, color = {
+            "idle":      ("record", "Start Recording", (0,   200, 0)),
+            "waiting":   ("play",   "Begin",           (230, 160, 0)),
+            "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
+        }[phase]
+        with self._lock:
+            self._deck.set_key_image(0, self._make_key_image(icon, label, color))
+            for btn in self._buttons:
+                idx, btn_icon, btn_label, _key, active_state, active_color, dim_color = btn
+                if idx == 0 or btn_icon is None:
+                    continue
+                btn_color = active_color if (active_state is None or active_state == phase) else dim_color
+                self._deck.set_key_image(idx, self._make_key_image(btn_icon, btn_label, btn_color))
             if self._has_dials:
                 self._update_touchscreen()
 
