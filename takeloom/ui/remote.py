@@ -28,6 +28,7 @@ from ..backend import BackendError
 from ..config import AuthorizedClient, KnownRemote, StudioConfig
 from ..remote.backend import RemoteBackend
 from ..remote.client import RemoteClient
+from ..remote.protocol import REMOTE_SERVER_PORT
 from ..remote.server import RemoteServer
 from .app_state import AppState
 
@@ -68,7 +69,7 @@ def connect_async(widget, app_state: AppState, host: str, port: int, token: str,
     threading.Thread(target=worker, daemon=True).start()
 
 
-def remember_remote_token(app_state: AppState, host: str, port: int, client: RemoteClient) -> None:
+def remember_remote_token(app_state: AppState, host: str, client: RemoteClient) -> None:
     """After a successful connect, persist a newly issued token (if any) onto
     the matching KnownRemote entry in local config, creating one if this was
     a first-time pairing initiated some other way (e.g. `--remote=IP`)."""
@@ -79,9 +80,9 @@ def remember_remote_token(app_state: AppState, host: str, port: int, client: Rem
         config = backend.get_config()
     except BackendError:
         return
-    remote = next((r for r in config.known_remotes if r.host == host and r.port == port), None)
+    remote = next((r for r in config.known_remotes if r.host == host), None)
     if remote is None:
-        remote = KnownRemote(host=host, port=port)
+        remote = KnownRemote(host=host)
         config.known_remotes.append(remote)
     remote.token = client.issued_token
     if not remote.label:
@@ -113,16 +114,12 @@ class _AddRemoteDialog(tk.Toplevel):
         self.host_var = tk.StringVar()
         ttk.Entry(frame, textvariable=self.host_var, width=28).grid(row=0, column=1, sticky="w")
 
-        ttk.Label(frame, text="Port").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.port_var = tk.StringVar(value="51823")
-        ttk.Entry(frame, textvariable=self.port_var, width=10).grid(row=1, column=1, sticky="w")
-
-        ttk.Label(frame, text="Label (optional)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(frame, text="Label (optional)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.label_var = tk.StringVar()
-        ttk.Entry(frame, textvariable=self.label_var, width=28).grid(row=2, column=1, sticky="w")
+        ttk.Entry(frame, textvariable=self.label_var, width=28).grid(row=1, column=1, sticky="w")
 
         button_row = ttk.Frame(frame)
-        button_row.grid(row=3, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        button_row.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
         ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
         ttk.Button(button_row, text="Add", command=lambda: self._submit(on_add)).pack(side="left")
 
@@ -131,12 +128,7 @@ class _AddRemoteDialog(tk.Toplevel):
         if not host:
             messagebox.showerror("Cannot add remote", "Enter an IP address or hostname.", parent=self)
             return
-        try:
-            port = int(self.port_var.get())
-        except ValueError:
-            messagebox.showerror("Cannot add remote", "Port must be a number.", parent=self)
-            return
-        on_add(host, port, self.label_var.get().strip())
+        on_add(host, self.label_var.get().strip())
         self.destroy()
 
 
@@ -236,7 +228,7 @@ class RemoteFrame(ttk.Frame):
             frame, columns=("target", "always"), show="tree headings", height=5, selectmode="browse",
         )
         self.remotes_tree.heading("#0", text="Label")
-        self.remotes_tree.heading("target", text="Host : Port")
+        self.remotes_tree.heading("target", text="Host")
         self.remotes_tree.heading("always", text="Always Connect")
         self.remotes_tree.column("#0", width=160)
         self.remotes_tree.column("target", width=180)
@@ -272,9 +264,8 @@ class RemoteFrame(ttk.Frame):
     def _reselect(self, remote: KnownRemote | None) -> None:
         if remote is None:
             return
-        iid = f"{remote.host}:{remote.port}"
-        if self.remotes_tree.exists(iid):
-            self.remotes_tree.selection_set(iid)
+        if self.remotes_tree.exists(remote.host):
+            self.remotes_tree.selection_set(remote.host)
 
     def _refresh_known_remotes_list(self) -> None:
         previously_selected = self._selected_remote()
@@ -284,16 +275,15 @@ class RemoteFrame(ttk.Frame):
             self._refresh_connect_status()
             return
         for remote in self._local_config.known_remotes:
-            iid = f"{remote.host}:{remote.port}"
             self.remotes_tree.insert(
-                "", "end", iid=iid, text=remote.label or "(unpaired)",
-                values=(f"{remote.host}:{remote.port}", "✓" if remote.always_connect else ""),
+                "", "end", iid=remote.host, text=remote.label or "(unpaired)",
+                values=(remote.host, "✓" if remote.always_connect else ""),
             )
-            self._remote_items[iid] = remote
+            self._remote_items[remote.host] = remote
         # Reload of local config replaces every KnownRemote instance, so the
         # previous selection (by object identity) no longer resolves — reselect
-        # by host:port instead, so a Connect click doesn't silently lose the
-        # row the user had selected (e.g. mid "Always connect" toggle).
+        # by host instead, so a Connect click doesn't silently lose the row
+        # the user had selected (e.g. mid "Always connect" toggle).
         self._reselect(previously_selected)
         self._refresh_connect_status()
 
@@ -311,10 +301,10 @@ class RemoteFrame(ttk.Frame):
         self.always_connect_check.state(["!disabled"] if remote is not None else ["disabled"])
 
     def _on_add_remote(self) -> None:
-        def on_add(host: str, port: int, label: str) -> None:
+        def on_add(host: str, label: str) -> None:
             if self._local_config is None:
                 return
-            self._local_config.known_remotes.append(KnownRemote(host=host, port=port, label=label))
+            self._local_config.known_remotes.append(KnownRemote(host=host, label=label))
             self._save_local_config()
             self._refresh_known_remotes_list()
 
@@ -354,14 +344,14 @@ class RemoteFrame(ttk.Frame):
 
         self.connect_button.state(["disabled"])
         if remote.token:
-            self.connect_status_var.set(f"Connecting to {remote.host}:{remote.port}...")
+            self.connect_status_var.set(f"Connecting to {remote.host}...")
         else:
             self.connect_status_var.set(
-                f"Connecting to {remote.host}:{remote.port} — waiting for approval on the other end..."
+                f"Connecting to {remote.host} — waiting for approval on the other end..."
             )
 
         def on_done(client: RemoteClient) -> None:
-            remember_remote_token(self.app_state, remote.host, remote.port, client)
+            remember_remote_token(self.app_state, remote.host, client)
             self._load_local_config()
             self._refresh_connect_status()
 
@@ -369,7 +359,9 @@ class RemoteFrame(ttk.Frame):
             self._refresh_connect_status()
             messagebox.showerror("Connect failed", error)
 
-        connect_async(self, self.app_state, remote.host, remote.port, remote.token, on_done=on_done, on_error=on_error)
+        connect_async(
+            self, self.app_state, remote.host, REMOTE_SERVER_PORT, remote.token, on_done=on_done, on_error=on_error,
+        )
 
     def _on_disconnect_click(self) -> None:
         if self.app_state.recording_active:
@@ -397,13 +389,15 @@ class RemoteFrame(ttk.Frame):
         )
         self.server_checkbox.pack(anchor="w", pady=4)
 
-        port_row = ttk.Frame(frame)
-        port_row.pack(anchor="w", pady=4)
-        ttk.Label(port_row, text="Port").pack(side="left", padx=(0, 8))
-        self.server_port_var = tk.StringVar(value="")
-        ttk.Entry(port_row, textvariable=self.server_port_var, width=10).pack(side="left")
-        self.server_save_button = ttk.Button(port_row, text="Save", command=self._on_server_save)
-        self.server_save_button.pack(side="left", padx=(8, 0))
+        ttk.Label(frame, text=f"Port {REMOTE_SERVER_PORT} (fixed — same on every takeloom instance)").pack(
+            anchor="w", pady=4
+        )
+        ttk.Label(
+            frame,
+            text="Local network only — this server refuses any connection that isn't from your LAN, "
+                 "even if this port is forwarded from your router.",
+            foreground="#666666", wraplength=420, justify="left",
+        ).pack(anchor="w", pady=(0, 4))
 
         self.server_status_var = tk.StringVar(value="")
         ttk.Label(frame, textvariable=self.server_status_var, foreground="#2a7d2a").pack(anchor="w", pady=(8, 0))
@@ -456,47 +450,11 @@ class RemoteFrame(ttk.Frame):
             self.server_status_var.set(error or "Could not load local configuration.")
             return
         self._local_config = config
-        self.server_port_var.set(str(config.remote_server_port))
         self.server_enabled_var.set(config.remote_server_enabled)
         self._refresh_known_remotes_list()
         self._refresh_authorized_clients_list()
         if config.remote_server_enabled:
             self._start_server()
-
-    def _on_server_save(self) -> None:
-        if not self._apply_server_fields_to_config():
-            return
-        self.server_save_button.state(["disabled"])
-        backend = self.app_state.local_backend
-        config = self._local_config
-
-        def worker() -> None:
-            try:
-                backend.save_config(config)
-                error = None
-            except BackendError as e:
-                error = str(e)
-            self.after(0, lambda: self._on_server_saved(error))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_server_saved(self, error: str | None) -> None:
-        self.server_save_button.state(["!disabled"])
-        if error:
-            messagebox.showerror("Save failed", error)
-            return
-        self._update_server_status()
-
-    def _apply_server_fields_to_config(self) -> bool:
-        if self._local_config is None:
-            return False
-        try:
-            port = int(self.server_port_var.get())
-        except ValueError:
-            messagebox.showerror("Invalid configuration", "Port must be a number.")
-            return False
-        self._local_config.remote_server_port = port
-        return True
 
     def _on_server_toggle(self) -> None:
         if self.app_state.recording_active:
@@ -512,13 +470,13 @@ class RemoteFrame(ttk.Frame):
         if self.app_state.remote_server is not None:
             self._update_server_status()
             return
-        if not self._apply_server_fields_to_config():
+        if self._local_config is None:
             self.server_enabled_var.set(False)
             return
         self._local_config.remote_server_enabled = True
 
         server = RemoteServer(
-            self.app_state.local_backend, self._local_config.remote_server_port, self._request_authorization,
+            self.app_state.local_backend, REMOTE_SERVER_PORT, self._request_authorization,
         )
         try:
             server.start()
@@ -531,7 +489,7 @@ class RemoteFrame(ttk.Frame):
         self.server_enabled_var.set(True)
         self._update_server_status()
 
-        # Persist enabled/port so this instance auto-starts serving next launch.
+        # Persist "enabled" so this instance auto-starts serving next launch.
         backend = self.app_state.local_backend
         config = self._local_config
         threading.Thread(target=lambda: backend.save_config(config), daemon=True).start()

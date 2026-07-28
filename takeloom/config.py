@@ -33,9 +33,12 @@ class Instrument:
 
 @dataclass
 class KnownRemote:
-    """A remote takeloom instance this machine can connect to as a client."""
+    """A remote takeloom instance this machine can connect to as a client.
+
+    No port field: every takeloom instance listens on the same fixed
+    remote.protocol.REMOTE_SERVER_PORT, so there's nothing per-remote to
+    remember or drift out of sync."""
     host: str
-    port: int
     token: str = ""  # "" until the first successful pairing/authorization
     label: str = ""  # defaults to the server's reported hostname once paired
     always_connect: bool = False  # auto-connect to this remote on startup
@@ -74,7 +77,6 @@ class StudioConfig:
     camera_device: str = ""  # platform-specific ffmpeg device id, e.g. avfoundation index or /dev/video0
     camera_label: str = ""   # human-friendly camera name, for display only
     remote_server_enabled: bool = False  # accept incoming remote-control connections
-    remote_server_port: int = 51823
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
     remote_authorized_clients: list[AuthorizedClient] = field(default_factory=list)  # clients allowed to connect in
     input_labels: list[InputLabel] = field(default_factory=list)
@@ -108,11 +110,19 @@ class StudioConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> StudioConfig:
+        def _filtered(d: dict, dc: type) -> dict:
+            # Drops now-removed keys from configs saved by an older version
+            # (e.g. a known_remote's once-editable "port") instead of the
+            # dataclass constructor rejecting them outright.
+            return {k: v for k, v in d.items() if k in dc.__dataclass_fields__}
+
         data = dict(data)
-        input_labels = [InputLabel(**il) for il in data.pop("input_labels", [])]
-        instruments = [Instrument(**i) for i in data.pop("instruments", [])]
-        known_remotes = [KnownRemote(**r) for r in data.pop("known_remotes", [])]
-        remote_authorized_clients = [AuthorizedClient(**c) for c in data.pop("remote_authorized_clients", [])]
+        input_labels = [InputLabel(**_filtered(il, InputLabel)) for il in data.pop("input_labels", [])]
+        instruments = [Instrument(**_filtered(i, Instrument)) for i in data.pop("instruments", [])]
+        known_remotes = [KnownRemote(**_filtered(r, KnownRemote)) for r in data.pop("known_remotes", [])]
+        remote_authorized_clients = [
+            AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
+        ]
         filtered = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         return cls(
             **filtered,

@@ -266,28 +266,29 @@ def ui_command(remote_ip: str | None) -> None:
 
 
 @main.command(name="server")
-@click.option(
-    "--port", "port", type=int, default=None,
-    help="Port to listen on (defaults to the configured remote server port).",
-)
-def server_command(port: int | None) -> None:
+def server_command() -> None:
     """Run the remote-control server without launching the UI.
 
     Lets other takeloom instances connect to this machine (Remote tab),
-    same as toggling the server on in the UI's Remote tab.
+    same as toggling the server on in the UI's Remote tab. Always listens
+    on the fixed remote.protocol.REMOTE_SERVER_PORT (not configurable —
+    see that module for why), and only accepts connections from the local
+    network.
     """
-    from .backend import LocalBackend
+    from .backend import BackendError, LocalBackend
+    from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
+    from .streamdeck_controller import StreamDeckController
 
     backend = LocalBackend()
     config = backend.get_config()
-    listen_port = port if port is not None else config.remote_server_port
+    listen_port = REMOTE_SERVER_PORT
 
     def request_authorization(ip: str, client_name: str) -> bool:
         click.echo(f"\nPairing request from '{client_name}' ({ip})")
         return click.confirm("Approve this connection?", default=False)
 
-    server = RemoteServer(backend, listen_port, request_authorization)
+    server = RemoteServer(backend, listen_port, request_authorization, log=click.echo)
     try:
         server.start()
     except OSError as e:
@@ -295,11 +296,50 @@ def server_command(port: int | None) -> None:
         raise SystemExit(1)
 
     config.remote_server_enabled = True
-    config.remote_server_port = listen_port
     backend.save_config(config)
 
     click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
     click.echo("Press Ctrl+C to stop.\n")
+
+    # Optional attached StreamDeck: mirrors recording phase onto its Record/
+    # Unpause/Stop button and lets it unpause/stop a take and adjust volume —
+    # same controls the UI's Record tab wires up. It can't *start* a take
+    # (that needs a project/instrument/track picked from a connected client
+    # first) or skip tracks (no setlist is selected headless), so those
+    # presses just print an explanation instead of silently doing nothing.
+    streamdeck = StreamDeckController()
+    phase = {"value": "idle"}
+
+    def on_streamdeck_key(key: str) -> None:
+        try:
+            if key == "r":
+                if phase["value"] == "waiting":
+                    backend.unpause_recording()
+                elif phase["value"] == "recording":
+                    backend.stop_recording()
+                else:
+                    click.echo("StreamDeck: nothing to unpause/stop yet — start a take from a connected client first.")
+            elif key == "n":
+                click.echo("StreamDeck: track selection isn't available headless — advance tracks from a connected client.")
+            elif key in ("l", "u", "[", "]"):
+                delta = 5 if key in ("u", "]") else -5
+                if key in ("[", "]"):
+                    backend.adjust_takes_volume(delta)
+                else:
+                    backend.adjust_backing_volume(delta)
+        except BackendError as e:
+            click.echo(f"StreamDeck: {e}")
+
+    def on_backend_event(event: str, data: dict) -> None:
+        if event == "recording_status" and "phase" in data:
+            phase["value"] = data["phase"]
+            streamdeck.update_recording_toggle(phase["value"])
+
+    if streamdeck.connect(on_streamdeck_key):
+        streamdeck.use_ui_record_layout()
+        streamdeck.update_recording_toggle(phase["value"])
+        backend.on_event(on_backend_event)
+        click.echo("StreamDeck connected.")
 
     try:
         while True:
@@ -309,6 +349,7 @@ def server_command(port: int | None) -> None:
     finally:
         click.echo("\nStopping server...")
         server.stop()
+        streamdeck.disconnect()
         config.remote_server_enabled = False
         backend.save_config(config)
 

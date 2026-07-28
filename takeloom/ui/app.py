@@ -94,14 +94,16 @@ def run(remote_ip: str | None = None) -> None:
     # "always connect" remote. Either way, a host with no matching
     # known_remotes entry connects with no token, kicking off the same
     # pairing/approval flow as a first-time Connect click in the Remote tab.
+    from ..remote.protocol import REMOTE_SERVER_PORT
+
     target = None
     if remote_ip:
         match = next((r for r in config.known_remotes if r.host == remote_ip), None)
-        target = (match.host, match.port, match.token) if match else (remote_ip, config.remote_server_port, "")
+        target = (match.host, REMOTE_SERVER_PORT, match.token) if match else (remote_ip, REMOTE_SERVER_PORT, "")
     else:
         always = next((r for r in config.known_remotes if r.always_connect), None)
         if always is not None:
-            target = (always.host, always.port, always.token)
+            target = (always.host, REMOTE_SERVER_PORT, always.token)
 
     if target is not None:
         from .remote import connect_async, remember_remote_token
@@ -112,7 +114,7 @@ def run(remote_ip: str | None = None) -> None:
             messagebox.showerror("Could not connect", f"{host}: {error}")
 
         def on_remote_done(client) -> None:
-            remember_remote_token(app_state, host, port, client)
+            remember_remote_token(app_state, host, client)
             notebook.select(len(containers) - 1)
 
         connect_async(

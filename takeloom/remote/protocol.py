@@ -31,6 +31,14 @@ from __future__ import annotations
 from ..backend import Backend, BackendError, StartRecordingRequest
 from ..config import StudioConfig
 
+# Fixed for every takeloom instance rather than user-configurable: a
+# per-machine editable port let a client's remembered port drift out of sync
+# with whatever the server actually bound (exactly what happened during the
+# jampy -> takeloom rename), silently breaking the pairing until re-added by
+# hand. One constant everyone agrees on in advance eliminates that class of
+# bug entirely.
+REMOTE_SERVER_PORT = 51823
+
 
 def dispatch(backend: Backend, op: str, args: dict) -> dict:
     """Run one RPC op against a local backend, returning its JSON-able result."""

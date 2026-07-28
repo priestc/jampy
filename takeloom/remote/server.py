@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hmac
+import ipaddress
 import json
 import secrets
 import socket
@@ -34,16 +35,35 @@ from ..config import AuthorizedClient
 from .protocol import dispatch
 
 
+def _timestamp() -> str:
+    return datetime.datetime.now().strftime("%H:%M:%S")
+
+
+def _is_local_network(ip: str) -> bool:
+    """True for loopback/private/link-local addresses — i.e. not reachable
+    from the public internet even if this machine's own NAT/firewall is
+    misconfigured to forward the port. This is the enforcement point for
+    "local network only": binding still has to be 0.0.0.0 (a specific LAN
+    interface IP can't be assumed and may change with DHCP), so this check
+    is what actually keeps a non-LAN peer from ever getting past hello."""
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return False
+
+
 class RemoteServer:
     def __init__(
         self,
         backend: Backend,
         port: int,
         request_authorization: Callable[[str, str], bool],
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.backend = backend
         self.port = port
         self.request_authorization = request_authorization
+        self._log = log or (lambda msg: None)
         self._tcp_server: _ThreadingTCPServer | None = None
         self._thread: threading.Thread | None = None
         self._connections_lock = threading.Lock()
@@ -123,9 +143,21 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         self._write_lock = threading.Lock()
         self._preview_sub = None
         self.token: str | None = None
+        self.client_name: str = "?"
         super().__init__(*args, **kwargs)  # runs handle() synchronously
 
     def handle(self) -> None:
+        ip = self.client_address[0]
+        if not _is_local_network(ip):
+            self._owner._log(f"[{_timestamp()}] Refused connection from non-local address {ip}")
+            try:
+                self._write({
+                    "kind": "hello_ack", "ok": False,
+                    "error": "This server only accepts connections from the local network.",
+                })
+            except OSError:
+                pass
+            return
         try:
             hello_line = self.rfile.readline()
             if not hello_line:
@@ -136,8 +168,8 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 return
 
             token = hello.get("token") or ""
-            ip = self.client_address[0]
             client_name = hello.get("client_name") or ip
+            self.client_name = client_name
 
             config = self._owner.backend.get_config()
             match = None
@@ -153,6 +185,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 match.last_seen_at = now
                 self._owner.backend.save_config(config)
                 self.token = match.token
+                self._owner._log(f"[{_timestamp()}] {client_name} ({ip}) connected")
                 self._write({
                     "kind": "hello_ack", "ok": True, "hostname": self._owner.backend.hostname(),
                 })
@@ -185,6 +218,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 )
                 self._owner.backend.save_config(config)
                 self.token = new_token
+                self._owner._log(f"[{_timestamp()}] {client_name} ({ip}) connected (newly paired)")
                 self._write({
                     "kind": "hello_ack", "ok": True, "hostname": self._owner.backend.hostname(), "token": new_token,
                 })
@@ -206,6 +240,7 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                     self._preview_sub.close()
                     self._preview_sub = None
                 self._owner._unregister(self)
+                self._owner._log(f"[{_timestamp()}] {self.client_name} ({ip}) disconnected")
         except (OSError, ConnectionError):
             pass
 
@@ -213,6 +248,8 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         req_id = msg.get("id")
         op = msg.get("op")
         args = msg.get("args") or {}
+        who = f"{self.client_name} ({self.client_address[0]})"
+        self._owner._log(f"[{_timestamp()}] {who} -> {op} {args}")
         try:
             if op == "subscribe_preview":
                 if self._preview_sub is None:
@@ -225,10 +262,13 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 result = {}
             else:
                 result = dispatch(self._owner.backend, op, args)
+            self._owner._log(f"[{_timestamp()}]   <- ok {result}")
             self._write({"kind": "response", "id": req_id, "ok": True, "result": result})
         except BackendError as e:
+            self._owner._log(f"[{_timestamp()}]   <- error: {e}")
             self._write({"kind": "response", "id": req_id, "ok": False, "error": str(e)})
         except Exception as e:
+            self._owner._log(f"[{_timestamp()}]   <- internal error: {e}")
             self._write({"kind": "response", "id": req_id, "ok": False, "error": f"Internal error: {e}"})
 
     def _on_preview_frame(self, jpeg: bytes) -> None:
