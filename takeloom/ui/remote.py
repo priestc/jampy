@@ -33,22 +33,32 @@ from ..remote.server import RemoteServer
 from .app_state import AppState
 
 
-def connect_async(widget, app_state: AppState, host: str, port: int, token: str, on_done=None, on_error=None) -> None:
+def connect_async(
+    widget, app_state: AppState, host: str, port: int, token: str,
+    on_done=None, on_error=None, on_pending=None,
+) -> None:
     """Connect to a remote takeloom instance and swap it into app_state.backend.
     Runs on a background thread; safe to call from the Tk main thread. Shared
     by the Remote tab's Connect button and `takeloom ui --remote=IP`.
 
     `on_done`, if given, is called with the connected `RemoteClient` — check
     `client.issued_token` to see whether this was a first-time pairing that
-    minted a new token."""
+    minted a new token. `on_pending`, if given, is called (on the Tk thread)
+    if the server reports it's waiting on a human to approve/deny this
+    connection — e.g. to switch a "Connecting..." label to "Waiting to be
+    authorized...", since that step can take a while."""
 
     def on_disconnect(reason: str) -> None:
         widget.after(0, lambda: _handle_disconnect(app_state, reason))
 
+    def on_pending_cb() -> None:
+        if on_pending:
+            widget.after(0, on_pending)
+
     def worker() -> None:
         client = RemoteClient(host, port, token, on_disconnect=on_disconnect)
         try:
-            client.connect(timeout=6.0)
+            client.connect(timeout=6.0, on_pending=on_pending_cb)
             remote_backend = RemoteBackend(client)
             error = None
         except BackendError as e:
@@ -304,9 +314,19 @@ class RemoteFrame(ttk.Frame):
         def on_add(host: str, label: str) -> None:
             if self._local_config is None:
                 return
-            self._local_config.known_remotes.append(KnownRemote(host=host, label=label))
+            # Reuse an existing entry for this host rather than appending a
+            # second, unpaired one — a duplicate here is how a previously
+            # paired remote could end up stuck re-pairing on every connect
+            # (see _dedupe_known_remotes in config.py).
+            existing = next((r for r in self._local_config.known_remotes if r.host == host), None)
+            if existing is not None:
+                if label:
+                    existing.label = label
+            else:
+                self._local_config.known_remotes.append(KnownRemote(host=host, label=label))
             self._save_local_config()
             self._refresh_known_remotes_list()
+            self._reselect(existing or next(r for r in self._local_config.known_remotes if r.host == host))
 
         _AddRemoteDialog(self, on_add)
 
@@ -343,12 +363,10 @@ class RemoteFrame(ttk.Frame):
             return
 
         self.connect_button.state(["disabled"])
-        if remote.token:
-            self.connect_status_var.set(f"Connecting to {remote.host}...")
-        else:
-            self.connect_status_var.set(
-                f"Connecting to {remote.host} — waiting for approval on the other end..."
-            )
+        self.connect_status_var.set(f"Connecting to {remote.host}...")
+
+        def on_pending() -> None:
+            self.connect_status_var.set(f"Waiting to be authorized by {remote.host}...")
 
         def on_done(client: RemoteClient) -> None:
             remember_remote_token(self.app_state, remote.host, client)
@@ -360,7 +378,8 @@ class RemoteFrame(ttk.Frame):
             messagebox.showerror("Connect failed", error)
 
         connect_async(
-            self, self.app_state, remote.host, REMOTE_SERVER_PORT, remote.token, on_done=on_done, on_error=on_error,
+            self, self.app_state, remote.host, REMOTE_SERVER_PORT, remote.token,
+            on_done=on_done, on_error=on_error, on_pending=on_pending,
         )
 
     def _on_disconnect_click(self) -> None:

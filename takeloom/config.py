@@ -44,6 +44,28 @@ class KnownRemote:
     always_connect: bool = False  # auto-connect to this remote on startup
 
 
+def _dedupe_known_remotes(remotes: list[KnownRemote]) -> list[KnownRemote]:
+    """Collapse multiple entries for the same host into one, keeping whichever
+    fields are actually set. Guards against (and self-heals) a duplicate
+    left behind by an older "Add Remote" that didn't check for an existing
+    entry first — if "Always connect" ever ended up on the token-less
+    duplicate, the paired token lived on the *other* entry and every launch
+    re-triggered pairing, since it was never that entry's token that got
+    updated on approval."""
+    merged: dict[str, KnownRemote] = {}
+    order: list[str] = []
+    for r in remotes:
+        existing = merged.get(r.host)
+        if existing is None:
+            merged[r.host] = r
+            order.append(r.host)
+        else:
+            existing.token = existing.token or r.token
+            existing.label = existing.label or r.label
+            existing.always_connect = existing.always_connect or r.always_connect
+    return [merged[h] for h in order]
+
+
 @dataclass
 class AuthorizedClient:
     """A remote takeloom instance authorized to connect to this machine's server."""
@@ -121,7 +143,8 @@ class StudioConfig:
         data = dict(data)
         input_labels = [InputLabel(**_filtered(il, InputLabel)) for il in data.pop("input_labels", [])]
         instruments = [Instrument(**_filtered(i, Instrument)) for i in data.pop("instruments", [])]
-        known_remotes = [KnownRemote(**_filtered(r, KnownRemote)) for r in data.pop("known_remotes", [])]
+        known_remotes_raw = [KnownRemote(**_filtered(r, KnownRemote)) for r in data.pop("known_remotes", [])]
+        known_remotes = _dedupe_known_remotes(known_remotes_raw)
         remote_authorized_clients = [
             AuthorizedClient(**_filtered(c, AuthorizedClient)) for c in data.pop("remote_authorized_clients", [])
         ]

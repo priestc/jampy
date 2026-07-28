@@ -50,9 +50,16 @@ class RemoteClient:
         self.hostname: str = host
         self.issued_token: str | None = None
 
-    def connect(self, timeout: float = DEFAULT_TIMEOUT) -> str:
+    def connect(self, timeout: float = DEFAULT_TIMEOUT, on_pending: Callable[[], None] | None = None) -> str:
         """Connect, authenticate, and start the reader thread. Returns the
-        server's reported hostname. Raises BackendError on any failure."""
+        server's reported hostname. Raises BackendError on any failure.
+
+        `on_pending`, if given, is called if the server reports it's blocked
+        waiting on a human to approve/deny this pairing request (see
+        `hello_pending` in protocol.py) — lets the caller show "waiting to be
+        authorized" instead of a plain "connecting" for what can be a long
+        wait. The next handshake line is then read with no added timeout,
+        matching however long the server's own approval wait is."""
         try:
             sock = socket.create_connection((self._host, self._port), timeout=timeout)
         except OSError as e:
@@ -63,19 +70,17 @@ class RemoteClient:
 
         try:
             self._write_line({"kind": "hello", "token": self._token, "client_name": socket.gethostname()})
-            line = self._file.readline()
+            ack = self._read_handshake_line()
+            if ack.get("kind") == "hello_pending":
+                if on_pending is not None:
+                    try:
+                        on_pending()
+                    except Exception:
+                        pass
+                ack = self._read_handshake_line()
         except OSError as e:
             self.close()
             raise BackendError(f"Connection error during handshake: {e}") from e
-
-        if not line:
-            self.close()
-            raise BackendError("Connection closed during handshake.")
-        try:
-            ack = json.loads(line)
-        except ValueError as e:
-            self.close()
-            raise BackendError(f"Malformed handshake response: {e}") from e
 
         if not ack.get("ok"):
             self.close()
@@ -86,6 +91,17 @@ class RemoteClient:
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
         self._reader_thread.start()
         return self.hostname
+
+    def _read_handshake_line(self) -> dict:
+        line = self._file.readline()
+        if not line:
+            self.close()
+            raise BackendError("Connection closed during handshake.")
+        try:
+            return json.loads(line)
+        except ValueError as e:
+            self.close()
+            raise BackendError(f"Malformed handshake response: {e}") from e
 
     def call(self, op: str, args: dict, timeout: float = DEFAULT_TIMEOUT) -> dict:
         if self._sock is None:

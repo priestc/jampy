@@ -94,7 +94,11 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
 
     def attempt() -> None:
         clear()
-        ttk.Label(placeholder, text=f"Connecting to {host}...", font=("TkDefaultFont", 13)).pack(pady=(60, 0))
+        status_var = tk.StringVar(value=f"Connecting to {host}...")
+        ttk.Label(placeholder, textvariable=status_var, font=("TkDefaultFont", 13)).pack(pady=(60, 0))
+
+        def on_pending() -> None:
+            status_var.set(f"Waiting to be authorized by {host}...")
 
         def on_done(client) -> None:
             remember_remote_token(app_state, host, client)
@@ -111,7 +115,7 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
             )
             ttk.Button(placeholder, text="Retry", command=attempt).pack()
 
-        connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error)
+        connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error, on_pending=on_pending)
 
     attempt()
 

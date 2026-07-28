@@ -2,6 +2,8 @@
 socket, one JSON object per line.
 
     {"kind": "hello", "token": "...", "client_name": "..."}             client -> server, first line
+    {"kind": "hello_pending"}                                            server -> client, only while waiting
+                                                                          on a human to approve/deny pairing
     {"kind": "hello_ack", "ok": true, "hostname": "...", "token": "..."} server -> client, only on first-time pairing
     {"kind": "hello_ack", "ok": true, "hostname": "..."}                 server -> client, known token
     {"kind": "hello_ack", "ok": false, "error": "..."}                   server -> client, then closes

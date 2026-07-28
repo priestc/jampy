@@ -200,6 +200,12 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                         "error": "A request from this address is already pending approval.",
                     })
                     return
+                # Lets the client show "waiting to be authorized" instead of
+                # a plain "connecting" while this thread blocks below, since
+                # that can take up to request_authorization's own timeout
+                # (e.g. _AuthorizeDialog.TIMEOUT_MS) with nothing else on the
+                # wire to distinguish it from an ordinary slow connect.
+                self._write({"kind": "hello_pending"})
                 try:
                     approved = self._owner.request_authorization(ip, client_name)
                 finally:
