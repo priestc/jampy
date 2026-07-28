@@ -618,6 +618,15 @@ class LocalBackend(Backend):
             in_dev = resolve_device(sd, input_info.device, "input")
             if in_dev is None:
                 raise BackendError(f"Input device '{input_info.device}' not found.")
+            # config.output_device is optional (empty means "just use the
+            # system default"), so only treat a miss as an error when a
+            # specific device *was* configured — otherwise a device that was
+            # explicitly chosen but has since disconnected (e.g. a USB audio
+            # interface dropping out) would silently fall back to whatever
+            # the system default output happens to be instead of raising,
+            # playing audio to the wrong place with no indication why.
+            if config.output_device and out_dev is None:
+                raise BackendError(f"Output device '{config.output_device}' not found.")
 
             in_info = sd.query_devices(in_dev, "input")
             out_info = sd.query_devices(out_dev, "output")
@@ -855,6 +864,15 @@ class LocalBackend(Backend):
             in_dev = resolve_device(sd, input_info.device, "input")
             if in_dev is None:
                 raise BackendError(f"Input device '{input_info.device}' not found.")
+            # config.output_device is optional (empty means "just use the
+            # system default"), so only treat a miss as an error when a
+            # specific device *was* configured — otherwise a device that was
+            # explicitly chosen but has since disconnected (e.g. a USB audio
+            # interface dropping out) would silently fall back to whatever
+            # the system default output happens to be instead of raising,
+            # playing audio to the wrong place with no indication why.
+            if config.output_device and out_dev is None:
+                raise BackendError(f"Output device '{config.output_device}' not found.")
 
             in_info = sd.query_devices(in_dev, "input")
             out_info = sd.query_devices(out_dev, "output")
