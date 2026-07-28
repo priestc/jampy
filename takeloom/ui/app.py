@@ -103,7 +103,7 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
         def on_done(client) -> None:
             remember_remote_token(app_state, host, client)
             placeholder.destroy()
-            _build_tabs(root, app_state, select_title="Remote")
+            _build_tabs(root, app_state, select_title="Record")
 
         def on_error(error: str) -> None:
             clear()
