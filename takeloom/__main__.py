@@ -286,7 +286,16 @@ def server_command() -> None:
 
     def request_authorization(ip: str, client_name: str) -> bool:
         click.echo(f"\nPairing request from '{client_name}' ({ip})")
-        return click.confirm("Approve this connection?", default=False)
+        try:
+            return click.confirm("Approve this connection?", default=False)
+        except click.exceptions.Abort:
+            # No TTY attached to stdin (e.g. this process was started
+            # detached/backgrounded) — click.confirm can't prompt at all in
+            # that case and raises instead of returning. Deny rather than
+            # let this crash the connection-handler thread with no response
+            # ever sent back to the waiting client.
+            click.echo("Cannot prompt for approval (no interactive terminal attached) — denying.")
+            return False
 
     server = RemoteServer(backend, listen_port, request_authorization, log=click.echo)
     try:

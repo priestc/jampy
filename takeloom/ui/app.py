@@ -31,20 +31,11 @@ TABS = [
 ]
 
 
-def run(remote_ip: str | None = None) -> None:
-    root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
-    if sys.platform.startswith("linux"):
-        # Many Linux setups (bad EDID physical-size data, VMs, some laptop
-        # panels) make Tk miscompute the display DPI, so point-sized fonts
-        # render much smaller than the same code produces on macOS. Pin the
-        # DPI assumption to 96, what a 100%-scaled Linux desktop actually
-        # uses, so text comes out the same size as on macOS.
-        root.tk.call("tk", "scaling", 96 / 72)
-    root.title("Takeloom")
-    root.geometry("1100x650")
-
-    app_state = AppState()
-
+def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
+    """Build the normal tabbed interface (Record, Studio Setup, etc.) and
+    select the given tab. Used both for ordinary local-mode launches and,
+    once connected, for an "always connect" remote — the two cases differ
+    only in what's on screen before this point, never in the tabs themselves."""
     status_var = tk.StringVar(value="")
     status_label = ttk.Label(root, textvariable=status_var, foreground="#2a6db0")
     status_label.pack(fill="x", padx=16, pady=(12, 0))
@@ -81,41 +72,99 @@ def run(remote_ip: str | None = None) -> None:
 
     notebook.bind("<<NotebookTabChanged>>", on_tab_changed)
 
-    # Land on Studio Setup until a studio has been configured (studio_name is
-    # the identity field CLI setup treats as "configured"); once one exists,
-    # open straight to Record, the tab actually used session to session.
-    config = app_state.local_backend.get_config()
-    initial_title = "Studio Setup" if not config.studio_name else "Record"
-    initial_index = next(i for i, (title, _, _) in enumerate(TABS) if title == initial_title)
+    initial_index = next(i for i, (title, _, _) in enumerate(TABS) if title == select_title)
     notebook.select(initial_index)
     rebuild(containers[initial_index])
 
-    # Auto-connect on launch: an explicit --remote=IP wins over a configured
-    # "always connect" remote. Either way, a host with no matching
-    # known_remotes entry connects with no token, kicking off the same
-    # pairing/approval flow as a first-time Connect click in the Remote tab.
-    from ..remote.protocol import REMOTE_SERVER_PORT
 
-    target = None
+def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int, token: str) -> None:
+    """This instance is configured to always connect to a specific remote —
+    it must never fall back to showing this machine's own local hardware/
+    tabs. Shows a blocking "connecting" / "could not connect" screen with a
+    Retry button until the connection actually succeeds; only then does the
+    normal tabbed UI (bound to the now-remote backend) get built at all."""
+    from .remote import connect_async, remember_remote_token
+
+    placeholder = ttk.Frame(root)
+    placeholder.pack(fill="both", expand=True, padx=16, pady=16)
+
+    def clear() -> None:
+        for child in placeholder.winfo_children():
+            child.destroy()
+
+    def attempt() -> None:
+        clear()
+        ttk.Label(placeholder, text=f"Connecting to {host}...", font=("TkDefaultFont", 13)).pack(pady=(60, 0))
+
+        def on_done(client) -> None:
+            remember_remote_token(app_state, host, client)
+            placeholder.destroy()
+            _build_tabs(root, app_state, select_title="Remote")
+
+        def on_error(error: str) -> None:
+            clear()
+            ttk.Label(placeholder, text="Could not connect", font=("TkDefaultFont", 14, "bold")).pack(
+                pady=(60, 8)
+            )
+            ttk.Label(placeholder, text=f"{host}: {error}", foreground="#b00020", wraplength=500, justify="center").pack(
+                pady=(0, 16)
+            )
+            ttk.Button(placeholder, text="Retry", command=attempt).pack()
+
+        connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error)
+
+    attempt()
+
+
+def run(remote_ip: str | None = None) -> None:
+    root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
+    if sys.platform.startswith("linux"):
+        # Many Linux setups (bad EDID physical-size data, VMs, some laptop
+        # panels) make Tk miscompute the display DPI, so point-sized fonts
+        # render much smaller than the same code produces on macOS. Pin the
+        # DPI assumption to 96, what a 100%-scaled Linux desktop actually
+        # uses, so text comes out the same size as on macOS.
+        root.tk.call("tk", "scaling", 96 / 72)
+    root.title("Takeloom")
+    root.geometry("1100x650")
+
+    app_state = AppState()
+    config = app_state.local_backend.get_config()
+
+    # An explicit --remote=IP is a one-off, this launch only, and keeps the
+    # old best-effort behavior (local tabs come up immediately, connects in
+    # the background, a failure is just a dialog). A configured "always
+    # connect" remote is a standing instruction that this instance is a
+    # remote-control terminal, period — it never shows local mode at all,
+    # connected or not.
+    always = None if remote_ip else next((r for r in config.known_remotes if r.always_connect), None)
+
+    if always is not None:
+        from ..remote.protocol import REMOTE_SERVER_PORT
+        _run_always_remote(root, app_state, always.host, REMOTE_SERVER_PORT, always.token)
+        root.mainloop()
+        return
+
+    # Land on Studio Setup until a studio has been configured (studio_name is
+    # the identity field CLI setup treats as "configured"); once one exists,
+    # open straight to Record, the tab actually used session to session.
+    initial_title = "Studio Setup" if not config.studio_name else "Record"
+    _build_tabs(root, app_state, select_title=initial_title)
+
     if remote_ip:
-        match = next((r for r in config.known_remotes if r.host == remote_ip), None)
-        target = (match.host, REMOTE_SERVER_PORT, match.token) if match else (remote_ip, REMOTE_SERVER_PORT, "")
-    else:
-        always = next((r for r in config.known_remotes if r.always_connect), None)
-        if always is not None:
-            target = (always.host, REMOTE_SERVER_PORT, always.token)
-
-    if target is not None:
+        from ..remote.protocol import REMOTE_SERVER_PORT
         from .remote import connect_async, remember_remote_token
 
-        host, port, token = target
+        match = next((r for r in config.known_remotes if r.host == remote_ip), None)
+        host, port, token = (
+            (match.host, REMOTE_SERVER_PORT, match.token) if match else (remote_ip, REMOTE_SERVER_PORT, "")
+        )
 
         def on_remote_error(error: str) -> None:
             messagebox.showerror("Could not connect", f"{host}: {error}")
 
         def on_remote_done(client) -> None:
             remember_remote_token(app_state, host, client)
-            notebook.select(len(containers) - 1)
 
         connect_async(
             root, app_state, host, port, token,
