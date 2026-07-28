@@ -1,21 +1,18 @@
-"""Remote tab: connect this takeloom instance to another one's hardware/config,
-and/or turn this instance's own remote server on/off so others can connect
-to it.
+"""Remote tab: connect this takeloom instance to another one's hardware/config.
 
-The "Connect to a Remote Instance" section swaps `app_state.backend` to a
-`RemoteBackend`, which every other tab is already wired to use. The "Remote
-Server" section is deliberately independent of that — it always reads/writes
-`app_state.local_backend` (this machine's own config/hardware), since
-whether *this* machine offers itself as a server has nothing to do with
-whatever remote you might currently be connected to as a client.
+This tab is connect-only. Hosting a server (accepting incoming connections)
+is managed exclusively via `takeloom server` on the command line — see
+__main__.py's server_command — so there's no "enable remote server" toggle
+or authorized-clients list here, only the list of remotes this machine can
+connect *to*.
 
 Auth is a pairing-request flow, not a shared secret: connecting to a remote
 for the first time sends no token, which prompts the *other* machine's user
-to approve or deny the connection (see `_AuthorizeDialog`, and
-`RemoteServer.request_authorization` in ../remote/server.py). On approval a
-token is minted for that client and stored under a `KnownRemote` entry here;
-subsequent connections reuse it silently. One `KnownRemote` can be flagged
-"always connect" for startup auto-connect (see app.py's `run()`).
+(via its own `takeloom server` terminal) to approve or deny the connection.
+On approval a token is minted for that client and stored under a
+`KnownRemote` entry here; subsequent connections reuse it silently. One
+`KnownRemote` can be flagged "always connect" for startup auto-connect (see
+app.py's `run()`).
 """
 
 from __future__ import annotations
@@ -26,11 +23,10 @@ from tkinter import messagebox, ttk
 from typing import Callable
 
 from ..backend import BackendError
-from ..config import AuthorizedClient, KnownRemote, StudioConfig
+from ..config import KnownRemote, StudioConfig
 from ..remote.backend import RemoteBackend
 from ..remote.client import RemoteClient
 from ..remote.protocol import REMOTE_SERVER_PORT
-from ..remote.server import RemoteServer
 from .app_state import AppState
 
 
@@ -143,76 +139,23 @@ class _AddRemoteDialog(tk.Toplevel):
         self.destroy()
 
 
-class _AuthorizeDialog(tk.Toplevel):
-    """Pops up on the server side when an unrecognized client connects.
-    Auto-denies after TIMEOUT_MS if nobody responds."""
-
-    TIMEOUT_MS = 120_000
-
-    def __init__(self, master: tk.Misc, ip: str, client_name: str, on_result) -> None:
-        super().__init__(master)
-        self.title("Remote connection request")
-        self.resizable(False, False)
-        self.attributes("-topmost", True)
-        self._on_result = on_result
-        self._done = False
-
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill="both", expand=True)
-        ttk.Label(
-            frame,
-            text=f'"{client_name}" ({ip}) wants to connect to this Takeloom instance.',
-            wraplength=320, justify="left",
-        ).pack(anchor="w", pady=(0, 12))
-
-        button_row = ttk.Frame(frame)
-        button_row.pack(anchor="e")
-        ttk.Button(button_row, text="Deny", command=self._deny).pack(side="left", padx=(0, 8))
-        ttk.Button(button_row, text="Approve", command=self._approve).pack(side="left")
-
-        self.protocol("WM_DELETE_WINDOW", self._deny)
-        self._timeout_id = self.after(self.TIMEOUT_MS, self._deny)
-
-    def _approve(self) -> None:
-        self._finish(True)
-
-    def _deny(self) -> None:
-        self._finish(False)
-
-    def _finish(self, approved: bool) -> None:
-        if self._done:
-            return
-        self._done = True
-        self.after_cancel(self._timeout_id)
-        self._on_result(approved)
-        self.destroy()
-
-
 class RemoteFrame(ttk.Frame):
     def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
         self.app_state = app_state
         self._local_config: StudioConfig | None = None
         self._remote_items: dict[str, KnownRemote] = {}
-        self._client_items: dict[str, AuthorizedClient] = {}
-        self._poll_after_id: str | None = None
 
         self._build_connect_section()
-        ttk.Separator(self, orient="horizontal").pack(fill="x", pady=16)
-        self._build_server_section()
 
         self.app_state.add_listener(self._on_app_state_changed)
         self.bind("<Destroy>", self._on_destroy)
 
         self._refresh_connect_status()
         self._load_local_config()
-        self._poll_server_status()
 
     def _on_destroy(self, _event: object) -> None:
         self.app_state.remove_listener(self._on_app_state_changed)
-        if self._poll_after_id is not None:
-            self.after_cancel(self._poll_after_id)
-            self._poll_after_id = None
 
     def _on_app_state_changed(self) -> None:
         self._refresh_connect_status()
@@ -221,13 +164,12 @@ class RemoteFrame(ttk.Frame):
         """Apply `mutate` to a freshly-loaded config — never to the possibly-
         stale `self._local_config` — and persist the result.
 
-        `self._local_config` is only refreshed periodically (`_poll_server_status`)
-        and can go stale relative to disk if something else touches the same
-        file: most notably a *separate* `takeloom server` process serving this
-        machine while this GUI's own remote-server toggle is off. Blindly
-        resaving the cached copy in that situation would silently wipe out
-        e.g. a client that process just authorized. Reading fresh right
-        before every write closes that gap."""
+        `self._local_config` is only refreshed when this tab is (re)built,
+        so it can go stale relative to disk if something else touches the
+        same file — most notably a `takeloom server` process pairing a new
+        client while this tab is just sitting open. Blindly resaving the
+        cached copy in that situation would silently wipe out whatever
+        changed. Reading fresh right before every write closes that gap."""
         backend = self.app_state.local_backend
         try:
             config = backend.get_config()
@@ -240,7 +182,6 @@ class RemoteFrame(ttk.Frame):
             return
         self._local_config = config
         self._refresh_known_remotes_list()
-        self._refresh_authorized_clients_list()
 
     # --- connect section ---
 
@@ -282,6 +223,13 @@ class RemoteFrame(ttk.Frame):
 
         self.connect_status_var = tk.StringVar(value="Not connected.")
         ttk.Label(frame, textvariable=self.connect_status_var, foreground="#2a6db0").pack(anchor="w", pady=(8, 0))
+
+        ttk.Label(
+            frame,
+            text=f"To host a server other instances can connect to, run `takeloom server` "
+                 f"on that machine (port {REMOTE_SERVER_PORT}, fixed).",
+            foreground="#666666", wraplength=420, justify="left",
+        ).pack(anchor="w", pady=(12, 0))
 
     def _selected_remote(self) -> KnownRemote | None:
         sel = self.remotes_tree.selection()
@@ -412,67 +360,6 @@ class RemoteFrame(ttk.Frame):
         self.app_state.set_backend(self.app_state.local_backend)
         self._refresh_connect_status()
 
-    # --- server section (always local_backend, never app_state.backend) ---
-
-    def _build_server_section(self) -> None:
-        frame = ttk.Frame(self)
-        frame.pack(fill="x", anchor="w")
-
-        ttk.Label(
-            frame, text="Remote Server (let others connect to this machine)",
-            font=("TkDefaultFont", 12, "bold"),
-        ).pack(anchor="w", pady=(0, 8))
-
-        self.server_enabled_var = tk.BooleanVar(value=False)
-        self.server_checkbox = ttk.Checkbutton(
-            frame, text="Enable remote server", variable=self.server_enabled_var, command=self._on_server_toggle,
-        )
-        self.server_checkbox.pack(anchor="w", pady=4)
-
-        ttk.Label(frame, text=f"Port {REMOTE_SERVER_PORT} (fixed — same on every takeloom instance)").pack(
-            anchor="w", pady=4
-        )
-        ttk.Label(
-            frame,
-            text="Local network only — this server refuses any connection that isn't from your LAN, "
-                 "even if this port is forwarded from your router.",
-            foreground="#666666", wraplength=420, justify="left",
-        ).pack(anchor="w", pady=(0, 4))
-
-        self.server_status_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self.server_status_var, foreground="#2a7d2a").pack(anchor="w", pady=(8, 0))
-
-        ttk.Label(frame, text="Authorized clients", font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(12, 4))
-        self.clients_tree = ttk.Treeview(
-            frame, columns=("ip", "last_seen"), show="tree headings", height=4, selectmode="browse",
-        )
-        self.clients_tree.heading("#0", text="Label")
-        self.clients_tree.heading("ip", text="Last IP")
-        self.clients_tree.heading("last_seen", text="Last Seen")
-        self.clients_tree.column("#0", width=160)
-        self.clients_tree.column("ip", width=140)
-        self.clients_tree.column("last_seen", width=180)
-        self.clients_tree.pack(fill="x")
-
-        ttk.Button(frame, text="Revoke", command=self._on_revoke_client).pack(anchor="w", pady=(6, 0))
-
-    def _request_authorization(self, ip: str, client_name: str) -> bool:
-        """Runs on a RemoteServer connection-handler thread — blocks until
-        the user responds to a popup, or it times out."""
-        result_event = threading.Event()
-        result = {"approved": False}
-
-        def show_dialog() -> None:
-            def on_result(approved: bool) -> None:
-                result["approved"] = approved
-                result_event.set()
-
-            _AuthorizeDialog(self, ip, client_name, on_result)
-
-        self.after(0, show_dialog)
-        result_event.wait(_AuthorizeDialog.TIMEOUT_MS / 1000 + 5)
-        return result["approved"]
-
     def _load_local_config(self) -> None:
         backend = self.app_state.local_backend
 
@@ -487,127 +374,6 @@ class RemoteFrame(ttk.Frame):
 
     def _on_local_config_loaded(self, config: StudioConfig | None, error: str | None) -> None:
         if error or config is None:
-            self.server_status_var.set(error or "Could not load local configuration.")
             return
         self._local_config = config
-        self.server_enabled_var.set(config.remote_server_enabled)
         self._refresh_known_remotes_list()
-        self._refresh_authorized_clients_list()
-        if config.remote_server_enabled:
-            self._start_server()
-
-    def _on_server_toggle(self) -> None:
-        if self.app_state.recording_active:
-            self.server_enabled_var.set(not self.server_enabled_var.get())  # revert the click
-            messagebox.showerror("Cannot change", "Stop the current recording first.")
-            return
-        if self.server_enabled_var.get():
-            self._start_server()
-        else:
-            self._stop_server()
-
-    def _start_server(self) -> None:
-        if self.app_state.remote_server is not None:
-            self._update_server_status()
-            return
-        if self._local_config is None:
-            self.server_enabled_var.set(False)
-            return
-        self._local_config.remote_server_enabled = True
-
-        server = RemoteServer(
-            self.app_state.local_backend, REMOTE_SERVER_PORT, self._request_authorization,
-        )
-        try:
-            server.start()
-        except OSError as e:
-            messagebox.showerror("Could not start server", str(e))
-            self.server_enabled_var.set(False)
-            return
-
-        self.app_state.remote_server = server
-        self.server_enabled_var.set(True)
-        self._update_server_status()
-
-        # Persist "enabled" so this instance auto-starts serving next launch.
-        self._persist_server_enabled(True)
-
-    def _stop_server(self) -> None:
-        if self.app_state.remote_server is not None:
-            self.app_state.remote_server.stop()
-            self.app_state.remote_server = None
-        self.server_enabled_var.set(False)
-        self.server_status_var.set("Stopped.")
-        if self._local_config is not None:
-            self._local_config.remote_server_enabled = False
-        self._persist_server_enabled(False)
-
-    def _persist_server_enabled(self, enabled: bool) -> None:
-        """Flips just this one field on a freshly-loaded config, in the
-        background, rather than resaving self._local_config wholesale — see
-        _mutate_config for why that cache can be stale. Fire-and-forget is
-        fine here: server_enabled_var already reflects the intended state
-        for the UI regardless of when/whether this write lands."""
-        backend = self.app_state.local_backend
-
-        def worker() -> None:
-            try:
-                config = backend.get_config()
-            except BackendError:
-                return
-            config.remote_server_enabled = enabled
-            try:
-                backend.save_config(config)
-            except BackendError:
-                pass
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _update_server_status(self) -> None:
-        server = self.app_state.remote_server
-        if server is None:
-            self.server_status_var.set("Stopped.")
-            return
-        self.server_status_var.set(f"Serving on port {server.port} — {server.client_count} client(s) connected.")
-
-    def _refresh_authorized_clients_list(self) -> None:
-        self.clients_tree.delete(*self.clients_tree.get_children())
-        self._client_items = {}
-        if self._local_config is None:
-            return
-        for client in self._local_config.remote_authorized_clients:
-            self.clients_tree.insert(
-                "", "end", iid=client.token, text=client.label or "(unknown)",
-                values=(client.last_ip, client.last_seen_at),
-            )
-            self._client_items[client.token] = client
-
-    def _on_revoke_client(self) -> None:
-        sel = self.clients_tree.selection()
-        if not sel or self._local_config is None:
-            return
-        token = sel[0]
-
-        def mutate(config: StudioConfig) -> None:
-            config.remote_authorized_clients = [c for c in config.remote_authorized_clients if c.token != token]
-        self._mutate_config(mutate)
-        if self.app_state.remote_server is not None:
-            self.app_state.remote_server.disconnect_token(token)
-
-    def _poll_server_status(self) -> None:
-        self._update_server_status()
-        # Not gated on self.app_state.remote_server: the actual serving
-        # could be happening in a separate `takeloom server` process, and
-        # this is what keeps the authorized-clients list (and _mutate_config's
-        # base state) from drifting stale relative to that.
-        self._reload_authorized_clients_from_disk()
-        self._poll_after_id = self.after(2000, self._poll_server_status)
-
-    def _reload_authorized_clients_from_disk(self) -> None:
-        try:
-            config = self.app_state.local_backend.get_config()
-        except BackendError:
-            return
-        if self._local_config is not None:
-            self._local_config.remote_authorized_clients = config.remote_authorized_clients
-        self._refresh_authorized_clients_list()

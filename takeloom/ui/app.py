@@ -20,7 +20,7 @@ from .studio_setup import StudioSetupFrame
 # torn down on tab switches — needed for Record, which holds a live audio
 # stream / ffmpeg process / camera handle that a rebuild would kill outright;
 # for Latency, which holds the same during a camera latency test; and for
-# Remote, which holds the connected RemoteClient / hosted RemoteServer.
+# Remote, which holds the connected RemoteClient.
 TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),

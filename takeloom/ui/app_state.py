@@ -21,15 +21,9 @@ Listener = Callable[[], None]
 class AppState:
     def __init__(self) -> None:
         # The one true local backend for this machine — always exists, even
-        # when `backend` below is swapped to a RemoteBackend. The Remote
-        # tab's server toggle serves *this* instance, so a locally-running
-        # server and the local UI (when not itself connected elsewhere)
-        # share one LocalBackend and its single-recording lock/camera state,
-        # instead of racing two independent instances against one set of
-        # hardware.
+        # when `backend` below is swapped to a RemoteBackend.
         self.local_backend = LocalBackend()
         self.backend: Backend = self.local_backend
-        self.remote_server = None  # set to a RemoteServer by the Remote tab, when enabled
         self.remote_name: str = ""  # hostname of the connected remote; "" when backend is local
         self.recording_active: bool = False
         self._listeners: list[Listener] = []

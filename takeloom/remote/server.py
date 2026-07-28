@@ -11,9 +11,10 @@ part of the protocol.
 Auth is a pairing-request flow rather than a single shared secret: a client
 with no token (or an unrecognized one) causes the handler thread to call
 `request_authorization(ip, client_name)` and block on its result — this is
-safe because every connection already runs on its own thread. The UI layer
-supplies that callback (typically: pop a dialog, wait for the user to click
-Approve/Deny, with its own timeout). On approval the handler mints a new
+safe because every connection already runs on its own thread. The caller
+(`takeloom server` — see __main__.py's server_command, the only place a
+RemoteServer is ever constructed) supplies that callback as an interactive
+terminal prompt with its own timeout. On approval the handler mints a new
 per-client token, persists it to config, and returns it once in `hello_ack`.
 """
 
@@ -203,8 +204,8 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 # Lets the client show "waiting to be authorized" instead of
                 # a plain "connecting" while this thread blocks below, since
                 # that can take up to request_authorization's own timeout
-                # (e.g. _AuthorizeDialog.TIMEOUT_MS) with nothing else on the
-                # wire to distinguish it from an ordinary slow connect.
+                # with nothing else on the wire to distinguish it from an
+                # ordinary slow connect.
                 self._write({"kind": "hello_pending"})
                 try:
                     approved = self._owner.request_authorization(ip, client_name)

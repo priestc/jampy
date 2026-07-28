@@ -267,13 +267,11 @@ def ui_command(remote_ip: str | None) -> None:
 
 @main.command(name="server")
 def server_command() -> None:
-    """Run the remote-control server without launching the UI.
-
-    Lets other takeloom instances connect to this machine (Remote tab),
-    same as toggling the server on in the UI's Remote tab. Always listens
-    on the fixed remote.protocol.REMOTE_SERVER_PORT (not configurable —
-    see that module for why), and only accepts connections from the local
-    network.
+    """Run the remote-control server. This is the only way to host a
+    takeloom instance for other clients to connect to — the GUI's Remote tab
+    is connect-only. Always listens on the fixed remote.protocol.
+    REMOTE_SERVER_PORT (not configurable — see that module for why), and
+    only accepts connections from the local network.
     """
     from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .remote.protocol import REMOTE_SERVER_PORT
@@ -281,7 +279,6 @@ def server_command() -> None:
     from .streamdeck_controller import StreamDeckController
 
     backend = LocalBackend()
-    config = backend.get_config()
     listen_port = REMOTE_SERVER_PORT
 
     def request_authorization(ip: str, client_name: str) -> bool:
@@ -303,9 +300,6 @@ def server_command() -> None:
     except OSError as e:
         click.echo(f"Error: could not start server: {e}", err=True)
         raise SystemExit(1)
-
-    config.remote_server_enabled = True
-    backend.save_config(config)
 
     click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
     click.echo("Press Ctrl+C to stop.\n")
@@ -398,8 +392,6 @@ def server_command() -> None:
         click.echo("\nStopping server...")
         server.stop()
         streamdeck.disconnect()
-        config.remote_server_enabled = False
-        backend.save_config(config)
 
 
 @main.command()
