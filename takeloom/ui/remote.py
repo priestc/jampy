@@ -23,6 +23,7 @@ from __future__ import annotations
 import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
+from typing import Callable
 
 from ..backend import BackendError
 from ..config import AuthorizedClient, KnownRemote, StudioConfig
@@ -216,13 +217,30 @@ class RemoteFrame(ttk.Frame):
     def _on_app_state_changed(self) -> None:
         self._refresh_connect_status()
 
-    def _save_local_config(self) -> None:
-        if self._local_config is None:
-            return
+    def _mutate_config(self, mutate: Callable[[StudioConfig], None]) -> None:
+        """Apply `mutate` to a freshly-loaded config — never to the possibly-
+        stale `self._local_config` — and persist the result.
+
+        `self._local_config` is only refreshed periodically (`_poll_server_status`)
+        and can go stale relative to disk if something else touches the same
+        file: most notably a *separate* `takeloom server` process serving this
+        machine while this GUI's own remote-server toggle is off. Blindly
+        resaving the cached copy in that situation would silently wipe out
+        e.g. a client that process just authorized. Reading fresh right
+        before every write closes that gap."""
+        backend = self.app_state.local_backend
         try:
-            self.app_state.local_backend.save_config(self._local_config)
+            config = backend.get_config()
         except BackendError:
-            pass
+            return
+        mutate(config)
+        try:
+            backend.save_config(config)
+        except BackendError:
+            return
+        self._local_config = config
+        self._refresh_known_remotes_list()
+        self._refresh_authorized_clients_list()
 
     # --- connect section ---
 
@@ -318,15 +336,15 @@ class RemoteFrame(ttk.Frame):
             # second, unpaired one — a duplicate here is how a previously
             # paired remote could end up stuck re-pairing on every connect
             # (see _dedupe_known_remotes in config.py).
-            existing = next((r for r in self._local_config.known_remotes if r.host == host), None)
-            if existing is not None:
-                if label:
-                    existing.label = label
-            else:
-                self._local_config.known_remotes.append(KnownRemote(host=host, label=label))
-            self._save_local_config()
-            self._refresh_known_remotes_list()
-            self._reselect(existing or next(r for r in self._local_config.known_remotes if r.host == host))
+            def mutate(config: StudioConfig) -> None:
+                existing = next((r for r in config.known_remotes if r.host == host), None)
+                if existing is not None:
+                    if label:
+                        existing.label = label
+                else:
+                    config.known_remotes.append(KnownRemote(host=host, label=label))
+            self._mutate_config(mutate)
+            self._reselect(next((r for r in self._local_config.known_remotes if r.host == host), None))
 
         _AddRemoteDialog(self, on_add)
 
@@ -337,9 +355,11 @@ class RemoteFrame(ttk.Frame):
         if self.app_state.backend.is_remote() and self.app_state.remote_name and remote.label == self.app_state.remote_name:
             if not messagebox.askyesno("Forget remote", "This is the currently connected remote. Forget it anyway?"):
                 return
-        self._local_config.known_remotes.remove(remote)
-        self._save_local_config()
-        self._refresh_known_remotes_list()
+        host = remote.host
+
+        def mutate(config: StudioConfig) -> None:
+            config.known_remotes = [r for r in config.known_remotes if r.host != host]
+        self._mutate_config(mutate)
 
     def _on_toggle_always_connect(self) -> None:
         remote = self._selected_remote()
@@ -347,11 +367,12 @@ class RemoteFrame(ttk.Frame):
             self.always_connect_var.set(False)
             return
         new_value = self.always_connect_var.get()
-        for r in self._local_config.known_remotes:
-            r.always_connect = False
-        remote.always_connect = new_value
-        self._save_local_config()
-        self._refresh_known_remotes_list()
+        host = remote.host
+
+        def mutate(config: StudioConfig) -> None:
+            for r in config.known_remotes:
+                r.always_connect = (r.host == host and new_value)
+        self._mutate_config(mutate)
 
     def _on_connect(self) -> None:
         if self.app_state.recording_active:
@@ -509,9 +530,7 @@ class RemoteFrame(ttk.Frame):
         self._update_server_status()
 
         # Persist "enabled" so this instance auto-starts serving next launch.
-        backend = self.app_state.local_backend
-        config = self._local_config
-        threading.Thread(target=lambda: backend.save_config(config), daemon=True).start()
+        self._persist_server_enabled(True)
 
     def _stop_server(self) -> None:
         if self.app_state.remote_server is not None:
@@ -519,12 +538,30 @@ class RemoteFrame(ttk.Frame):
             self.app_state.remote_server = None
         self.server_enabled_var.set(False)
         self.server_status_var.set("Stopped.")
-
         if self._local_config is not None:
             self._local_config.remote_server_enabled = False
-            backend = self.app_state.local_backend
-            config = self._local_config
-            threading.Thread(target=lambda: backend.save_config(config), daemon=True).start()
+        self._persist_server_enabled(False)
+
+    def _persist_server_enabled(self, enabled: bool) -> None:
+        """Flips just this one field on a freshly-loaded config, in the
+        background, rather than resaving self._local_config wholesale — see
+        _mutate_config for why that cache can be stale. Fire-and-forget is
+        fine here: server_enabled_var already reflects the intended state
+        for the UI regardless of when/whether this write lands."""
+        backend = self.app_state.local_backend
+
+        def worker() -> None:
+            try:
+                config = backend.get_config()
+            except BackendError:
+                return
+            config.remote_server_enabled = enabled
+            try:
+                backend.save_config(config)
+            except BackendError:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _update_server_status(self) -> None:
         server = self.app_state.remote_server
@@ -550,18 +587,20 @@ class RemoteFrame(ttk.Frame):
         if not sel or self._local_config is None:
             return
         token = sel[0]
-        self._local_config.remote_authorized_clients = [
-            c for c in self._local_config.remote_authorized_clients if c.token != token
-        ]
-        self._save_local_config()
+
+        def mutate(config: StudioConfig) -> None:
+            config.remote_authorized_clients = [c for c in config.remote_authorized_clients if c.token != token]
+        self._mutate_config(mutate)
         if self.app_state.remote_server is not None:
             self.app_state.remote_server.disconnect_token(token)
-        self._refresh_authorized_clients_list()
 
     def _poll_server_status(self) -> None:
         self._update_server_status()
-        if self.app_state.remote_server is not None:
-            self._reload_authorized_clients_from_disk()
+        # Not gated on self.app_state.remote_server: the actual serving
+        # could be happening in a separate `takeloom server` process, and
+        # this is what keeps the authorized-clients list (and _mutate_config's
+        # base state) from drifting stale relative to that.
+        self._reload_authorized_clients_from_disk()
         self._poll_after_id = self.after(2000, self._poll_server_status)
 
     def _reload_authorized_clients_from_disk(self) -> None:
