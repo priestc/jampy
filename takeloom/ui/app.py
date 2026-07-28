@@ -126,10 +126,19 @@ def run(remote_ip: str | None = None) -> None:
         # uses, so text comes out the same size as on macOS.
         root.tk.call("tk", "scaling", 96 / 72)
     root.title("Takeloom")
-    root.geometry("1100x650")
 
     app_state = AppState()
     config = app_state.local_backend.get_config()
+    root.geometry(f"{config.window_width}x{config.window_height}")
+
+    def on_close() -> None:
+        config = app_state.local_backend.get_config()
+        config.window_width = root.winfo_width()
+        config.window_height = root.winfo_height()
+        app_state.local_backend.save_config(config)
+        root.destroy()
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
 
     # An explicit --remote=IP is a one-off, this launch only, and keeps the
     # old best-effort behavior (local tabs come up immediately, connects in
