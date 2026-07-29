@@ -90,7 +90,10 @@ class RecordFrame(ttk.Frame):
         self.after(0, lambda: SoundCheckDialog(self, path, has_video) if self.winfo_exists() else None)
 
     def _log_streamdeck(self, message: str) -> None:
-        self.after(0, lambda: self.status_var.set(message) if self.winfo_exists() else None)
+        def apply() -> None:
+            if self.winfo_exists() and hasattr(self, "status_var"):
+                self.status_var.set(message)
+        self.after(0, apply)
 
     # --- async backend calls (thread hop + marshal back onto the Tk thread) ---
 
