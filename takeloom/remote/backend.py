@@ -5,7 +5,9 @@ takeloom instance."""
 from __future__ import annotations
 
 import base64
+import tempfile
 import threading
+from pathlib import Path
 from typing import Callable
 
 from ..backend import (
@@ -17,6 +19,7 @@ from ..backend import (
     StartRecordingRequest,
 )
 from ..config import StudioConfig
+from ..utils import ensure_dir
 from .client import RemoteClient
 
 # Recording/inspiration calls touch remote disk, network, and hardware —
@@ -34,6 +37,7 @@ class RemoteBackend(Backend):
         self._preview_lock = threading.Lock()
         self._preview_callbacks: list[FrameCallback] = []
         self._preview_subscribed = False
+        self._sound_check_video_buffer = bytearray()
         client._on_event = self._on_raw_event
 
     def is_remote(self) -> bool:
@@ -204,6 +208,43 @@ class RemoteBackend(Backend):
                     cb(jpeg)
                 except Exception:
                     pass
+            return
+
+        if event == "sound_check_video":
+            # Chunked transfer of a sound check result the server ran on its
+            # own attached hardware (Sound Check can't be triggered from a
+            # Remote connection at all — see start_sound_check() below — so
+            # this is always the server's own local activity, sent here for
+            # display since a headless server assumes nobody's watching it
+            # directly). Only one sound check can ever be active at a time
+            # server-side, so chunks for a given transfer always arrive back
+            # to back in order on this one connection — no per-transfer ID
+            # needed, just seq==0 to (re)start the buffer.
+            try:
+                seq, total = data["seq"], data["total"]
+                chunk = base64.b64decode(data["data_b64"])
+            except Exception:
+                return
+            if seq == 0:
+                self._sound_check_video_buffer = bytearray()
+            self._sound_check_video_buffer += chunk
+            if seq == total - 1:
+                has_video = bool(data.get("has_video"))
+                work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_sound_check")
+                local_path = work_dir / ("result.mp4" if has_video else "result.flac")
+                local_path.write_bytes(bytes(self._sound_check_video_buffer))
+                self._sound_check_video_buffer = bytearray()
+                # Re-dispatched as an ordinary sound_check_status event, now
+                # naming a path that actually exists on this machine — same
+                # shape RecordingDeckDriver/RecordFrame already react to for
+                # a locally-triggered sound check.
+                for cb in list(self._event_callbacks):
+                    try:
+                        cb("sound_check_status", {
+                            "phase": "idle", "result_path": str(local_path), "has_video": has_video,
+                        })
+                    except Exception:
+                        pass
             return
 
         for cb in list(self._event_callbacks):

@@ -29,6 +29,7 @@ import secrets
 import socket
 import socketserver
 import threading
+from pathlib import Path
 from typing import Callable
 
 from ..backend import Backend, BackendError
@@ -120,6 +121,27 @@ class RemoteServer:
             conns = list(self._connections)
         for conn in conns:
             conn.send_event(event, data)
+
+    def broadcast_file(self, event: str, path: Path, extra: dict | None = None, chunk_size: int = 512 * 1024) -> None:
+        """Send a local file's bytes to every connected client as a
+        sequence of base64-encoded chunks under `event` — {"seq", "total",
+        "data_b64", **extra} per chunk, `extra` repeated on every chunk for
+        a simpler client (no special-casing chunk 0). Chunked rather than
+        one giant line: a multi-ten-MB sound check video would otherwise
+        block any concurrent RPC on the same client connection (one
+        write-lock-serialized TCP socket per client) for as long as the
+        single write takes. Call sites are expected to check client_count
+        first — this reads the whole file into memory regardless."""
+        extra = extra or {}
+        data = path.read_bytes()
+        total = max(1, (len(data) + chunk_size - 1) // chunk_size)
+        for seq in range(total):
+            chunk = data[seq * chunk_size:(seq + 1) * chunk_size]
+            self._broadcast(event, {
+                "seq": seq, "total": total,
+                "data_b64": base64.b64encode(chunk).decode("ascii"),
+                **extra,
+            })
 
     # Events with no legitimate remote audience: Sound Check is refused
     # outright by RemoteBackend (a remote client can never trigger one), so

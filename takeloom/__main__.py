@@ -322,12 +322,14 @@ def server_command() -> None:
         )
 
     def _open_sound_check_result(path: Path, has_video: bool) -> None:
-        # No GUI to pop a review window in headless mode — open it in the OS
-        # default player directly, same as the Latency tab's test clip. The
-        # temp file is left in place (not deleted) until the next sound
-        # check overwrites it.
-        from .video.capture import open_in_default_player
-        open_in_default_player(path)
+        # A headless server is assumed unattended — never launch a player on
+        # its own screen. If any Remote client is connected, send them the
+        # file instead (chunked, since it can be tens of MB) so whichever
+        # machine an operator is actually sitting at can review it in its
+        # own native player. With nobody connected either, the file is just
+        # left in the temp dir for the next sound check to overwrite.
+        if server.client_count > 0:
+            server.broadcast_file("sound_check_video", path, extra={"has_video": has_video})
 
     driver = RecordingDeckDriver(
         backend, resolve_start_request=_resolve_headless_request,
