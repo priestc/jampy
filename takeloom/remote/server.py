@@ -121,7 +121,18 @@ class RemoteServer:
         for conn in conns:
             conn.send_event(event, data)
 
+    # Events with no legitimate remote audience: Sound Check is refused
+    # outright by RemoteBackend (a remote client can never trigger one), so
+    # a sound_check_status event only ever describes this server's own
+    # local activity (e.g. its attached physical Stream Deck) — its
+    # result_path names a file that only exists on this machine. Never
+    # forward it; a connected client acting on it would try to open a path
+    # that doesn't exist on its own filesystem.
+    _LOCAL_ONLY_EVENTS = frozenset({"sound_check_status"})
+
     def _on_backend_event(self, event: str, data: dict) -> None:
+        if event in self._LOCAL_ONLY_EVENTS:
+            return
         self._broadcast(event, data)
 
     def disconnect_token(self, token: str) -> None:

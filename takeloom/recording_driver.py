@@ -166,6 +166,17 @@ class RecordingDeckDriver:
                 self.phase = data["phase"]
                 self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
         elif event == "sound_check_status":
+            # Sound check is local-only — RemoteBackend refuses to ever
+            # trigger one — so a sound_check_status event reaching a Remote-
+            # connected driver can only be RemoteServer's blanket broadcast
+            # of another client's/the server's own local sound check (see
+            # RemoteServer._on_backend_event, which forwards every backend
+            # event to every connected client unfiltered). Its result_path
+            # names a file on THAT machine, not this one — never act on it
+            # here, or e.g. open_in_default_player() gets handed a path that
+            # doesn't exist locally.
+            if self._backend.is_remote():
+                return
             if "status" in data:
                 self._log(data["status"])
             if "phase" in data:
