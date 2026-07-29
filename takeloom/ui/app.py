@@ -5,9 +5,11 @@ from __future__ import annotations
 import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
+from typing import Callable
 
 from tkinterdnd2 import TkinterDnD
 
+from ..backend import BackendError
 from ..device_check import check_configured_devices
 from .app_state import AppState
 from .instruments import InstrumentsFrame
@@ -91,12 +93,16 @@ def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
     rebuild(containers[initial_index])
 
 
-def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int, token: str) -> None:
-    """This instance is configured to always connect to a specific remote —
-    it must never fall back to showing this machine's own local hardware/
-    tabs. Shows a blocking "connecting" / "could not connect" screen with a
-    Retry button until the connection actually succeeds; only then does the
-    normal tabbed UI (bound to the now-remote backend) get built at all."""
+def _show_connect_screen(
+    root: tk.Misc, app_state: AppState, host: str, port: int, token: str,
+    on_connected: Callable[[], None], initial_status: str | None = None,
+) -> None:
+    """Blocking "connecting" / "waiting for authorization" / "could not
+    connect" screen with a Retry button, shown in place of the normal tabbed
+    UI until the connection actually succeeds — only then does
+    `on_connected()` run. Shared by an "always connect" remote at startup
+    (`_run_always_remote`) and by recovery from a mid-session disconnect
+    (`handle_remote_disconnect`)."""
     from .remote import connect_async, remember_remote_token
 
     placeholder = ttk.Frame(root)
@@ -108,7 +114,7 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
 
     def attempt() -> None:
         clear()
-        status_var = tk.StringVar(value=f"Connecting to {host}...")
+        status_var = tk.StringVar(value=initial_status or f"Connecting to {host}...")
         ttk.Label(placeholder, textvariable=status_var, font=("TkDefaultFont", 13)).pack(pady=(60, 0))
 
         def on_pending() -> None:
@@ -117,7 +123,7 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
         def on_done(client) -> None:
             remember_remote_token(app_state, host, client)
             placeholder.destroy()
-            _build_tabs(root, app_state, select_title="Record")
+            on_connected()
 
         def on_error(error: str) -> None:
             clear()
@@ -132,6 +138,51 @@ def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int,
         connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error, on_pending=on_pending)
 
     attempt()
+
+
+def _run_always_remote(root: tk.Misc, app_state: AppState, host: str, port: int, token: str) -> None:
+    """This instance is configured to always connect to a specific remote —
+    it must never fall back to showing this machine's own local hardware/
+    tabs. Shows the blocking connect/retry screen until the connection
+    actually succeeds; only then does the normal tabbed UI (bound to the
+    now-remote backend) get built at all."""
+    _show_connect_screen(
+        root, app_state, host, port, token,
+        on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
+    )
+
+
+def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port: int, reason: str) -> None:
+    """Recover from an unexpected mid-session drop of a remote connection:
+    tear down whatever's currently on screen (the tabbed UI) and replace it
+    with the same connect/retry screen shown at startup, instead of a
+    dialog plus a silent fallback to this machine's own local hardware — a
+    remote instance has nothing useful of its own to show while
+    disconnected, so it should look and behave just like it does before its
+    first successful connect."""
+    if not app_state.backend.is_remote():
+        return  # already reset by an explicit Disconnect click
+    try:
+        config = app_state.local_backend.get_config()
+        remote = next((r for r in config.known_remotes if r.host == host), None)
+        token = remote.token if remote else ""
+    except BackendError:
+        token = ""
+
+    # Tear down the tabbed UI (and with it every persistent tab's app_state
+    # listener, unregistered synchronously by its own <Destroy> handler)
+    # before swapping the backend, so the dead RemoteBackend's notification
+    # doesn't trigger a doomed reload/rebind in frames about to be destroyed
+    # anyway.
+    for child in root.winfo_children():
+        child.destroy()
+    app_state.set_backend(app_state.local_backend)
+
+    _show_connect_screen(
+        root, app_state, host, port, token,
+        on_connected=lambda: _build_tabs(root, app_state, select_title="Record"),
+        initial_status=f"Disconnected ({reason}) — reconnecting to {host}...",
+    )
 
 
 def run(remote_ip: str | None = None) -> None:

@@ -46,7 +46,7 @@ def connect_async(
     authorized...", since that step can take a while."""
 
     def on_disconnect(reason: str) -> None:
-        widget.after(0, lambda: _handle_disconnect(app_state, reason))
+        widget.after(0, lambda: _handle_disconnect(widget, app_state, host, port, reason))
 
     def on_pending_cb() -> None:
         if on_pending:
@@ -100,11 +100,9 @@ def remember_remote_token(app_state: AppState, host: str, client: RemoteClient) 
         pass
 
 
-def _handle_disconnect(app_state: AppState, reason: str) -> None:
-    if not app_state.backend.is_remote():
-        return  # already reset by an explicit Disconnect click
-    app_state.set_backend(app_state.local_backend)
-    messagebox.showwarning("Disconnected", reason)
+def _handle_disconnect(widget, app_state: AppState, host: str, port: int, reason: str) -> None:
+    from .app import handle_remote_disconnect
+    handle_remote_disconnect(widget.winfo_toplevel(), app_state, host, port, reason)
 
 
 class _AddRemoteDialog(tk.Toplevel):
