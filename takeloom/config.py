@@ -98,6 +98,8 @@ class StudioConfig:
     studio_location: str = ""
     camera_device: str = ""  # platform-specific ffmpeg device id, e.g. avfoundation index or /dev/video0
     camera_label: str = ""   # human-friendly camera name, for display only
+    streamdeck_id: str = ""     # serial number of the selected physical Stream Deck; empty = don't connect to one
+    streamdeck_label: str = ""  # human-friendly Stream Deck name, for display only
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to

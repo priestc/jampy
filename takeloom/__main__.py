@@ -797,8 +797,11 @@ def _recording_context(project=None, config=None):
     from .streamdeck_controller import StreamDeckController
     sd_keys: queue.Queue[str] = queue.Queue()
     streamdeck = StreamDeckController()
-    if streamdeck.connect(sd_keys.put):
+    device_id = config.streamdeck_id if config else ""
+    if streamdeck.connect(sd_keys.put, device_id=device_id):
         click.echo("StreamDeck connected.")
+    elif streamdeck.last_error:
+        click.echo(f"StreamDeck: found a device but could not connect — {streamdeck.last_error}")
     try:
         yield streamdeck, sd_keys
     finally:

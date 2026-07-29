@@ -87,6 +87,7 @@ class RecordingDevicesFrame(ttk.Frame):
         self.output_devices: list[dict] = []
         self.input_devices: list[dict] = []
         self._camera_choices: list[tuple[str, str]] = []
+        self._streamdeck_choices: list[tuple[str, str]] = []
         self._input_rows: list[_InputRow] = []
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
@@ -102,15 +103,17 @@ class RecordingDevicesFrame(ttk.Frame):
                 config = backend.get_config()
                 devices = backend.list_audio_devices()
                 cameras = backend.list_cameras()
+                streamdecks = backend.list_streamdecks()
                 error = None
             except BackendError as e:
-                config, devices, cameras, error = None, [], [], str(e)
-            self.after(0, lambda: self._on_initial_loaded(config, devices, cameras, error))
+                config, devices, cameras, streamdecks, error = None, [], [], [], str(e)
+            self.after(0, lambda: self._on_initial_loaded(config, devices, cameras, streamdecks, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _on_initial_loaded(
-        self, config: StudioConfig | None, devices: list[dict], cameras: list[tuple[str, str]], error: str | None,
+        self, config: StudioConfig | None, devices: list[dict], cameras: list[tuple[str, str]],
+        streamdecks: list[tuple[str, str]], error: str | None,
     ) -> None:
         if not self.winfo_exists():
             return
@@ -120,15 +123,18 @@ class RecordingDevicesFrame(ttk.Frame):
             ttk.Label(self, text=error or "Could not load configuration.", foreground="#b00020").pack(anchor="w")
             return
         self.config_obj = config
-        self._set_devices(devices, cameras)
+        self._set_devices(devices, cameras, streamdecks)
         self._input_rows = []
         self._build()
 
-    def _set_devices(self, devices: list[dict], cameras: list[tuple[str, str]]) -> None:
+    def _set_devices(
+        self, devices: list[dict], cameras: list[tuple[str, str]], streamdecks: list[tuple[str, str]],
+    ) -> None:
         self.devices = devices
         self.output_devices = [d for d in devices if d["max_output_channels"] > 0]
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
         self._camera_choices = [("", "None")] + cameras
+        self._streamdeck_choices = [("", "None")] + streamdecks
 
     def _build(self) -> None:
         row = 0
@@ -220,6 +226,29 @@ class RecordingDevicesFrame(ttk.Frame):
         self.camera_box.grid(row=row, column=1, sticky="w")
         row += 1
 
+        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        row += 1
+
+        ttk.Label(self, text="Stream Deck", font=("TkDefaultFont", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+
+        ttk.Label(self, text="Stream Deck device").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        current_streamdeck_display = next(
+            (display for dev_id, display in self._streamdeck_choices if dev_id == self.config_obj.streamdeck_id),
+            "None",
+        )
+        self.streamdeck_var = tk.StringVar(value=current_streamdeck_display)
+        self.streamdeck_box = ttk.Combobox(self, textvariable=self.streamdeck_var, state="readonly", width=34)
+        self.streamdeck_box.grid(row=row, column=1, sticky="w")
+        row += 1
+        ttk.Label(
+            self, text="Only connects to a Stream Deck if one is selected here.",
+            foreground="#666666",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 4))
+        row += 1
+
         self.columnconfigure(1, weight=1)
 
         self.status_var = tk.StringVar(value="")
@@ -245,6 +274,9 @@ class RecordingDevicesFrame(ttk.Frame):
 
         camera_display = [display for _dev_id, display in self._camera_choices]
         self.camera_box.configure(values=camera_display)
+
+        streamdeck_display = [display for _dev_id, display in self._streamdeck_choices]
+        self.streamdeck_box.configure(values=streamdeck_display)
 
     def _add_input_row(self, label: str = "", device: str = "", channel: int = 1) -> None:
         row_widget = _InputRow(
@@ -276,21 +308,25 @@ class RecordingDevicesFrame(ttk.Frame):
             try:
                 devices = backend.list_audio_devices()
                 cameras = backend.list_cameras()
+                streamdecks = backend.list_streamdecks()
                 error = None
             except BackendError as e:
-                devices, cameras, error = [], [], str(e)
-            self.after(0, lambda: self._on_reloaded(devices, cameras, error))
+                devices, cameras, streamdecks, error = [], [], [], str(e)
+            self.after(0, lambda: self._on_reloaded(devices, cameras, streamdecks, error))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_reloaded(self, devices: list[dict], cameras: list[tuple[str, str]], error: str | None) -> None:
+    def _on_reloaded(
+        self, devices: list[dict], cameras: list[tuple[str, str]],
+        streamdecks: list[tuple[str, str]], error: str | None,
+    ) -> None:
         if not self.winfo_exists():
             return
         if error:
             messagebox.showerror("Reload failed", error)
             self.reload_button.state(["!disabled"])
             return
-        self._set_devices(devices, cameras)
+        self._set_devices(devices, cameras, streamdecks)
         for child in self.winfo_children():
             child.destroy()
         self._input_rows = []
@@ -326,6 +362,14 @@ class RecordingDevicesFrame(ttk.Frame):
         )
         self.config_obj.camera_device = camera_device
         self.config_obj.camera_label = camera_label
+
+        streamdeck_display = self.streamdeck_var.get()
+        streamdeck_id, streamdeck_label = next(
+            ((dev_id, display) for dev_id, display in self._streamdeck_choices if display == streamdeck_display),
+            (self.config_obj.streamdeck_id, self.config_obj.streamdeck_label),
+        )
+        self.config_obj.streamdeck_id = streamdeck_id
+        self.config_obj.streamdeck_label = streamdeck_label
 
     def _on_save(self) -> None:
         try:

@@ -50,10 +50,16 @@ class RecordingDeckDriver:
     # --- connect / disconnect ---
 
     def connect(self, key_callback: Callable[[str], None] | None = None) -> bool:
-        """Open the Stream Deck and start listening for backend events.
-        `key_callback`, if given, wraps handle_key (e.g. to marshal onto a
-        UI's main thread) — otherwise handle_key is used directly."""
-        if not self.streamdeck.connect(key_callback or self.handle_key):
+        """Open the Stream Deck selected in settings (StudioConfig.
+        streamdeck_id) and start listening for backend events. Does nothing
+        — no hardware probing at all — if none is configured. `key_callback`,
+        if given, wraps handle_key (e.g. to marshal onto a UI's main thread)
+        — otherwise handle_key is used directly."""
+        try:
+            device_id = self._backend.get_config().streamdeck_id
+        except BackendError:
+            device_id = ""
+        if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
         self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)

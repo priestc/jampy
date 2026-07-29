@@ -40,6 +40,50 @@ def _skip_hidapi_exit_crash() -> None:
         pass
 
 
+def _probe_deck(deck) -> tuple[str, str] | None:
+    """Read an already-open deck's stable serial number + model name (the
+    (id, label) shape used throughout this module and by list_streamdecks()).
+    Serial number isn't available before open() — caller owns open()/close().
+    Returns None if either read fails."""
+    try:
+        serial = deck.get_serial_number()
+        deck_type = deck.deck_type()
+    except Exception:
+        return None
+    label = f"{deck_type} ({serial[-4:]})" if len(serial) >= 4 else deck_type
+    return serial, label
+
+
+def list_streamdecks() -> list[tuple[str, str]]:
+    """Enumerate every currently attached Stream Deck as (serial_number,
+    label) pairs, for a settings dropdown. Each device is briefly opened to
+    read its serial (not available before open()) and closed again — this
+    is a one-off listing call, not a live connection."""
+    if not _HAVE_STREAMDECK:
+        return []
+    try:
+        decks = DeviceManager().enumerate()
+        _skip_hidapi_exit_crash()
+    except Exception:
+        return []
+    results = []
+    for deck in decks:
+        try:
+            deck.open()
+        except Exception:
+            continue
+        try:
+            probe = _probe_deck(deck)
+            if probe is not None:
+                results.append(probe)
+        finally:
+            try:
+                deck.close()
+            except Exception:
+                pass
+    return results
+
+
 # Button tuple: (key_index, icon_name, label, key_char, active_state_name, active_color, dim_color)
 # active_state_name=None → always shown in active color.
 _INSPIRATION_BUTTONS: list[tuple] = [
@@ -188,18 +232,43 @@ class StreamDeckController:
     def connected(self) -> bool:
         return self._deck is not None
 
-    def connect(self, key_callback: Callable[[str], None]) -> bool:
-        """Open the first available StreamDeck. Returns True if connected."""
+    def connect(self, key_callback: Callable[[str], None], device_id: str = "") -> bool:
+        """Open the Stream Deck whose serial number matches device_id (from
+        list_streamdecks(), stored as StudioConfig.streamdeck_id). Returns
+        False immediately with no hardware probing at all if device_id is
+        empty — the app never auto-connects to "whichever Stream Deck
+        happens to be plugged in"; the user selects one explicitly in
+        Recording Devices settings."""
         self.last_error = None
+        if not device_id:
+            return False
         if not _HAVE_STREAMDECK or not _HAVE_PIL:
             return False
         try:
             decks = DeviceManager().enumerate()
             _skip_hidapi_exit_crash()
-            if not decks:
+            target = None
+            for deck in decks:
+                try:
+                    deck.open()
+                except Exception:
+                    continue
+                probe = _probe_deck(deck)
+                if probe is not None and probe[0] == device_id:
+                    target = deck
+                    break
+                try:
+                    deck.close()
+                except Exception:
+                    pass
+            if target is None:
+                # Unlike "no device_id configured" above, the user *did*
+                # select a specific Stream Deck — not finding it now is
+                # worth surfacing (e.g. it's unplugged), not staying silent.
+                self.last_error = f"configured Stream Deck (serial ending {device_id[-4:]}) not found among connected devices"
                 return False
-            self._deck = decks[0]
-            self._deck.open()
+
+            self._deck = target
             self._deck.reset()
             self._deck.set_brightness(70)
             self._key_callback = key_callback

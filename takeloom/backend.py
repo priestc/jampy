@@ -82,6 +82,14 @@ class Backend(ABC):
     @abstractmethod
     def list_cameras(self) -> list[tuple[str, str]]: ...
 
+    def list_streamdecks(self) -> list[tuple[str, str]]:
+        """(serial_number, label) pairs for every physically attached Stream
+        Deck. Concrete default (not abstract) since a Stream Deck is
+        inherently local hardware — RemoteBackend has nothing meaningful to
+        return and just inherits this empty-list default rather than
+        proxying it over the wire, the same reasoning as get_levels()."""
+        return []
+
     @abstractmethod
     def refresh_devices(self) -> None: ...
 
@@ -516,6 +524,13 @@ class LocalBackend(Backend):
         from .video.devices import list_cameras
         try:
             return list_cameras()
+        except Exception:
+            return []
+
+    def list_streamdecks(self) -> list[tuple[str, str]]:
+        from .streamdeck_controller import list_streamdecks
+        try:
+            return list_streamdecks()
         except Exception:
             return []
 
