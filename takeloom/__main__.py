@@ -317,17 +317,41 @@ def server_command() -> None:
     # dimmed and no-op otherwise.
     streamdeck = StreamDeckController()
     phase = {"value": "idle"}
+    sound_check_phase = {"value": "idle"}
 
-    def _start_next_untaken_track(project_name: str, instrument_name: str, start_index: int = 0) -> None:
+    def _next_untaken_track_index(project_name: str, instrument_name: str, start_index: int = 0) -> int | None:
         setlist = Setlist.from_dict(backend.get_setlist(project_name))
         for i in range(start_index, len(setlist.tracks)):
             if setlist.tracks[i].get_take_for_instrument(instrument_name) is None:
-                backend.start_recording(StartRecordingRequest(
-                    project_name=project_name, instrument_name=instrument_name,
-                    track_source="playlist", track_index=i,
-                ))
-                return
-        click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
+                return i
+        return None
+
+    def _start_next_untaken_track(project_name: str, instrument_name: str, start_index: int = 0) -> None:
+        index = _next_untaken_track_index(project_name, instrument_name, start_index)
+        if index is None:
+            click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
+            return
+        backend.start_recording(StartRecordingRequest(
+            project_name=project_name, instrument_name=instrument_name,
+            track_source="playlist", track_index=index,
+        ))
+
+    def _start_sound_check() -> None:
+        cfg = backend.get_config()
+        project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
+        if not project_name or not instrument_name:
+            click.echo("StreamDeck: no last-used project/instrument — start one from a connected client first.")
+            return
+        # Same "next untaken track" target Start Recording would pick — sound
+        # check verifies the setup for whatever's coming up next.
+        index = _next_untaken_track_index(project_name, instrument_name)
+        if index is None:
+            click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
+            return
+        backend.start_sound_check(StartRecordingRequest(
+            project_name=project_name, instrument_name=instrument_name,
+            track_source="playlist", track_index=index,
+        ))
 
     def on_streamdeck_key(key: str) -> None:
         try:
@@ -343,6 +367,11 @@ def server_command() -> None:
                     backend.unpause_recording()
                 elif phase["value"] == "recording":
                     backend.stop_recording()
+            elif key == "c":
+                if sound_check_phase["value"] == "idle":
+                    _start_sound_check()
+                else:
+                    backend.stop_sound_check()
             elif key == "n":
                 if phase["value"] != "recording":
                     return  # dimmed/no-op outside an active take
@@ -375,11 +404,24 @@ def server_command() -> None:
     def on_backend_event(event: str, data: dict) -> None:
         if event == "recording_status" and "phase" in data:
             phase["value"] = data["phase"]
-            streamdeck.update_headless_toggle(phase["value"])
+            streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
+        elif event == "sound_check_status":
+            if "status" in data:
+                click.echo(f"StreamDeck: {data['status']}")
+            if "phase" in data:
+                sound_check_phase["value"] = data["phase"]
+                streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
+            if sound_check_phase["value"] == "idle" and "result_path" in data:
+                # No GUI to pop a review window in headless mode — open it in
+                # the OS default player directly, same as the Latency tab's
+                # test clip. The temp file is left in place (not deleted)
+                # until the next sound check overwrites it.
+                from .video.capture import open_in_default_player
+                open_in_default_player(Path(data["result_path"]))
 
     if streamdeck.connect(on_streamdeck_key):
         streamdeck.use_headless_layout()
-        streamdeck.update_headless_toggle(phase["value"])
+        streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
         backend.on_event(on_backend_event)
         click.echo("StreamDeck connected.")
     elif streamdeck.last_error:

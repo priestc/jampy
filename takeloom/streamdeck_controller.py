@@ -92,7 +92,7 @@ _UI_RECORD_VOLUME_BUTTONS: list[tuple] = [
 # already uses for the old CLI session states — Next Track/Restart only mean
 # anything while a take is actively recording, so they're dimmed otherwise.
 _HEADLESS_BUTTONS: list[tuple] = [
-    (0, None,   None,        "r", None,        None,            None),           # toggle — rendered by update_headless_toggle
+    (0, None,   None,        "r", None,        None,            None),           # toggle — rendered by update_headless_page
     (1, "skip", "Next Track", "n", "recording", (0,   160, 220), (15,  35,  45)),
     (2, "prev", "Restart",    "b", "recording", (255, 140,   0), (55,  35,  10)),
 ]
@@ -103,6 +103,13 @@ _HEADLESS_VOLUME_BUTTONS: list[tuple] = [
     (5, "takes_dn", "Takes -", "[", None, (120,   0, 200), (120,   0, 200)),
     (6, "takes_up", "Takes +", "]", None, (120,   0, 200), (120,   0, 200)),
 ]
+
+# Sound Check toggle — only appended by use_headless_layout() on decks with
+# enough keys past the toggle/Next/Restart/volume buttons above.
+_HEADLESS_SOUND_CHECK_KEY_INDEX = 7
+_HEADLESS_SOUND_CHECK_BUTTON: tuple = (
+    _HEADLESS_SOUND_CHECK_KEY_INDEX, None, None, "c", None, None, None,
+)  # rendered by update_headless_page
 
 _SESSION_DIAL_MAP: dict[int, tuple[str, str, str]] = {
     0: ("l", "u", "Backing\nVol"),
@@ -293,13 +300,18 @@ class StreamDeckController:
         / Begin / Stop Recording toggle, plus Next Track and Restart (back to
         the beginning of the current take) — both only lit while a take is
         actually recording, since that's the only time pressing them does
-        anything — plus volume controls (dials if available, else buttons)."""
+        anything — plus volume controls (dials if available, else buttons)
+        and a Sound Check toggle where there's room for it."""
         self._buttons = list(_HEADLESS_BUTTONS)
         if not self._has_dials:
             self._buttons += _HEADLESS_VOLUME_BUTTONS
         self._dial_map = dict(_SESSION_DIAL_MAP)
         if not self.connected:
             return
+        # Decks with too few keys just don't get a physical Sound Check key
+        # (see use_ui_record_layout()'s identical reasoning for the UI page).
+        if getattr(self._deck, "KEY_COUNT", 0) > _HEADLESS_SOUND_CHECK_KEY_INDEX:
+            self._buttons.append(_HEADLESS_SOUND_CHECK_BUTTON)
         with self._lock:
             used_indices = {btn[0] for btn in self._buttons}
             key_count = getattr(self._deck, "KEY_COUNT", 0)
@@ -311,29 +323,44 @@ class StreamDeckController:
                 if idx == 0 or icon is None:
                     continue
                 # Freshly applying the layout with no phase known yet — treat
-                # as "idle" (dimmed) until the first update_headless_toggle().
+                # as "idle" (dimmed) until the first update_headless_page().
                 color = dim_color if _state is not None else active_color
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
                 self._update_touchscreen()
 
-    def update_headless_toggle(self, phase: str) -> None:
-        """Refresh the primary toggle (icon/label driven by phase) and
-        dim/light Next Track + Restart depending on whether a take is
-        actually recording right now. `phase` is one of "idle", "waiting",
-        "recording"."""
+    def update_headless_page(self, phase: str, sound_check_phase: str = "idle") -> None:
+        """Refresh the primary toggle (icon/label driven by phase), the Sound
+        Check toggle (if the connected deck has room for one), and dim/light
+        Next Track + Restart depending on whether a take is actually
+        recording right now. Each toggle is dimmed while the other holds the
+        audio/camera hardware — the two are mutually exclusive at the backend
+        level. `phase` is one of "idle"/"waiting"/"recording";
+        `sound_check_phase` is "idle"/"recording"."""
         if not self.connected:
             return
-        icon, label, color = {
+        record_icon, record_label, record_color = {
             "idle":      ("record", "Start Recording", (0,   200, 0)),
             "waiting":   ("play",   "Begin",           (230, 160, 0)),
             "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
         }[phase]
+        if sound_check_phase == "recording":
+            record_color = (40, 40, 40)
+        check_icon, check_label, check_color = {
+            "idle":      ("soundcheck", "Sound Check", (0,   160, 200)),
+            "recording": ("stop",       "Stop",        (230, 60,  60)),
+        }[sound_check_phase]
+        if phase != "idle":
+            check_color = (40, 40, 40)
         with self._lock:
-            self._deck.set_key_image(0, self._make_key_image(icon, label, color))
+            self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
+            if any(btn[0] == _HEADLESS_SOUND_CHECK_KEY_INDEX for btn in self._buttons):
+                self._deck.set_key_image(
+                    _HEADLESS_SOUND_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
+                )
             for btn in self._buttons:
                 idx, btn_icon, btn_label, _key, active_state, active_color, dim_color = btn
-                if idx == 0 or btn_icon is None:
+                if idx in (0, _HEADLESS_SOUND_CHECK_KEY_INDEX) or btn_icon is None:
                     continue
                 btn_color = active_color if (active_state is None or active_state == phase) else dim_color
                 self._deck.set_key_image(idx, self._make_key_image(btn_icon, btn_label, btn_color))
