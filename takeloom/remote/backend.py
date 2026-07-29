@@ -170,6 +170,14 @@ class RemoteBackend(Backend):
     def stop_sound_check(self) -> None:
         raise BackendError("Sound check isn't available over Remote connections yet.")
 
+    # --- continuous session recording (not supported over Remote; CLI-only) ---
+
+    def begin_session(self, project_name: str, instrument_name: str) -> None:
+        raise BackendError("Continuous session recording isn't available over Remote connections.")
+
+    def end_session(self) -> None:
+        raise BackendError("Continuous session recording isn't available over Remote connections.")
+
     def _unsubscribe_preview(self, on_frame: FrameCallback) -> None:
         with self._preview_lock:
             if on_frame in self._preview_callbacks:

@@ -31,12 +31,10 @@ from .audio.devices import resolve_device as _resolve_device
 from .audio.formats import SUPPORTED_EXTS, get_duration
 from .inspiration import (
     InspirationError,
-    download_inspiration_track,
     find_or_add_inspiration_track,
     query_inspiration_tracks,
 )
-from .session import Session, SessionState
-from .utils import format_duration, take_filename, next_take_number, ensure_dir, wall_timestamp
+from .utils import format_duration, take_filename, next_take_number, ensure_dir
 
 
 @click.group()
@@ -273,10 +271,10 @@ def server_command() -> None:
     REMOTE_SERVER_PORT (not configurable — see that module for why), and
     only accepts connections from the local network.
     """
-    from .backend import BackendError, LocalBackend, StartRecordingRequest
+    from .backend import LocalBackend, StartRecordingRequest
+    from .recording_driver import RecordingDeckDriver
     from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
-    from .streamdeck_controller import StreamDeckController
 
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
@@ -305,127 +303,40 @@ def server_command() -> None:
     click.echo("Press Ctrl+C to stop.\n")
 
     # Optional attached StreamDeck: fully drives a session with no UI client
-    # needed at all. Start Recording auto-picks the last-used project +
-    # instrument (from config) and the first track in its playlist that
-    # doesn't have a take yet for that instrument — same search
-    # RecordFrame's own "Next" StreamDeck key already does. Once actually
-    # recording, Next Track discards the in-progress take (same as a manual
-    # stop always does — a take is only ever kept if the backing track
-    # played to its natural end) and advances to the next untaken track;
-    # Restart discards and redoes the current take from 0:00 without
-    # changing track. Both only mean anything while recording, so they're
-    # dimmed and no-op otherwise.
-    streamdeck = StreamDeckController()
-    phase = {"value": "idle"}
-    sound_check_phase = {"value": "idle"}
-
-    def _next_untaken_track_index(project_name: str, instrument_name: str, start_index: int = 0) -> int | None:
-        setlist = Setlist.from_dict(backend.get_setlist(project_name))
-        for i in range(start_index, len(setlist.tracks)):
-            if setlist.tracks[i].get_take_for_instrument(instrument_name) is None:
-                return i
-        return None
-
-    def _start_next_untaken_track(project_name: str, instrument_name: str, start_index: int = 0) -> None:
-        index = _next_untaken_track_index(project_name, instrument_name, start_index)
-        if index is None:
-            click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
-            return
-        backend.start_recording(StartRecordingRequest(
-            project_name=project_name, instrument_name=instrument_name,
-            track_source="playlist", track_index=index,
-        ))
-
-    def _start_sound_check() -> None:
+    # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
+    # no track picker of its own, this context always targets the last-used
+    # project + instrument (from config) and the next untaken track.
+    def _resolve_headless_request() -> StartRecordingRequest | None:
         cfg = backend.get_config()
         project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
         if not project_name or not instrument_name:
             click.echo("StreamDeck: no last-used project/instrument — start one from a connected client first.")
-            return
-        # Same "next untaken track" target Start Recording would pick — sound
-        # check verifies the setup for whatever's coming up next.
-        index = _next_untaken_track_index(project_name, instrument_name)
+            return None
+        index = backend.next_untaken_track_index(project_name, instrument_name)
         if index is None:
             click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
-            return
-        backend.start_sound_check(StartRecordingRequest(
+            return None
+        return StartRecordingRequest(
             project_name=project_name, instrument_name=instrument_name,
             track_source="playlist", track_index=index,
-        ))
+        )
 
-    def on_streamdeck_key(key: str) -> None:
-        try:
-            if key == "r":
-                if phase["value"] == "idle":
-                    cfg = backend.get_config()
-                    project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
-                    if not project_name or not instrument_name:
-                        click.echo("StreamDeck: no last-used project/instrument — start one from a connected client first.")
-                    else:
-                        _start_next_untaken_track(project_name, instrument_name)
-                elif phase["value"] == "waiting":
-                    backend.unpause_recording()
-                elif phase["value"] == "recording":
-                    backend.stop_recording()
-            elif key == "c":
-                if sound_check_phase["value"] == "idle":
-                    _start_sound_check()
-                else:
-                    backend.stop_sound_check()
-            elif key == "n":
-                if phase["value"] != "recording":
-                    return  # dimmed/no-op outside an active take
-                target = backend.get_active_recording_target()
-                backend.stop_recording()
-                if target is not None:
-                    # stop_recording() just closed the audio stream and
-                    # start_recording() (below) opens a brand new one on the
-                    # same physical interface — every normal session already
-                    # does this between songs, but always with a natural
-                    # human-paced gap. Doing it at machine speed, back to
-                    # back, is the one new pattern this feature introduces;
-                    # give the audio driver a moment to fully settle rather
-                    # than slamming it shut and immediately back open.
-                    time.sleep(0.5)
-                    project_name, instrument_name, current_index = target
-                    _start_next_untaken_track(project_name, instrument_name, start_index=current_index + 1)
-            elif key == "b":
-                if phase["value"] == "recording":
-                    backend.restart_take()
-            elif key in ("l", "u", "[", "]"):
-                delta = 5 if key in ("u", "]") else -5
-                if key in ("[", "]"):
-                    backend.adjust_takes_volume(delta)
-                else:
-                    backend.adjust_backing_volume(delta)
-        except BackendError as e:
-            click.echo(f"StreamDeck: {e}")
+    def _open_sound_check_result(path: Path, has_video: bool) -> None:
+        # No GUI to pop a review window in headless mode — open it in the OS
+        # default player directly, same as the Latency tab's test clip. The
+        # temp file is left in place (not deleted) until the next sound
+        # check overwrites it.
+        from .video.capture import open_in_default_player
+        open_in_default_player(path)
 
-    def on_backend_event(event: str, data: dict) -> None:
-        if event == "recording_status" and "phase" in data:
-            phase["value"] = data["phase"]
-            streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
-        elif event == "sound_check_status":
-            if "status" in data:
-                click.echo(f"StreamDeck: {data['status']}")
-            if "phase" in data:
-                sound_check_phase["value"] = data["phase"]
-                streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
-            if sound_check_phase["value"] == "idle" and "result_path" in data:
-                # No GUI to pop a review window in headless mode — open it in
-                # the OS default player directly, same as the Latency tab's
-                # test clip. The temp file is left in place (not deleted)
-                # until the next sound check overwrites it.
-                from .video.capture import open_in_default_player
-                open_in_default_player(Path(data["result_path"]))
-
-    if streamdeck.connect(on_streamdeck_key):
-        streamdeck.use_headless_layout()
-        streamdeck.update_headless_page(phase["value"], sound_check_phase["value"])
-        backend.on_event(on_backend_event)
+    driver = RecordingDeckDriver(
+        backend, resolve_start_request=_resolve_headless_request,
+        on_sound_check_result=_open_sound_check_result, log=click.echo,
+    )
+    if driver.connect():
         click.echo("StreamDeck connected.")
-    elif streamdeck.last_error:
-        click.echo(f"StreamDeck: found a device but could not connect — {streamdeck.last_error}")
+    elif driver.streamdeck.last_error:
+        click.echo(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}")
 
     try:
         while True:
@@ -435,7 +346,7 @@ def server_command() -> None:
     finally:
         click.echo("\nStopping server...")
         server.stop()
-        streamdeck.disconnect()
+        driver.disconnect()
 
 
 @main.command()
@@ -726,7 +637,17 @@ def listen() -> None:
 @main.command()
 @click.argument("instrument")
 def start_session(instrument: str) -> None:
-    """Start a recording session for INSTRUMENT."""
+    """Start a recording session for INSTRUMENT.
+
+    Runs on LocalBackend — the same recording engine and Stream Deck driver
+    (RecordingDeckDriver) as the Tk UI and `takeloom server`, so behavior is
+    identical across all three. Layered on top: a continuous whole-session
+    audio+video recording spanning every track (begin_session()/
+    end_session()), which the UI/server don't use.
+    """
+    from .backend import BackendError, LocalBackend, StartRecordingRequest
+    from .recording_driver import RecordingDeckDriver
+
     # Load config and validate instrument
     config = StudioConfig.load()
     inst = config.get_instrument(instrument)
@@ -754,7 +675,10 @@ def start_session(instrument: str) -> None:
         config.save()
         click.echo(f"  Saved '{instrument}' to config.\n")
 
-    # Check we're in a project directory
+    # Check we're in a project directory. Note: unlike the pre-Backend
+    # version of this command, the project must also be discoverable under
+    # config.projects_dir by name — LocalBackend resolves projects by name,
+    # same requirement the UI and `takeloom server` already have.
     cwd = Path.cwd()
     if not (cwd / "setlist.json").exists():
         click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
@@ -771,177 +695,92 @@ def start_session(instrument: str) -> None:
         click.echo("Error: Setlist is empty. Run 'takeloom update-setlist' first.", err=True)
         raise SystemExit(1)
 
-    # Import AudioEngine here to avoid top-level sounddevice import
-    # (allows non-audio commands to work without PortAudio)
-    from .audio.engine import AudioEngine
-    import sounddevice as sd
-
-    # Resolve output device name to index
-    out_dev = _resolve_device(sd, config.output_device, "output")
-
-    input_info = config.resolve_input(inst.input_label)
-    if input_info is None:
-        click.echo(f"Error: Input label '{inst.input_label}' not found in config.", err=True)
-        raise SystemExit(1)
-    in_dev = _resolve_device(sd, input_info.device, "input")
-    if in_dev is None:
-        click.echo(f"Error: Input device '{input_info.device}' not found.", err=True)
-        raise SystemExit(1)
-    input_channel_index = input_info.channel - 1
-    input_channels = max(input_info.channel, 1)
-
-    # Query actual device capabilities to avoid channel count mismatches
-    in_info = sd.query_devices(in_dev, "input")
-    out_info = sd.query_devices(out_dev, "output")
-    max_in = in_info["max_input_channels"]
-    output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-    if input_channels > max_in:
-        click.echo(
-            f"Error: Instrument '{inst.name}' needs input channel {input_channels} "
-            f"but device only has {max_in} channels.",
-            err=True,
-        )
-        raise SystemExit(1)
-
-    engine = AudioEngine(
-        sample_rate=config.sample_rate,
-        buffer_size=config.buffer_size,
-        input_device=in_dev,
-        output_device=out_dev,
-        input_channels=input_channels,
-        output_channels=max(1, output_channels),
-        monitor_channel=input_channel_index,
-    )
-
-    # Resolve musician name: instrument → studio default → prompt
-    musician = inst.musician or config.studio_musician
-    if not musician:
-        musician = click.prompt("Musician name")
-
-    session = Session(project=project, instrument=inst.name)
-    session.musician = musician
-    session.instrument_full_name = inst.full_name
-    session.studio_name = config.studio_name
-    session.studio_location = config.studio_location
-    # Compute latency compensation in frames for take playback
-    session._latency_trim_frames = int(
-        config.latency_compensation_ms / 1000.0 * config.sample_rate
-    )
-    session.start()
-
-    # Skip tracks that already have a preferred take for this instrument
-    tracks = project.setlist.tracks
-    for i, track in enumerate(tracks):
-        if track.get_take_for_instrument(inst.name) is None:
-            session.current_track_index = i
-            break
-    else:
-        click.echo(f"All tracks already have a take for '{inst.name}'.")
-        click.echo("Starting from the first track anyway.\n")
-        session.current_track_index = 0
+    backend = LocalBackend()
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
-    click.echo("Controls: [r]ecord  [b]ack to start  [e]nd song  [n]ext track")
+    click.echo("Controls: [r] record/unpause/stop  [c] sound check  [n]ext track  [b] restart take")
     click.echo("          [l]ower volume  [u]p volume  [[]lower takes  []]raise takes")
     click.echo("          [q]uit\n")
 
-    # Start the audio stream and continuous session recording
-    engine.start()
-    session_flac = session.session_dir / "session.flac" if session.session_dir else None
-    if session_flac:
-        engine.start_session_recording(session_flac)
+    try:
+        backend.begin_session(project.name, inst.name)
+    except BackendError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1)
 
-    video_recorder = None
-    session_video_raw = None
-    session_mix_flac = None
-    video_start_wall_time = None
-    video_start_track_name = ""
-    if config.camera_device and session.session_dir:
-        from .video.capture import VideoRecorder, ffmpeg_available
-        if ffmpeg_available():
-            session_video_raw = session.session_dir / "session_video_raw.mp4"
-            session_mix_flac = session.session_dir / "session_mix.flac"
-            video_recorder = VideoRecorder(config.camera_device, session_video_raw)
-            if video_recorder.start():
-                engine.start_mix_recording(session_mix_flac)
-                video_start_wall_time = wall_timestamp()
-                video_start_track_name = session.current_track.name if session.current_track else ""
-                click.echo(f"Recording video from '{config.camera_label or config.camera_device}'.")
-            else:
-                click.echo("Warning: could not start camera recording.")
-                video_recorder = None
-        else:
-            click.echo("Warning: ffmpeg not found, skipping camera recording.")
+    def _resolve_cli_request() -> StartRecordingRequest | None:
+        index = backend.next_untaken_track_index(project.name, inst.name)
+        if index is None:
+            click.echo(f"All tracks already have a take for '{inst.name}'.")
+            return None
+        return StartRecordingRequest(
+            project_name=project.name, instrument_name=inst.name,
+            track_source="playlist", track_index=index,
+        )
 
-    with _recording_context(project, config) as (streamdeck, sd_keys):
+    def _open_sound_check_result(path: Path, has_video: bool) -> None:
+        from .video.capture import open_in_default_player
+        open_in_default_player(path)
+
+    driver = RecordingDeckDriver(
+        backend, resolve_start_request=_resolve_cli_request,
+        on_sound_check_result=_open_sound_check_result, log=click.echo,
+    )
+    if driver.connect():
+        click.echo("StreamDeck connected.")
+    elif driver.streamdeck.last_error:
+        click.echo(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}")
+
+    # Load the first untaken track, same as the headless server's "r" does
+    # on first press — here it happens automatically on launch, matching
+    # this command's previous behavior of loading a track immediately.
+    req = _resolve_cli_request()
+    if req is not None:
         try:
-            _run_session_loop(session, engine, streamdeck, sd_keys)
-        finally:
-            engine.stop()
-            if video_recorder:
-                video_recorder.stop()
-                from .video.capture import format_watermark_text, mux_video_audio
-                session_video = session.session_dir / "session_video.mp4"
-                # Best-effort label: a session can move through several tracks, so
-                # this reflects whichever track was current when recording started.
-                watermark_text = format_watermark_text(
-                    session.musician, session.instrument, video_start_wall_time or "", video_start_track_name,
-                )
-                if mux_video_audio(
-                    session_video_raw, session_mix_flac, session_flac, session_video,
-                    watermark_text=watermark_text,
-                ):
-                    session_video_raw.unlink(missing_ok=True)
-                    session_mix_flac.unlink(missing_ok=True)
-                    click.echo(f"Session video saved to {session_video}")
-                else:
-                    click.echo(
-                        f"Warning: could not mux session video; "
-                        f"raw files kept in {session.session_dir}"
-                    )
-            # Clean up downloaded inspiration backing tracks before sync
-            for track in project.setlist.tracks:
-                if track.inspiration_track_id:
-                    bt_path = project.backing_tracks_dir / track.backing_track
-                    if bt_path.exists():
-                        bt_path.unlink()
-            project.save_setlist()
+            backend.start_recording(req)
+        except BackendError as e:
+            click.echo(f"Error: {e}", err=True)
+    click.echo()
 
+    # Terminal keystrokes feed the exact same driver.handle_key() the
+    # Stream Deck uses — one dispatcher, two input sources (recording_driver.py).
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            if select.select([sys.stdin], [], [], 0.2)[0]:
+                key = sys.stdin.read(1).lower()
+                if key == "q":
+                    break
+                driver.handle_key(key)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
-def _load_backing_track(session: Session, engine: AudioEngine) -> None:
-    """Load the current track's backing file and preferred takes into the mixer."""
-    track = session.current_track
-    if not track:
-        return
-    engine.mixer.clear()
-    backing_path = session.project.backing_tracks_dir / track.backing_track
+    driver.disconnect()
+    try:
+        if backend.is_recording():
+            backend.stop_recording()
+        backend.end_session()
+    except BackendError as e:
+        click.echo(f"Error ending session: {e}", err=True)
 
-    # Download inspiration tracks on demand
-    if track.inspiration_track_id and not backing_path.exists():
-        config = StudioConfig.load()
-        click.echo(f"  Downloading: {track.name}...")
-        try:
-            download_inspiration_track(track, backing_path, config)
-        except InspirationError as e:
-            click.echo(f"  {e}")
+    # Re-opened fresh: LocalBackend's own internal Project instances (used by
+    # begin_session/start_recording/_finish_recording) already saved every
+    # completed/discarded take to disk — this cleanup step just needs the
+    # current on-disk state, not the stale copy opened before the session.
+    fresh_project = Project.open(cwd)
+    for track in fresh_project.setlist.tracks:
+        if track.inspiration_track_id:
+            bt_path = fresh_project.backing_tracks_dir / track.backing_track
+            if bt_path.exists():
+                bt_path.unlink()
 
-    if backing_path.exists():
-        engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
-
-    # Load preferred takes from other instruments, trimming for latency compensation
-    trim = getattr(session, '_latency_trim_frames', 0)
-    for inst_name, take_info in track.preferred_takes.items():
-        if inst_name.lower() == session.instrument.lower():
-            continue  # skip the instrument we're currently recording
-        take_path = session.project.completed_takes_dir / take_info.filename
-        if take_path.exists():
-            effective_vol = take_info.volume * (track.takes_volume / 100.0)
-            engine.mixer.add_source(
-                f"take:{inst_name}", take_path, volume=effective_vol,
-                trim_frames=trim,
-            )
+    remote = fresh_project.setlist.backup_server or config.backup_server
+    if remote:
+        from .sync import sync_up
+        sync_up(fresh_project.path, remote)
 
 
 @contextmanager
@@ -969,242 +808,6 @@ def _recording_context(project=None, config=None):
             if remote:
                 from .sync import sync_up
                 sync_up(project.path, remote)
-
-
-def _run_session_loop(
-    session: Session,
-    engine: AudioEngine,
-    streamdeck,
-    sd_keys: queue.Queue,
-) -> None:
-    """Interactive single-key recording loop."""
-    # Load the first backing track into the mixer
-    _load_backing_track(session, engine)
-    _show_status(session)
-    streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
-
-    # Set terminal to raw mode for single-key input
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setcbreak(fd)
-        while session.state != SessionState.ENDED:
-            # Check if backing track finished naturally
-            if (session.state == SessionState.PLAYING
-                    and engine.mixer.is_finished
-                    and not engine.mixer.is_playing):
-                engine.stop_recording()
-                _save_preferred_take(session)
-                session.song_end(engine.mixer.position)
-                _show_status(session)
-                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
-                continue
-
-            # Check for StreamDeck button press (thread-safe via queue)
-            try:
-                key = sd_keys.get_nowait()
-                _handle_key(session, engine, key)
-                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
-                continue
-            except queue.Empty:
-                pass
-
-            # Wait for keypress (0.2s timeout to keep polling responsive)
-            if select.select([sys.stdin], [], [], 0.2)[0]:
-                key = sys.stdin.read(1).lower()
-                _handle_key(session, engine, key)
-                streamdeck.update_state(session.state.name, session.current_track.name if session.current_track else None)
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-
-    log_path = session.save_log()
-    click.echo(f"\nSession ended.")
-    if log_path:
-        click.echo(f"Log saved to {log_path}")
-
-    # Print completed takes summary
-    completed = getattr(session, '_completed_takes', [])
-    click.echo(f"\nCompleted takes: {len(completed)}")
-    for name in completed:
-        click.echo(f"  - {name}")
-
-
-def _save_preferred_take(session: Session) -> None:
-    """Save the current take as the preferred take for this track/instrument."""
-    track = session.current_track
-    if not track or not hasattr(session, '_current_take_info'):
-        return
-    take_info = session._current_take_info
-    if take_info:
-        track.set_preferred_take(session.instrument, take_info)
-        if not hasattr(session, '_completed_takes'):
-            session._completed_takes = []
-        session._completed_takes.append(track.name)
-        session._current_take_info = None
-
-
-def _delete_partial_take(session: Session) -> None:
-    """Delete the current in-progress take file (incomplete recording)."""
-    if hasattr(session, '_current_take_info') and session._current_take_info:
-        partial = session.project.completed_takes_dir / session._current_take_info.filename
-        if partial.exists():
-            partial.unlink()
-        session._current_take_info = None
-
-
-def _start_recording(session: Session, engine: AudioEngine) -> None:
-    """Start recording and playing the current track."""
-    track = session.current_track
-    if track:
-        take_num = next_take_number(
-            session.project.completed_takes_dir, track.name, session.instrument
-        )
-        fname = take_filename(track.name, session.instrument, take_num, "flac")
-        rec_path = session.project.completed_takes_dir / fname
-        engine.start_recording(rec_path)
-
-        # Track the current take so we can save it as preferred when the song ends
-        from .project import TakeInfo
-        session._current_take_info = TakeInfo(
-            instrument=session.instrument,
-            take_number=take_num,
-            filename=fname,
-        )
-
-    engine.mixer.reset()
-    engine.mixer.set_playing(True)
-    session.start_recording(engine.mixer.position)
-
-
-def _handle_key(session: Session, engine: AudioEngine, key: str) -> None:
-    """Process a single keypress."""
-    if key == "q":
-        engine.stop_recording()
-        _delete_partial_take(session)
-        engine.mixer.set_playing(False)
-        session.end_session()
-        return
-
-    if key == "r" and session.state == SessionState.WAITING:
-        _start_recording(session, engine)
-        _show_status(session)
-
-    elif key == "b" and session.state == SessionState.PLAYING:
-        # Restart from beginning — stop current take, delete partial file, start new take
-        engine.stop_recording()
-        _delete_partial_take(session)
-        engine.mixer.reset()
-
-        track = session.current_track
-        if track:
-            take_num = next_take_number(
-                session.project.completed_takes_dir, track.name, session.instrument
-            )
-            fname = take_filename(track.name, session.instrument, take_num, "flac")
-            rec_path = session.project.completed_takes_dir / fname
-            engine.start_recording(rec_path)
-
-            from .project import TakeInfo
-            session._current_take_info = TakeInfo(
-                instrument=session.instrument,
-                take_number=take_num,
-                filename=fname,
-            )
-
-        session.back_to_start(engine.mixer.position)
-        click.echo("  >> Back to start")
-
-    elif key == "e" and session.state == SessionState.PLAYING:
-        # Early end — mistake take, not saved as preferred
-        engine.stop_recording()
-        _delete_partial_take(session)
-        engine.mixer.set_playing(False)
-        session.song_end(engine.mixer.position)
-        click.echo("  (take discarded — song ended early)")
-        _show_status(session)
-
-    elif key == "l":
-        track = session.current_track
-        if track:
-            track.volume = max(0, track.volume - 5)
-            engine.mixer.set_volume("backing", track.volume / 100.0)
-            click.echo(f"  Volume: {track.volume}%")
-
-    elif key == "u":
-        track = session.current_track
-        if track:
-            track.volume = track.volume + 5
-            engine.mixer.set_volume("backing", track.volume / 100.0)
-            click.echo(f"  Volume: {track.volume}%")
-
-    elif key == "[":
-        track = session.current_track
-        if track:
-            track.takes_volume = max(0, track.takes_volume - 5)
-            for src in engine.mixer.sources:
-                if src.name.startswith("take:"):
-                    inst_name = src.name[5:]
-                    take_info = track.preferred_takes.get(inst_name)
-                    base_vol = take_info.volume if take_info else 1.0
-                    engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
-            click.echo(f"  Takes volume: {track.takes_volume}%")
-
-    elif key == "]":
-        track = session.current_track
-        if track:
-            track.takes_volume = track.takes_volume + 5
-            for src in engine.mixer.sources:
-                if src.name.startswith("take:"):
-                    inst_name = src.name[5:]
-                    take_info = track.preferred_takes.get(inst_name)
-                    base_vol = take_info.volume if take_info else 1.0
-                    engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
-            click.echo(f"  Takes volume: {track.takes_volume}%")
-
-    elif key == "n" and session.state == SessionState.BETWEEN_TRACKS:
-        # Advance to next track without a take for this instrument
-        tracks = session.project.setlist.tracks
-        found = False
-        while session.current_track_index < len(tracks) - 1:
-            session.next_track()
-            if session.state == SessionState.ENDED:
-                break
-            track = session.current_track
-            if track and track.get_take_for_instrument(session.instrument) is None:
-                found = True
-                break
-            click.echo(f"  Skipping '{track.name}' (already has a take)")
-        if not found and session.state != SessionState.ENDED:
-            session.end_session()
-        if session.state == SessionState.WAITING:
-            _load_backing_track(session, engine)
-            _start_recording(session, engine)
-        _show_status(session)
-
-
-def _show_status(session: Session) -> None:
-    """Print current session status."""
-    track = session.current_track
-    state = session.state.name
-    idx = session.current_track_index + 1
-    total = len(session.project.setlist.tracks)
-
-    if track:
-        dur = format_duration(track.duration_seconds)
-        takes_vol = f" takes:{track.takes_volume}%" if track.preferred_takes else ""
-        click.echo(f"[{idx}/{total}] {track.name} ({dur}) vol:{track.volume}%{takes_vol} — {state}")
-    else:
-        click.echo(f"[{idx}/{total}] — {state}")
-
-    if session.state == SessionState.WAITING:
-        click.echo("  Press [r] to record")
-    elif session.state == SessionState.PLAYING:
-        click.echo("  Recording... [b]ack [e]nd song [q]uit")
-    elif session.state == SessionState.BETWEEN_TRACKS:
-        if session.has_more_tracks:
-            click.echo("  Press [n] for next track, [q] to quit")
-        else:
-            click.echo("  Last track done! Press [q] to finish")
 
 
 @main.command()

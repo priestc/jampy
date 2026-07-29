@@ -22,7 +22,7 @@ from tkinter import messagebox, ttk
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
 from ..project import Setlist, TrackEntry
-from ..streamdeck_controller import StreamDeckController
+from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
 from .app_state import AppState
 from .level_meter import LevelMeter
@@ -54,82 +54,43 @@ class RecordFrame(ttk.Frame):
         self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
 
         self._current_backend = None
+        self._streamdeck_driver = RecordingDeckDriver(
+            self.app_state.backend,
+            resolve_start_request=self._build_selected_request,
+            on_sound_check_result=self._on_streamdeck_sound_check_result,
+            log=self._log_streamdeck,
+        )
         self.app_state.add_listener(self._on_app_state_changed)
         self.bind("<Destroy>", self._on_destroy)
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._attach_backend()
 
-        self._streamdeck = StreamDeckController()
         threading.Thread(target=self._connect_streamdeck, daemon=True).start()
 
         self.after(50, self._poll_levels)
 
-    # --- StreamDeck (Record/Stop toggle + backing/takes volume) ---
+    # --- StreamDeck (shared RecordingDeckDriver — see recording_driver.py) ---
 
     def _connect_streamdeck(self) -> None:
-        if self._streamdeck.connect(self._on_streamdeck_key):
-            self._streamdeck.use_ui_record_layout()
-            self.after(0, lambda: self._streamdeck.update_record_page(self._phase, self._sound_check_phase))
-        elif self._streamdeck.last_error:
-            print(f"StreamDeck: found a device but could not connect — {self._streamdeck.last_error}")
+        if not self._streamdeck_driver.connect(key_callback=self._on_streamdeck_key):
+            if self._streamdeck_driver.streamdeck.last_error:
+                print(
+                    f"StreamDeck: found a device but could not connect — "
+                    f"{self._streamdeck_driver.streamdeck.last_error}"
+                )
 
     def _on_streamdeck_key(self, key: str) -> None:
-        self.after(0, lambda: self._handle_streamdeck_key(key))
+        # Marshal onto the Tk thread before the driver runs — resolve_start_
+        # request() reads Tk StringVars and on_sound_check_result() may open
+        # a Toplevel, neither of which is safe off the Tk thread.
+        self.after(0, lambda: self._streamdeck_driver.handle_key(key))
 
-    def _handle_streamdeck_key(self, key: str) -> None:
-        if not self.winfo_exists():
-            return
-        if key == "r":
-            if hasattr(self, "record_button") and "disabled" not in self.record_button.state():
-                self._on_toggle_recording()
-        elif key == "c":
-            if hasattr(self, "sound_check_button") and "disabled" not in self.sound_check_button.state():
-                self._on_toggle_sound_check()
-        elif key == "n":
-            self._advance_to_next_track()
-        elif key in ("l", "u", "[", "]"):
-            self._adjust_streamdeck_volume(key)
+    def _on_streamdeck_sound_check_result(self, path: Path, has_video: bool) -> None:
+        self.after(0, lambda: SoundCheckDialog(self, path, has_video) if self.winfo_exists() else None)
 
-    def _advance_to_next_track(self) -> None:
-        """StreamDeck "Next" key: jump to the next playlist track that doesn't
-        already have a take for the current instrument, and start loading it —
-        lets a performer move song to song without touching the mouse."""
-        if self._phase != "idle" or not self._setlist:
-            return
-        inst_name = self.instrument_var.get()
-        if not inst_name:
-            return
-        start = 0
-        if self._selected_track_source == "playlist" and self._selected_track_index is not None:
-            start = self._selected_track_index + 1
-        tracks = self._setlist.tracks
-        for i in range(start, len(tracks)):
-            if tracks[i].get_take_for_instrument(inst_name) is None:
-                self._select_playlist_track(i)
-                self._start_recording()
-                return
-        self.status_var.set(f"All tracks already have a take for '{inst_name}'.")
-
-    def _select_playlist_track(self, index: int) -> None:
-        self.playlist_listbox.selection_clear(0, tk.END)
-        self.playlist_listbox.selection_set(index)
-        self.playlist_listbox.see(index)
-        self.inspiration_listbox.selection_clear(0, tk.END)
-        self._selected_track = self._setlist.tracks[index]
-        self._selected_track_index = index
-        self._selected_inspiration_info = None
-        self._selected_track_source = "playlist"
-        self.selection_var.set(f"Selected: {self._selected_track.name} (playlist)")
-        self._update_start_button_state()
-
-    def _adjust_streamdeck_volume(self, key: str) -> None:
-        if self._phase not in ("waiting", "recording"):
-            return
-        delta = 5 if key in ("u", "]") else -5
-        adjust = "adjust_takes_volume" if key in ("[", "]") else "adjust_backing_volume"
-        backend = self.app_state.backend
-        self._run_backend(lambda: getattr(backend, adjust)(delta))
+    def _log_streamdeck(self, message: str) -> None:
+        self.after(0, lambda: self.status_var.set(message) if self.winfo_exists() else None)
 
     # --- async backend calls (thread hop + marshal back onto the Tk thread) ---
 
@@ -156,6 +117,7 @@ class RecordFrame(ttk.Frame):
         self._stop_preview()
         self._current_backend = self.app_state.backend
         self._current_backend.on_event(self._on_backend_event)
+        self._streamdeck_driver.rebind_backend(self._current_backend)
         self._clear_selection()
         self._load()
 
@@ -639,7 +601,7 @@ class RecordFrame(ttk.Frame):
         if self._current_backend is not None:
             self._current_backend.off_event(self._on_backend_event)
         self.app_state.remove_listener(self._on_app_state_changed)
-        self._streamdeck.disconnect()
+        self._streamdeck_driver.disconnect()
 
     # --- recording ---
 
@@ -789,7 +751,6 @@ class RecordFrame(ttk.Frame):
                 if self._phase == "idle":
                     self._refresh_playlist_from_server()
                 self._update_start_button_state()
-                self._streamdeck.update_record_page(self._phase, self._sound_check_phase)
         elif event == "sound_check_status":
             if "status" in data:
                 self.status_var.set(data["status"])
@@ -800,9 +761,11 @@ class RecordFrame(ttk.Frame):
                 self.sound_check_button.state(["!disabled"])
                 self._set_controls_enabled(self._sound_check_phase == "idle")
                 self._update_start_button_state()
-                self._streamdeck.update_record_page(self._phase, self._sound_check_phase)
-                if self._sound_check_phase == "idle" and "result_path" in data:
-                    SoundCheckDialog(self, Path(data["result_path"]), bool(data.get("has_video")))
+                # Dialog opening is handled by _streamdeck_driver's own
+                # on_sound_check_result hook (see _on_streamdeck_sound_check_
+                # result) — it's subscribed to this same event independently,
+                # regardless of whether Sound Check was triggered by mouse or
+                # by the physical Stream Deck.
         elif event == "preview_paused":
             self.preview_label.configure(text="Recording — preview paused", image="")
         elif event == "preview_resumed":
