@@ -71,6 +71,8 @@ class RecordFrame(ttk.Frame):
         if self._streamdeck.connect(self._on_streamdeck_key):
             self._streamdeck.use_ui_record_layout()
             self.after(0, lambda: self._streamdeck.update_record_page(self._phase, self._sound_check_phase))
+        elif self._streamdeck.last_error:
+            print(f"StreamDeck: found a device but could not connect — {self._streamdeck.last_error}")
 
     def _on_streamdeck_key(self, key: str) -> None:
         self.after(0, lambda: self._handle_streamdeck_key(key))

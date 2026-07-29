@@ -382,6 +382,8 @@ def server_command() -> None:
         streamdeck.update_headless_toggle(phase["value"])
         backend.on_event(on_backend_event)
         click.echo("StreamDeck connected.")
+    elif streamdeck.last_error:
+        click.echo(f"StreamDeck: found a device but could not connect — {streamdeck.last_error}")
 
     try:
         while True:

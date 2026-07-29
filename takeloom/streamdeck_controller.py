@@ -203,6 +203,12 @@ class StreamDeckController:
         self._buttons: list[tuple] = []
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
         self._lock = threading.Lock()
+        # Only set when a device was actually found but failed to open/
+        # configure — "no device plugged in" (the common case for anyone
+        # without a Stream Deck) deliberately leaves this unset, so callers
+        # can log a real failure without nagging every user who's never
+        # owned one.
+        self.last_error: str | None = None
 
     @property
     def connected(self) -> bool:
@@ -210,6 +216,7 @@ class StreamDeckController:
 
     def connect(self, key_callback: Callable[[str], None]) -> bool:
         """Open the first available StreamDeck. Returns True if connected."""
+        self.last_error = None
         if not _HAVE_STREAMDECK or not _HAVE_PIL:
             return False
         try:
@@ -233,8 +240,9 @@ class StreamDeckController:
                 self._deck.set_dial_callback(self._on_dial_change)
 
             return True
-        except Exception:
+        except Exception as e:
             self._deck = None
+            self.last_error = f"{type(e).__name__}: {e}"
             return False
 
     def use_inspiration_layout(self, recording: bool = False) -> None:
