@@ -824,7 +824,9 @@ def _recording_context(project=None, config=None):
     sd_keys: queue.Queue[str] = queue.Queue()
     streamdeck = StreamDeckController()
     device_id = config.streamdeck_id if config else ""
-    if streamdeck.connect(sd_keys.put, device_id=device_id):
+    if not device_id:
+        click.echo("Skipping StreamDeck initialization, as none are configured.")
+    elif streamdeck.connect(sd_keys.put, device_id=device_id):
         click.echo("StreamDeck connected.")
     elif streamdeck.last_error:
         click.echo(f"StreamDeck: found a device but could not connect — {streamdeck.last_error}")

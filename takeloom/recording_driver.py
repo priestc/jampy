@@ -59,6 +59,9 @@ class RecordingDeckDriver:
             device_id = self._backend.get_config().streamdeck_id
         except BackendError:
             device_id = ""
+        if not device_id:
+            self._log("Skipping StreamDeck initialization, as none are configured.")
+            return False
         if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
