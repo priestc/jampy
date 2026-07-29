@@ -264,7 +264,11 @@ def ui_command(remote_ip: str | None) -> None:
 
 
 @main.command(name="server")
-def server_command() -> None:
+@click.option(
+    "--disable-color", is_flag=True, default=False,
+    help="Strip ANSI color codes from server log output.",
+)
+def server_command(disable_color: bool) -> None:
     """Run the remote-control server. This is the only way to host a
     takeloom instance for other clients to connect to — the GUI's Remote tab
     is connect-only. Always listens on the fixed remote.protocol.
@@ -277,11 +281,24 @@ def server_command() -> None:
     from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
 
+    def log(msg: str, err: bool = False) -> None:
+        # Errors print in red so they stand out in a scrolling headless log;
+        # everything else stays the terminal's default color. Detected by the
+        # explicit `err` flag or an "error" substring, since most log lines
+        # here (and the ones threaded through RemoteServer/RecordingDeckDriver,
+        # whose `log` callback only takes a message) don't carry a separate
+        # severity of their own.
+        is_error = err or "error" in msg.lower()
+        if disable_color:
+            click.echo(msg, err=err)
+        else:
+            click.secho(msg, fg="red" if is_error else None, err=err)
+
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
 
     def request_authorization(ip: str, client_name: str) -> bool:
-        click.echo(f"\nPairing request from '{client_name}' ({ip})")
+        log(f"\nPairing request from '{client_name}' ({ip})")
         try:
             return click.confirm("Approve this connection?", default=False)
         except click.exceptions.Abort:
@@ -290,22 +307,22 @@ def server_command() -> None:
             # that case and raises instead of returning. Deny rather than
             # let this crash the connection-handler thread with no response
             # ever sent back to the waiting client.
-            click.echo("Cannot prompt for approval (no interactive terminal attached) — denying.")
+            log("Cannot prompt for approval (no interactive terminal attached) — denying.", err=True)
             return False
 
-    server = RemoteServer(backend, listen_port, request_authorization, log=click.echo)
+    server = RemoteServer(backend, listen_port, request_authorization, log=log)
     try:
         server.start()
     except OSError as e:
-        click.echo(f"Error: could not start server: {e}", err=True)
+        log(f"Error: could not start server: {e}", err=True)
         raise SystemExit(1)
 
-    click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
+    log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
     # StreamDeck is checked separately below, via the real connection attempt
     # (driver.connect()), which reports a more specific error than a plain
     # not-found when a device is selected but fails to open.
     for warning in check_configured_devices(backend, include_streamdeck=False):
-        click.echo(warning)
+        log(warning, err=True)
 
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
@@ -315,11 +332,11 @@ def server_command() -> None:
         cfg = backend.get_config()
         project_name, instrument_name = cfg.last_selected_project, cfg.last_selected_instrument
         if not project_name or not instrument_name:
-            click.echo("StreamDeck: no last-used project/instrument — start one from a connected client first.")
+            log("StreamDeck: no last-used project/instrument — start one from a connected client first.")
             return None
         index = backend.next_untaken_track_index(project_name, instrument_name)
         if index is None:
-            click.echo(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
+            log(f"StreamDeck: no more tracks in '{project_name}' need a take for '{instrument_name}'.")
             return None
         return StartRecordingRequest(
             project_name=project_name, instrument_name=instrument_name,
@@ -338,14 +355,14 @@ def server_command() -> None:
 
     driver = RecordingDeckDriver(
         backend, resolve_start_request=_resolve_headless_request,
-        on_sound_check_result=_open_sound_check_result, log=click.echo,
+        on_sound_check_result=_open_sound_check_result, log=log,
     )
     if driver.connect():
-        click.echo("StreamDeck connected.")
+        log("StreamDeck connected.")
     elif driver.streamdeck.last_error:
-        click.echo(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}")
+        log(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}", err=True)
 
-    click.echo("Press Ctrl+C to stop.\n")
+    log("Press Ctrl+C to stop.\n")
 
     try:
         while True:
@@ -353,7 +370,7 @@ def server_command() -> None:
     except KeyboardInterrupt:
         pass
     finally:
-        click.echo("\nStopping server...")
+        log("\nStopping server...")
         server.stop()
         driver.disconnect()
 
