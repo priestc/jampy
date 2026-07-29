@@ -8,6 +8,7 @@ from tkinter import messagebox, ttk
 
 from tkinterdnd2 import TkinterDnD
 
+from ..device_check import check_configured_devices
 from .app_state import AppState
 from .instruments import InstrumentsFrame
 from .latency import LatencyFrame
@@ -36,6 +37,19 @@ def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
     select the given tab. Used both for ordinary local-mode launches and,
     once connected, for an "always connect" remote — the two cases differ
     only in what's on screen before this point, never in the tabs themselves."""
+    # Configured-but-not-connected devices (mic, camera, Stream Deck) — shown
+    # above the notebook so it stays visible no matter which tab is active,
+    # not buried in a single tab's own log. Checked once at startup against
+    # this machine's own config/hardware, even when this instance ends up
+    # remote-controlling another studio (see check_configured_devices).
+    device_warnings = check_configured_devices(app_state.local_backend)
+    if device_warnings:
+        warning_label = ttk.Label(
+            root, text="\n".join(f"⚠ {w}" for w in device_warnings),
+            foreground="#b00020", justify="left", wraplength=1000,
+        )
+        warning_label.pack(fill="x", padx=16, pady=(12, 0))
+
     status_var = tk.StringVar(value="")
     status_label = ttk.Label(root, textvariable=status_var, foreground="#2a6db0")
     status_label.pack(fill="x", padx=16, pady=(12, 0))

@@ -272,6 +272,7 @@ def server_command() -> None:
     only accepts connections from the local network.
     """
     from .backend import LocalBackend, StartRecordingRequest
+    from .device_check import check_configured_devices
     from .recording_driver import RecordingDeckDriver
     from .remote.protocol import REMOTE_SERVER_PORT
     from .remote.server import RemoteServer
@@ -300,7 +301,11 @@ def server_command() -> None:
         raise SystemExit(1)
 
     click.echo(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
-    click.echo("Press Ctrl+C to stop.\n")
+    # StreamDeck is checked separately below, via the real connection attempt
+    # (driver.connect()), which reports a more specific error than a plain
+    # not-found when a device is selected but fails to open.
+    for warning in check_configured_devices(backend, include_streamdeck=False):
+        click.echo(warning)
 
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
@@ -339,6 +344,8 @@ def server_command() -> None:
         click.echo("StreamDeck connected.")
     elif driver.streamdeck.last_error:
         click.echo(f"StreamDeck: found a device but could not connect — {driver.streamdeck.last_error}")
+
+    click.echo("Press Ctrl+C to stop.\n")
 
     try:
         while True:
