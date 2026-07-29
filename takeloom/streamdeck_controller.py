@@ -71,9 +71,14 @@ _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
 ]
 
 _UI_RECORD_BUTTONS: list[tuple] = [
-    (0, None,   None,   "r", None, None,            None),           # record/stop toggle — rendered by update_recording_toggle
+    (0, None,   None,   "r", None, None,            None),           # record/stop toggle — rendered by update_record_page
     (1, "skip", "Next", "n", None, (0,   160, 220), (0,   160, 220)),
 ]
+
+# Sound Check toggle — only appended by use_ui_record_layout() on decks with
+# enough keys past the toggle/Next/volume buttons above (see there for why).
+_SOUND_CHECK_KEY_INDEX = 6
+_SOUND_CHECK_BUTTON: tuple = (_SOUND_CHECK_KEY_INDEX, None, None, "c", None, None, None)  # rendered by update_record_page
 
 _UI_RECORD_VOLUME_BUTTONS: list[tuple] = [
     (2, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
@@ -159,6 +164,10 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
         draw.line([cx - r, cy - r, cx + r, cy + r], fill=f, width=lw)
         draw.line([cx + r, cy - r, cx - r, cy + r], fill=f, width=lw)
 
+    elif icon == "soundcheck":  # ✓
+        draw.line([cx - r, cy, cx - q // 2, cy + r // 2], fill=f, width=lw)
+        draw.line([cx - q // 2, cy + r // 2, cx + r, cy - r], fill=f, width=lw)
+
     elif icon in ("vol_dn", "vol_up"):
         # Speaker box + flared cone, then −/+
         bx = cx - r + r // 4      # right edge of box
@@ -240,13 +249,19 @@ class StreamDeckController:
     def use_ui_record_layout(self) -> None:
         """Switch to the Tkinter Record page's layout: a Record/Unpause/Stop
         toggle plus backing/takes volume controls (dials if available, else
-        buttons)."""
+        buttons), plus a Sound Check toggle where there's room for it."""
         self._buttons = list(_UI_RECORD_BUTTONS)
         if not self._has_dials:
             self._buttons += _UI_RECORD_VOLUME_BUTTONS
         self._dial_map = dict(_SESSION_DIAL_MAP)
         if not self.connected:
             return
+        # Decks with too few keys (e.g. the 6-key Mini, already fully used by
+        # the toggle/Next/volume buttons above) just don't get a physical
+        # Sound Check key — it stays on-screen-only there instead of drawing
+        # past the device's actual key count.
+        if getattr(self._deck, "KEY_COUNT", 0) > _SOUND_CHECK_KEY_INDEX:
+            self._buttons.append(_SOUND_CHECK_BUTTON)
         with self._lock:
             # Blank every key this layout doesn't use — on a dial deck (e.g. the
             # Stream Deck Plus) that's most of them, and left untouched they'd
@@ -367,21 +382,37 @@ class StreamDeckController:
             if self._has_dials:
                 self._update_touchscreen(track_name)
 
-    def update_recording_toggle(self, phase: str) -> None:
-        """Refresh the Record/Unpause/Stop toggle and static buttons for the
-        UI Record page. `phase` is one of "idle", "waiting", "recording"."""
+    def update_record_page(self, phase: str, sound_check_phase: str = "idle") -> None:
+        """Refresh the Record/Unpause/Stop toggle, the Sound Check toggle (if
+        the connected deck has room for one), and static buttons for the UI
+        Record page. Each toggle is dimmed while the other holds the audio/
+        camera hardware — the two are mutually exclusive at the backend level.
+        `phase` is one of "idle"/"waiting"/"recording"; `sound_check_phase`
+        is "idle"/"recording"."""
         if not self.connected:
             return
-        icon, label, color = {
+        record_icon, record_label, record_color = {
             "idle":      ("record", "Record",  (0,   200, 0)),
             "waiting":   ("play",   "Unpause",  (230, 160, 0)),
             "recording": ("stop",   "Stop",     (230, 60,  60)),
         }[phase]
+        if sound_check_phase == "recording":
+            record_color = (40, 40, 40)
+        check_icon, check_label, check_color = {
+            "idle":      ("soundcheck", "Sound Check", (0,   160, 200)),
+            "recording": ("stop",       "Stop",        (230, 60,  60)),
+        }[sound_check_phase]
+        if phase != "idle":
+            check_color = (40, 40, 40)
         with self._lock:
-            self._deck.set_key_image(0, self._make_key_image(icon, label, color))
+            self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
+            if any(btn[0] == _SOUND_CHECK_KEY_INDEX for btn in self._buttons):
+                self._deck.set_key_image(
+                    _SOUND_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
+                )
             for btn in self._buttons:
                 idx, icon, label, _key, _state, active_color, _dim = btn
-                if idx == 0 or icon is None:
+                if idx in (0, _SOUND_CHECK_KEY_INDEX) or icon is None:
                     continue
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
             if self._has_dials:

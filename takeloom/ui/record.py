@@ -16,6 +16,7 @@ from __future__ import annotations
 import io
 import threading
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 
 from ..backend import BackendError, StartRecordingRequest
@@ -26,6 +27,7 @@ from ..utils import format_duration
 from .app_state import AppState
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
+from .sound_check_dialog import SoundCheckDialog
 
 
 class RecordFrame(ttk.Frame):
@@ -46,6 +48,7 @@ class RecordFrame(ttk.Frame):
         self._inspiration_tracks: list[dict] = []
 
         self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
+        self._sound_check_phase = "idle"  # "idle" | "recording"
         self._preview_sub = None
         self._preview_imgtk = None
         self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
@@ -67,7 +70,7 @@ class RecordFrame(ttk.Frame):
     def _connect_streamdeck(self) -> None:
         if self._streamdeck.connect(self._on_streamdeck_key):
             self._streamdeck.use_ui_record_layout()
-            self.after(0, lambda: self._streamdeck.update_recording_toggle(self._phase))
+            self.after(0, lambda: self._streamdeck.update_record_page(self._phase, self._sound_check_phase))
 
     def _on_streamdeck_key(self, key: str) -> None:
         self.after(0, lambda: self._handle_streamdeck_key(key))
@@ -78,6 +81,9 @@ class RecordFrame(ttk.Frame):
         if key == "r":
             if hasattr(self, "record_button") and "disabled" not in self.record_button.state():
                 self._on_toggle_recording()
+        elif key == "c":
+            if hasattr(self, "sound_check_button") and "disabled" not in self.sound_check_button.state():
+                self._on_toggle_sound_check()
         elif key == "n":
             self._advance_to_next_track()
         elif key in ("l", "u", "[", "]"):
@@ -281,6 +287,17 @@ class RecordFrame(ttk.Frame):
         self.record_button.grid(row=row, column=0, columnspan=2, pady=(8, 0))
         if not instrument_names or not self._project_names:
             self.record_button.state(["disabled"])
+        row += 1
+
+        self.sound_check_button = ttk.Button(
+            left, text="Sound Check", command=self._on_toggle_sound_check,
+        )
+        self.sound_check_button.grid(row=row, column=0, columnspan=2, pady=(4, 0))
+        if self.app_state.backend.is_remote():
+            self.sound_check_button.state(["disabled"])
+            self.sound_check_button.grid_remove()
+        elif not instrument_names or not self._project_names:
+            self.sound_check_button.state(["disabled"])
 
     # --- right column: Setlist / Inspiration tabs ---
 
@@ -503,15 +520,24 @@ class RecordFrame(ttk.Frame):
     def _update_start_button_state(self) -> None:
         if not hasattr(self, "record_button"):
             return
-        if self._phase != "idle":
-            self.record_button.state(["!disabled"])
-            return
         ready = (
             bool(self.instrument_var.get())
             and self._project_name is not None
             and self._selected_track_source is not None
         )
-        self.record_button.state(["!disabled"] if ready else ["disabled"])
+        if self._phase != "idle":
+            self.record_button.state(["!disabled"])
+        else:
+            # Also blocked while a sound check has the audio/camera hardware —
+            # the two are mutually exclusive at the backend level.
+            self.record_button.state(["!disabled"] if (ready and self._sound_check_phase == "idle") else ["disabled"])
+
+        if not hasattr(self, "sound_check_button"):
+            return
+        if self._sound_check_phase != "idle":
+            self.sound_check_button.state(["!disabled"])
+        else:
+            self.sound_check_button.state(["!disabled"] if (ready and self._phase == "idle") else ["disabled"])
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "readonly" if enabled else "disabled"
@@ -623,24 +649,33 @@ class RecordFrame(ttk.Frame):
         elif self._phase == "recording":
             self._stop_recording()
 
-    def _start_recording(self) -> None:
+    def _build_selected_request(self) -> StartRecordingRequest | None:
+        """Build a StartRecordingRequest from the current instrument/project/
+        track selection — shared by _start_recording and _start_sound_check,
+        which both act on whatever's currently picked in the Setlist/
+        Inspiration list. Shows an error dialog and returns None if
+        incomplete."""
         instrument_name = self.instrument_var.get()
         if not instrument_name or not self._project_name:
             messagebox.showerror("Cannot start", "Select an instrument and a project first.")
-            return
+            return None
 
         if self._selected_track_source == "playlist" and self._selected_track_index is not None:
-            req = StartRecordingRequest(
+            return StartRecordingRequest(
                 project_name=self._project_name, instrument_name=instrument_name,
                 track_source="playlist", track_index=self._selected_track_index,
             )
         elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
-            req = StartRecordingRequest(
+            return StartRecordingRequest(
                 project_name=self._project_name, instrument_name=instrument_name,
                 track_source="inspiration", inspiration_info=self._selected_inspiration_info,
             )
-        else:
-            messagebox.showerror("Cannot start", "Select a track from the Playlist or Inspiration list first.")
+        messagebox.showerror("Cannot start", "Select a track from the Playlist or Inspiration list first.")
+        return None
+
+    def _start_recording(self) -> None:
+        req = self._build_selected_request()
+        if req is None:
             return
 
         self.record_button.state(["disabled"])
@@ -683,12 +718,61 @@ class RecordFrame(ttk.Frame):
         if error:
             messagebox.showerror("Stop failed", error)
 
+    # --- sound check ---
+
+    def _on_toggle_sound_check(self) -> None:
+        if self._sound_check_phase == "idle":
+            self._start_sound_check()
+        else:
+            self._stop_sound_check()
+
+    def _start_sound_check(self) -> None:
+        req = self._build_selected_request()
+        if req is None:
+            return
+
+        self.sound_check_button.state(["disabled"])
+        self._set_controls_enabled(False)
+        self.status_var.set("Loading...")
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.start_sound_check(req), lambda _result, error: self._on_sound_check_start_result(error)
+        )
+
+    def _on_sound_check_start_result(self, error: str | None) -> None:
+        # On success, the "sound_check_status" event the backend emits before
+        # start_sound_check() returns already updated button/state via
+        # _handle_backend_event — nothing left to do here.
+        if error:
+            messagebox.showerror("Cannot start sound check", error)
+            self._set_controls_enabled(True)
+            self.status_var.set("")
+            self._update_start_button_state()
+
+    def _stop_sound_check(self) -> None:
+        self.sound_check_button.state(["disabled"])
+        backend = self.app_state.backend
+        self._run_backend(
+            lambda: backend.stop_sound_check(), lambda _result, error: self._on_sound_check_stop_result(error)
+        )
+
+    def _on_sound_check_stop_result(self, error: str | None) -> None:
+        self.sound_check_button.state(["!disabled"])
+        if error:
+            messagebox.showerror("Stop failed", error)
+
     # --- backend events (recording_status / preview_paused / preview_resumed) ---
 
     def _on_backend_event(self, event: str, data: dict) -> None:
         self.after(0, lambda: self._handle_backend_event(event, data))
 
     _PHASE_BUTTON_TEXT = {"idle": "Start Recording", "waiting": "Unpause", "recording": "Stop Recording"}
+    _SOUND_CHECK_BUTTON_TEXT = {"idle": "Sound Check", "recording": "Stop Sound Check"}
+
+    def _update_recording_active(self) -> None:
+        self.app_state.recording_active = (
+            self._phase in ("waiting", "recording") or self._sound_check_phase == "recording"
+        )
 
     def _handle_backend_event(self, event: str, data: dict) -> None:
         if event == "recording_status":
@@ -696,14 +780,27 @@ class RecordFrame(ttk.Frame):
                 self.status_var.set(data["status"])
             if "phase" in data:
                 self._phase = data["phase"]
-                self.app_state.recording_active = self._phase in ("waiting", "recording")
+                self._update_recording_active()
                 self.record_button.configure(text=self._PHASE_BUTTON_TEXT[self._phase])
                 self.record_button.state(["!disabled"])
                 self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
                     self._refresh_playlist_from_server()
                 self._update_start_button_state()
-                self._streamdeck.update_recording_toggle(self._phase)
+                self._streamdeck.update_record_page(self._phase, self._sound_check_phase)
+        elif event == "sound_check_status":
+            if "status" in data:
+                self.status_var.set(data["status"])
+            if "phase" in data:
+                self._sound_check_phase = data["phase"]
+                self._update_recording_active()
+                self.sound_check_button.configure(text=self._SOUND_CHECK_BUTTON_TEXT[self._sound_check_phase])
+                self.sound_check_button.state(["!disabled"])
+                self._set_controls_enabled(self._sound_check_phase == "idle")
+                self._update_start_button_state()
+                self._streamdeck.update_record_page(self._phase, self._sound_check_phase)
+                if self._sound_check_phase == "idle" and "result_path" in data:
+                    SoundCheckDialog(self, Path(data["result_path"]), bool(data.get("has_video")))
         elif event == "preview_paused":
             self.preview_label.configure(text="Recording — preview paused", image="")
         elif event == "preview_resumed":

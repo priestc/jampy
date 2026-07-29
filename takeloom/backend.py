@@ -176,6 +176,19 @@ class Backend(ABC):
     @abstractmethod
     def stop_latency_test(self) -> None: ...
 
+    # --- sound check (local-only; RemoteBackend refuses) ---
+
+    @abstractmethod
+    def start_sound_check(self, req: StartRecordingRequest) -> None:
+        """Impromptu, throwaway recording against the currently selected
+        backing track (same track/instrument selection as start_recording),
+        for the performer to verify mic/camera/levels are set up correctly.
+        Never touches the project's completed_takes_dir or setlist."""
+        ...
+
+    @abstractmethod
+    def stop_sound_check(self) -> None: ...
+
 
 class _CameraPreviewManager:
     """Owns the single physical camera's capture loop and fans JPEG frames out
@@ -352,6 +365,17 @@ class _ActiveLatencyTest:
     camera_paired_with_preview: bool  # True if this test's camera is the one open_camera_preview streams
 
 
+@dataclass
+class _ActiveSoundCheck:
+    engine: object
+    video_recorder: object | None
+    take_path: Path
+    video_raw: Path | None
+    mix_flac: Path | None
+    final_video: Path | None
+    camera_paired_with_preview: bool  # True if this check's camera is the one open_camera_preview streams
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -362,6 +386,7 @@ class LocalBackend(Backend):
         self._record_lock = threading.Lock()
         self._active_recording: _ActiveRecording | None = None
         self._active_latency_test: _ActiveLatencyTest | None = None
+        self._active_sound_check: _ActiveSoundCheck | None = None
         self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -567,7 +592,11 @@ class LocalBackend(Backend):
 
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
-            if self._active_recording is not None or self._active_latency_test is not None:
+            if (
+                self._active_recording is not None
+                or self._active_latency_test is not None
+                or self._active_sound_check is not None
+            ):
                 raise BackendError("Another recording is already in progress.")
 
             config = self.get_config()
@@ -887,7 +916,11 @@ class LocalBackend(Backend):
 
     def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None:
         with self._record_lock:
-            if self._active_recording is not None or self._active_latency_test is not None:
+            if (
+                self._active_recording is not None
+                or self._active_latency_test is not None
+                or self._active_sound_check is not None
+            ):
                 raise BackendError("Another recording is already in progress.")
             if not camera_device:
                 raise BackendError("Select a camera first.")
@@ -1033,4 +1066,198 @@ class LocalBackend(Backend):
                 "phase": "idle",
                 "status": "Test recording opened for review — adjust the offsets below and Save.",
                 "video_path": str(active.final_video),
+            })
+
+    # --- sound check (local-only; RemoteBackend refuses) ---
+
+    def start_sound_check(self, req: StartRecordingRequest) -> None:
+        with self._record_lock:
+            if (
+                self._active_recording is not None
+                or self._active_latency_test is not None
+                or self._active_sound_check is not None
+            ):
+                raise BackendError("Another recording is already in progress.")
+
+            config = self.get_config()
+            project = self._open_project(req.project_name)
+
+            inst = config.get_instrument(req.instrument_name)
+            if inst is None:
+                raise BackendError(f"Instrument '{req.instrument_name}' not found.")
+
+            if req.track_source == "playlist":
+                if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
+                    raise BackendError("Invalid track selection.")
+                track = project.setlist.tracks[req.track_index]
+            elif req.track_source == "inspiration":
+                if not req.inspiration_info:
+                    raise BackendError("No inspiration track selected.")
+                from .inspiration import find_or_add_inspiration_track
+                # Only mutates this call's in-memory Project — sound check never
+                # calls save_setlist(), so this never actually lands on disk.
+                track = find_or_add_inspiration_track(project, req.inspiration_info)
+            else:
+                raise BackendError("Select a track from the Playlist or Inspiration list first.")
+
+            input_info = config.resolve_input(inst.input_label)
+            if input_info is None:
+                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
+
+            backing_path = project.backing_tracks_dir / track.backing_track
+            if track.inspiration_track_id and not backing_path.exists():
+                from .inspiration import InspirationError, download_inspiration_track
+                self._emit("sound_check_status", {"status": f"Downloading '{track.name}'..."})
+                try:
+                    download_inspiration_track(track, backing_path, config)
+                except InspirationError as e:
+                    raise BackendError(str(e)) from e
+
+            try:
+                import sounddevice as sd
+            except Exception as e:
+                raise BackendError(f"sounddevice unavailable: {e}") from e
+
+            from .audio.devices import resolve_device
+            out_dev = resolve_device(sd, config.output_device, "output")
+            in_dev = resolve_device(sd, input_info.device, "input")
+            if in_dev is None:
+                raise BackendError(f"Input device '{input_info.device}' not found.")
+            if config.output_device and out_dev is None:
+                raise BackendError(f"Output device '{config.output_device}' not found.")
+
+            in_info = sd.query_devices(in_dev, "input")
+            out_info = sd.query_devices(out_dev, "output")
+            max_in = in_info["max_input_channels"]
+            if input_info.channel > max_in:
+                raise BackendError(
+                    f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                    f"but device only has {max_in} channels."
+                )
+            output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+            from .audio.engine import AudioEngine
+            engine = AudioEngine(
+                sample_rate=config.sample_rate,
+                buffer_size=config.buffer_size,
+                input_device=in_dev,
+                output_device=out_dev,
+                input_channels=max(input_info.channel, 1),
+                output_channels=max(1, output_channels),
+                monitor_channel=input_info.channel - 1,
+            )
+
+            if backing_path.exists():
+                engine.mixer.add_source("backing", backing_path, volume=self._backing_volume / 100.0)
+
+            trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
+            for other_inst, take_info in track.preferred_takes.items():
+                if other_inst.lower() == inst.name.lower():
+                    continue
+                take_path = project.completed_takes_dir / take_info.filename
+                if take_path.exists():
+                    effective_vol = take_info.volume * (self._takes_volume / 100.0)
+                    engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
+
+            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_sound_check")
+            take_path = work_dir / "instrument.flac"
+            video_raw = work_dir / "video_raw.mp4"
+            mix_flac = work_dir / "mix.flac"
+            final_video = work_dir / "result.mp4"
+
+            engine.start()
+            engine.mixer.reset()
+            engine.mixer.set_playing(True)
+            engine.start_recording(take_path)
+            engine.set_on_song_end(self._on_sound_check_naturally_ended)
+
+            video_recorder = None
+            camera_paired_with_preview = False
+            if config.camera_device:
+                from .video.capture import VideoRecorder, ffmpeg_available
+                if ffmpeg_available():
+                    # Sound check always uses the configured camera (unlike the
+                    # latency test, which lets the operator pick a different one
+                    # to test), so it's always the same device open_camera_preview
+                    # streams — the preview must be paused to free it for ffmpeg.
+                    camera_paired_with_preview = True
+                    self._preview.pause()
+                    self._emit("preview_paused", {})
+                    video_recorder = VideoRecorder(config.camera_device, video_raw)
+                    if video_recorder.start():
+                        engine.start_mix_recording(mix_flac)
+                    else:
+                        video_recorder = None
+                        self._preview.resume()
+                        self._emit("preview_resumed", {})
+                        camera_paired_with_preview = False
+
+            self._active_sound_check = _ActiveSoundCheck(
+                engine=engine, video_recorder=video_recorder, take_path=take_path,
+                video_raw=video_raw if video_recorder else None,
+                mix_flac=mix_flac if video_recorder else None,
+                final_video=final_video if video_recorder else None,
+                camera_paired_with_preview=camera_paired_with_preview,
+            )
+            self._emit("sound_check_status", {
+                "phase": "recording",
+                "status": f"Sound check — playing '{track.name}'...",
+                "track_name": track.name,
+            })
+
+    def stop_sound_check(self) -> None:
+        with self._record_lock:
+            active = self._active_sound_check
+            if active is None:
+                raise BackendError("No sound check in progress.")
+            self._active_sound_check = None
+            self._finish_sound_check(active)
+
+    def _on_sound_check_naturally_ended(self) -> None:
+        with self._record_lock:
+            active = self._active_sound_check
+            if active is None:
+                return
+            self._active_sound_check = None
+            self._finish_sound_check(active)
+
+    def _finish_sound_check(self, active: "_ActiveSoundCheck") -> None:
+        """Tear down an in-progress sound check. Called with self._record_lock
+        held and self._active_sound_check already cleared."""
+        active.engine.set_on_song_end(None)
+        active.engine.stop_recording()
+        active.engine.mixer.set_playing(False)
+        active.engine.stop()
+        if active.video_recorder:
+            active.video_recorder.stop()
+
+        if active.camera_paired_with_preview:
+            self._preview.resume()
+            self._emit("preview_resumed", {})
+
+        if active.video_recorder and active.video_raw and active.mix_flac and active.final_video:
+            from .video.capture import mux_video_audio
+            video_offset_ms = self.get_config().video_latency_compensation_ms
+            ok = mux_video_audio(
+                active.video_raw, active.mix_flac, active.take_path, active.final_video,
+                video_offset_ms=video_offset_ms,
+            )
+            active.video_raw.unlink(missing_ok=True)
+            active.mix_flac.unlink(missing_ok=True)
+            active.take_path.unlink(missing_ok=True)
+            if not ok:
+                self._emit("sound_check_status", {"phase": "idle", "status": "Video mux failed."})
+                raise BackendError("Could not combine video and audio.")
+            self._emit("sound_check_status", {
+                "phase": "idle",
+                "status": "Sound check recorded — review it, then close the window to discard it.",
+                "result_path": str(active.final_video),
+                "has_video": True,
+            })
+        else:
+            self._emit("sound_check_status", {
+                "phase": "idle",
+                "status": "Sound check recorded — review it, then close the window to discard it.",
+                "result_path": str(active.take_path),
+                "has_video": False,
             })

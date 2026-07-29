@@ -162,6 +162,14 @@ class RemoteBackend(Backend):
     def stop_latency_test(self) -> None:
         raise BackendError("Camera latency measurement isn't available over Remote connections yet.")
 
+    # --- sound check (not supported over Remote; see RecordFrame) ---
+
+    def start_sound_check(self, req: StartRecordingRequest) -> None:
+        raise BackendError("Sound check isn't available over Remote connections yet.")
+
+    def stop_sound_check(self) -> None:
+        raise BackendError("Sound check isn't available over Remote connections yet.")
+
     def _unsubscribe_preview(self, on_frame: FrameCallback) -> None:
         with self._preview_lock:
             if on_frame in self._preview_callbacks:
