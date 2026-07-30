@@ -100,6 +100,12 @@ class StudioConfig:
     camera_label: str = ""   # human-friendly camera name, for display only
     streamdeck_id: str = ""     # serial number of the selected physical Stream Deck; empty = don't connect to one
     streamdeck_label: str = ""  # human-friendly Stream Deck name, for display only
+    compressor_enabled: bool = False
+    compressor_threshold_db: float = -24.0
+    compressor_ratio: float = 4.0
+    compressor_attack_ms: float = 10.0
+    compressor_release_ms: float = 150.0
+    compressor_makeup_db: float = 0.0
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to

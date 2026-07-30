@@ -11,6 +11,7 @@ import sounddevice as sd
 
 from .recorder import Recorder
 from .mixer import Mixer
+from .filters import Compressor, CompressorSettings
 
 
 class AudioEngine:
@@ -29,6 +30,7 @@ class AudioEngine:
         input_channels: int = 1,
         output_channels: int = 2,
         monitor_channel: int = 0,
+        compressor_settings: CompressorSettings | None = None,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -42,6 +44,7 @@ class AudioEngine:
         self.session_recorder: Recorder | None = None
         self.mix_recorder: Recorder | None = None
         self.mixer = Mixer(sample_rate)
+        self.compressor = Compressor(sample_rate, compressor_settings)
         self._stream: sd.Stream | None = None
         self._running = False
         self._peak_level: float = 0.0
@@ -59,6 +62,12 @@ class AudioEngine:
     def set_on_song_end(self, callback: Callable[[], None] | None) -> None:
         """Set callback invoked when mixer reaches end of backing track."""
         self._on_song_end = callback
+
+    def set_compressor_settings(self, settings: CompressorSettings) -> None:
+        """Swap in new compressor settings, live — safe to call from any
+        thread; the audio callback reads self.compressor.settings once per
+        block, so this takes effect on the very next block."""
+        self.compressor.settings = settings
 
     def start_session_recording(self, output_path: Path) -> None:
         """Start the continuous session-level recorder."""
@@ -107,6 +116,7 @@ class AudioEngine:
         # Capture mono input from the instrument's channel
         ch = self.monitor_channel
         mono = indata[:, ch:ch+1].copy()
+        mono = self.compressor.process(mono)
 
         # Record input to disk
         if self.session_recorder:

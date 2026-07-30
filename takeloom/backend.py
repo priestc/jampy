@@ -21,10 +21,11 @@ import socket
 import tempfile
 import threading
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .audio.filters import CompressorSettings
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, next_take_number, take_filename, timestamp_now, wall_timestamp
@@ -183,6 +184,22 @@ class Backend(ABC):
 
     @abstractmethod
     def adjust_takes_volume(self, delta: int) -> None: ...
+
+    # --- audio filters (compressor now, more later) ---
+
+    @abstractmethod
+    def get_compressor_settings(self) -> dict:
+        """Current compressor settings (enabled + threshold/ratio/attack/
+        release/makeup gain), applied to the instrument input before it's
+        recorded or monitored."""
+        ...
+
+    @abstractmethod
+    def set_compressor_settings(self, settings: dict) -> None:
+        """Update compressor settings — persisted for next time, and applied
+        immediately to whatever recording/sound-check/session engine is
+        currently running (mirrors adjust_backing_volume/adjust_takes_volume)."""
+        ...
 
     @abstractmethod
     def on_event(self, callback: EventCallback) -> None: ...
@@ -498,12 +515,45 @@ class LocalBackend(Backend):
         config = self.get_config()
         self._backing_volume: int = config.last_backing_volume
         self._takes_volume: int = config.last_takes_volume
+        self._compressor_settings = CompressorSettings(
+            enabled=config.compressor_enabled,
+            threshold_db=config.compressor_threshold_db,
+            ratio=config.compressor_ratio,
+            attack_ms=config.compressor_attack_ms,
+            release_ms=config.compressor_release_ms,
+            makeup_gain_db=config.compressor_makeup_db,
+        )
 
     def _save_last_volumes(self) -> None:
         config = self.get_config()
         config.last_backing_volume = self._backing_volume
         config.last_takes_volume = self._takes_volume
         config.save(self._config_path)
+
+    def _save_compressor_settings(self) -> None:
+        config = self.get_config()
+        s = self._compressor_settings
+        config.compressor_enabled = s.enabled
+        config.compressor_threshold_db = s.threshold_db
+        config.compressor_ratio = s.ratio
+        config.compressor_attack_ms = s.attack_ms
+        config.compressor_release_ms = s.release_ms
+        config.compressor_makeup_db = s.makeup_gain_db
+        config.save(self._config_path)
+
+    def _get_active_engine(self):
+        """Whichever AudioEngine is currently live, if any — used to apply a
+        settings change (e.g. the compressor) immediately rather than only on
+        the next recording/sound-check/session start."""
+        if self._active_recording is not None:
+            return self._active_recording.engine
+        if self._active_session is not None:
+            return self._active_session.engine
+        if self._active_sound_check is not None:
+            return self._active_sound_check.engine
+        if self._active_latency_test is not None:
+            return self._active_latency_test.engine
+        return None
 
     def hostname(self) -> str:
         return socket.gethostname()
@@ -698,6 +748,19 @@ class LocalBackend(Backend):
             self._save_last_volumes()
             self._emit("recording_status", {"status": f"Takes volume: {track.takes_volume}%"})
 
+    # --- audio filters (compressor now, more later) ---
+
+    def get_compressor_settings(self) -> dict:
+        return asdict(self._compressor_settings)
+
+    def set_compressor_settings(self, settings: dict) -> None:
+        with self._record_lock:
+            self._compressor_settings = CompressorSettings(**settings)
+            self._save_compressor_settings()
+            engine = self._get_active_engine()
+            if engine is not None:
+                engine.set_compressor_settings(self._compressor_settings)
+
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
             if (
@@ -799,6 +862,7 @@ class LocalBackend(Backend):
                     input_channels=max(input_info.channel, 1),
                     output_channels=max(1, output_channels),
                     monitor_channel=input_info.channel - 1,
+                    compressor_settings=self._compressor_settings,
                 )
 
             # The remembered mixer level (this run's, or carried over from the
@@ -1145,6 +1209,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
+                compressor_settings=self._compressor_settings,
             )
             if play_metronome:
                 engine.mixer.add_source("metronome", metronome_wav)
@@ -1303,6 +1368,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
+                compressor_settings=self._compressor_settings,
             )
 
             if backing_path.exists():
@@ -1469,6 +1535,7 @@ class LocalBackend(Backend):
                 input_channels=max(input_info.channel, 1),
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
+                compressor_settings=self._compressor_settings,
             )
             engine.start()
 

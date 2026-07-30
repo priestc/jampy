@@ -97,4 +97,9 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "adjust_takes_volume":
         backend.adjust_takes_volume(args["delta"])
         return {}
+    if op == "get_compressor_settings":
+        return {"settings": backend.get_compressor_settings()}
+    if op == "set_compressor_settings":
+        backend.set_compressor_settings(args["settings"])
+        return {}
     raise BackendError(f"Unknown operation: {op}")

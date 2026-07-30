@@ -138,6 +138,14 @@ class RemoteBackend(Backend):
     def adjust_takes_volume(self, delta: int) -> None:
         self._client.call("adjust_takes_volume", {"delta": delta})
 
+    # --- audio filters ---
+
+    def get_compressor_settings(self) -> dict:
+        return self._client.call("get_compressor_settings", {})["settings"]
+
+    def set_compressor_settings(self, settings: dict) -> None:
+        self._client.call("set_compressor_settings", {"settings": settings})
+
     def on_event(self, callback: EventCallback) -> None:
         self._event_callbacks.append(callback)
 
