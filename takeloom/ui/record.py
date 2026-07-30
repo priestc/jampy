@@ -28,7 +28,7 @@ from ..utils import format_duration
 from .app_state import AppState
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
-from .sound_check_dialog import SoundCheckDialog
+from .video_check_dialog import VideoCheckDialog
 
 
 class RecordFrame(ttk.Frame):
@@ -49,7 +49,8 @@ class RecordFrame(ttk.Frame):
         self._inspiration_tracks: list[dict] = []
 
         self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
-        self._sound_check_phase = "idle"  # "idle" | "recording"
+        self._video_check_phase = "idle"  # "idle" | "recording"
+        self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
         self._preview_imgtk = None
         self._preview_width = 0  # current width available for the preview label, tracked via <Configure>
@@ -58,7 +59,7 @@ class RecordFrame(ttk.Frame):
         self._streamdeck_driver = RecordingDeckDriver(
             self.app_state.backend,
             resolve_start_request=self._build_selected_request,
-            on_sound_check_result=self._on_streamdeck_sound_check_result,
+            on_video_check_result=self._on_streamdeck_video_check_result,
             log=self._log_streamdeck,
         )
         self.app_state.add_listener(self._on_app_state_changed)
@@ -83,12 +84,12 @@ class RecordFrame(ttk.Frame):
 
     def _on_streamdeck_key(self, key: str) -> None:
         # Marshal onto the Tk thread before the driver runs — resolve_start_
-        # request() reads Tk StringVars and on_sound_check_result() may open
+        # request() reads Tk StringVars and on_video_check_result() may open
         # a Toplevel, neither of which is safe off the Tk thread.
         self.after(0, lambda: self._streamdeck_driver.handle_key(key))
 
-    def _on_streamdeck_sound_check_result(self, path: Path, has_video: bool) -> None:
-        self.after(0, lambda: SoundCheckDialog(self, path, has_video) if self.winfo_exists() else None)
+    def _on_streamdeck_video_check_result(self, path: Path, has_video: bool) -> None:
+        self.after(0, lambda: VideoCheckDialog(self, path, has_video) if self.winfo_exists() else None)
 
     def _log_streamdeck(self, message: str) -> None:
         def apply() -> None:
@@ -133,12 +134,16 @@ class RecordFrame(ttk.Frame):
         backend = self.app_state.backend
 
         def on_done(result: tuple | None, error: str | None) -> None:
-            config, projects = result if result is not None else (None, [])
-            self._on_loaded(config, projects, error)
+            config, projects, monitoring_mode = result if result is not None else (None, [], "production")
+            self._on_loaded(config, projects, monitoring_mode, error)
 
-        self._run_backend(lambda: (backend.get_config(), backend.list_projects()), on_done)
+        self._run_backend(
+            lambda: (backend.get_config(), backend.list_projects(), backend.get_monitoring_mode()), on_done
+        )
 
-    def _on_loaded(self, config: StudioConfig | None, projects: list[str], error: str | None) -> None:
+    def _on_loaded(
+        self, config: StudioConfig | None, projects: list[str], monitoring_mode: str, error: str | None,
+    ) -> None:
         if not self.winfo_exists():
             return  # app closed (or frame torn down) before this load finished
         for child in self.winfo_children():
@@ -148,6 +153,7 @@ class RecordFrame(ttk.Frame):
             return
         self.config_obj = config
         self._project_names = projects
+        self._monitoring_mode = monitoring_mode
 
         left = ttk.Frame(self)
         left.grid(row=0, column=0, sticky="new", padx=(0, 10))
@@ -241,6 +247,7 @@ class RecordFrame(ttk.Frame):
         self.backing_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         row += 1
 
+        row = self._build_monitoring_mode(left, row)
         row = self._build_audio_filters(left, row)
 
         self.selection_var = tk.StringVar(value="No track selected")
@@ -259,15 +266,70 @@ class RecordFrame(ttk.Frame):
             self.record_button.state(["disabled"])
         row += 1
 
-        self.sound_check_button = ttk.Button(
-            left, text="Sound Check", command=self._on_toggle_sound_check,
+        self.video_check_button = ttk.Button(
+            left, text="Video Check", command=self._on_toggle_video_check,
         )
-        self.sound_check_button.grid(row=row, column=0, columnspan=2, pady=(4, 0))
+        self.video_check_button.grid(row=row, column=0, columnspan=2, pady=(4, 0))
         if self.app_state.backend.is_remote():
-            self.sound_check_button.state(["disabled"])
-            self.sound_check_button.grid_remove()
+            self.video_check_button.state(["disabled"])
+            self.video_check_button.grid_remove()
         elif not instrument_names or not self._project_names:
-            self.sound_check_button.state(["disabled"])
+            self.video_check_button.state(["disabled"])
+
+    # --- live monitoring mode (Record page headphone mix) ---
+
+    def _build_monitoring_mode(self, left: ttk.Frame, row: int) -> int:
+        ttk.Label(left, text="Monitoring", font=("TkDefaultFont", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(0, 2)
+        )
+        row += 1
+
+        self.monitoring_mode_var = tk.StringVar(value=self._monitoring_mode)
+        mode_row = ttk.Frame(left)
+        mode_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0))
+        row += 1
+        ttk.Radiobutton(
+            mode_row, text="Production Monitoring", variable=self.monitoring_mode_var,
+            value="production", command=self._on_monitoring_mode_change,
+        ).pack(side="left")
+        ttk.Radiobutton(
+            mode_row, text="Recording Monitoring", variable=self.monitoring_mode_var,
+            value="recording", command=self._on_monitoring_mode_change,
+        ).pack(side="left", padx=(12, 0))
+
+        self.monitoring_hint_var = tk.StringVar()
+        ttk.Label(
+            left, textvariable=self.monitoring_hint_var, foreground="#666666", wraplength=360,
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 8))
+        row += 1
+        self._update_monitoring_hint()
+        return row
+
+    def _update_monitoring_hint(self) -> None:
+        if not hasattr(self, "monitoring_hint_var"):
+            return
+        if self.monitoring_mode_var.get() == "production":
+            hint = (
+                "Headphones hear exactly what's going into the take's Mix track. "
+                "There's no known way to flip your audio interface's own Direct "
+                "Monitor from here — turn it off yourself, or you'll also hear a "
+                "raw, unprocessed copy of the instrument layered on top."
+            )
+        else:
+            hint = (
+                "Headphones drop the instrument from the software mix — turn on "
+                "your audio interface's own Direct Monitor for zero-latency "
+                "instrument monitoring while you actually play. (Video Check "
+                "always uses this mode, regardless of what's selected here.)"
+            )
+        self.monitoring_hint_var.set(hint)
+
+    def _on_monitoring_mode_change(self) -> None:
+        mode = self.monitoring_mode_var.get()
+        self._monitoring_mode = mode
+        self._update_monitoring_hint()
+        backend = self.app_state.backend
+        self._run_backend(lambda: backend.set_monitoring_mode(mode))
 
     # --- audio filters (compressor now, more later) ---
 
@@ -609,16 +671,16 @@ class RecordFrame(ttk.Frame):
         if self._phase != "idle":
             self.record_button.state(["!disabled"])
         else:
-            # Also blocked while a sound check has the audio/camera hardware —
+            # Also blocked while a video check has the audio/camera hardware —
             # the two are mutually exclusive at the backend level.
-            self.record_button.state(["!disabled"] if (ready and self._sound_check_phase == "idle") else ["disabled"])
+            self.record_button.state(["!disabled"] if (ready and self._video_check_phase == "idle") else ["disabled"])
 
-        if not hasattr(self, "sound_check_button"):
+        if not hasattr(self, "video_check_button"):
             return
-        if self._sound_check_phase != "idle":
-            self.sound_check_button.state(["!disabled"])
+        if self._video_check_phase != "idle":
+            self.video_check_button.state(["!disabled"])
         else:
-            self.sound_check_button.state(["!disabled"] if (ready and self._phase == "idle") else ["disabled"])
+            self.video_check_button.state(["!disabled"] if (ready and self._phase == "idle") else ["disabled"])
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         state = "readonly" if enabled else "disabled"
@@ -732,7 +794,7 @@ class RecordFrame(ttk.Frame):
 
     def _build_selected_request(self) -> StartRecordingRequest | None:
         """Build a StartRecordingRequest from the current instrument/project/
-        track selection — shared by _start_recording and _start_sound_check,
+        track selection — shared by _start_recording and _start_video_check,
         which both act on whatever's currently picked in the Setlist/
         Inspiration list. Shows an error dialog and returns None if
         incomplete."""
@@ -799,46 +861,46 @@ class RecordFrame(ttk.Frame):
         if error:
             messagebox.showerror("Stop failed", error)
 
-    # --- sound check ---
+    # --- video check ---
 
-    def _on_toggle_sound_check(self) -> None:
-        if self._sound_check_phase == "idle":
-            self._start_sound_check()
+    def _on_toggle_video_check(self) -> None:
+        if self._video_check_phase == "idle":
+            self._start_video_check()
         else:
-            self._stop_sound_check()
+            self._stop_video_check()
 
-    def _start_sound_check(self) -> None:
+    def _start_video_check(self) -> None:
         req = self._build_selected_request()
         if req is None:
             return
 
-        self.sound_check_button.state(["disabled"])
+        self.video_check_button.state(["disabled"])
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.start_sound_check(req), lambda _result, error: self._on_sound_check_start_result(error)
+            lambda: backend.start_video_check(req), lambda _result, error: self._on_video_check_start_result(error)
         )
 
-    def _on_sound_check_start_result(self, error: str | None) -> None:
-        # On success, the "sound_check_status" event the backend emits before
-        # start_sound_check() returns already updated button/state via
+    def _on_video_check_start_result(self, error: str | None) -> None:
+        # On success, the "video_check_status" event the backend emits before
+        # start_video_check() returns already updated button/state via
         # _handle_backend_event — nothing left to do here.
         if error:
-            messagebox.showerror("Cannot start sound check", error)
+            messagebox.showerror("Cannot start video check", error)
             self._set_controls_enabled(True)
             self.status_var.set("")
             self._update_start_button_state()
 
-    def _stop_sound_check(self) -> None:
-        self.sound_check_button.state(["disabled"])
+    def _stop_video_check(self) -> None:
+        self.video_check_button.state(["disabled"])
         backend = self.app_state.backend
         self._run_backend(
-            lambda: backend.stop_sound_check(), lambda _result, error: self._on_sound_check_stop_result(error)
+            lambda: backend.stop_video_check(), lambda _result, error: self._on_video_check_stop_result(error)
         )
 
-    def _on_sound_check_stop_result(self, error: str | None) -> None:
-        self.sound_check_button.state(["!disabled"])
+    def _on_video_check_stop_result(self, error: str | None) -> None:
+        self.video_check_button.state(["!disabled"])
         if error:
             messagebox.showerror("Stop failed", error)
 
@@ -848,11 +910,11 @@ class RecordFrame(ttk.Frame):
         self.after(0, lambda: self._handle_backend_event(event, data))
 
     _PHASE_BUTTON_TEXT = {"idle": "Start Recording", "waiting": "Unpause", "recording": "Stop Recording"}
-    _SOUND_CHECK_BUTTON_TEXT = {"idle": "Sound Check", "recording": "Stop Sound Check"}
+    _VIDEO_CHECK_BUTTON_TEXT = {"idle": "Video Check", "recording": "Stop Video Check"}
 
     def _update_recording_active(self) -> None:
         self.app_state.recording_active = (
-            self._phase in ("waiting", "recording") or self._sound_check_phase == "recording"
+            self._phase in ("waiting", "recording") or self._video_check_phase == "recording"
         )
 
     def _handle_backend_event(self, event: str, data: dict) -> None:
@@ -868,20 +930,20 @@ class RecordFrame(ttk.Frame):
                 if self._phase == "idle":
                     self._refresh_playlist_from_server()
                 self._update_start_button_state()
-        elif event == "sound_check_status":
+        elif event == "video_check_status":
             if "status" in data:
                 self.status_var.set(data["status"])
             if "phase" in data:
-                self._sound_check_phase = data["phase"]
+                self._video_check_phase = data["phase"]
                 self._update_recording_active()
-                self.sound_check_button.configure(text=self._SOUND_CHECK_BUTTON_TEXT[self._sound_check_phase])
-                self.sound_check_button.state(["!disabled"])
-                self._set_controls_enabled(self._sound_check_phase == "idle")
+                self.video_check_button.configure(text=self._VIDEO_CHECK_BUTTON_TEXT[self._video_check_phase])
+                self.video_check_button.state(["!disabled"])
+                self._set_controls_enabled(self._video_check_phase == "idle")
                 self._update_start_button_state()
                 # Dialog opening is handled by _streamdeck_driver's own
-                # on_sound_check_result hook (see _on_streamdeck_sound_check_
+                # on_video_check_result hook (see _on_streamdeck_video_check_
                 # result) — it's subscribed to this same event independently,
-                # regardless of whether Sound Check was triggered by mouse or
+                # regardless of whether Video Check was triggered by mouse or
                 # by the physical Stream Deck.
         elif event == "preview_paused":
             self.preview_label.configure(text="Recording — preview paused", image="")

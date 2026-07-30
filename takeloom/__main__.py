@@ -343,7 +343,7 @@ def server_command(disable_color: bool) -> None:
             track_source="playlist", track_index=index,
         )
 
-    def _open_sound_check_result(path: Path, has_video: bool) -> None:
+    def _open_video_check_result(path: Path, has_video: bool) -> None:
         # Always open locally — the server is often where the real
         # monitoring (headphones/speakers) actually lives, so whoever's
         # sitting at it needs to review the result too, not just whoever's
@@ -354,11 +354,11 @@ def server_command(disable_color: bool) -> None:
         from .video.capture import open_in_default_player
         open_in_default_player(path)
         if server.client_count > 0:
-            server.broadcast_file("sound_check_video", path, extra={"has_video": has_video})
+            server.broadcast_file("video_check_result", path, extra={"has_video": has_video})
 
     driver = RecordingDeckDriver(
         backend, resolve_start_request=_resolve_headless_request,
-        on_sound_check_result=_open_sound_check_result, log=log,
+        on_video_check_result=_open_video_check_result, log=log,
     )
     if driver.connect():
         log("StreamDeck connected.")
@@ -728,7 +728,7 @@ def start_session(instrument: str) -> None:
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
-    click.echo("Controls: [r] record/unpause/stop  [c] sound check  [n]ext track  [b] restart take")
+    click.echo("Controls: [r] record/unpause/stop  [c] video check  [n]ext track  [b] restart take")
     click.echo("          [l]ower volume  [u]p volume  [[]lower takes  []]raise takes")
     click.echo("          [q]uit\n")
 
@@ -748,13 +748,13 @@ def start_session(instrument: str) -> None:
             track_source="playlist", track_index=index,
         )
 
-    def _open_sound_check_result(path: Path, has_video: bool) -> None:
+    def _open_video_check_result(path: Path, has_video: bool) -> None:
         from .video.capture import open_in_default_player
         open_in_default_player(path)
 
     driver = RecordingDeckDriver(
         backend, resolve_start_request=_resolve_cli_request,
-        on_sound_check_result=_open_sound_check_result, log=click.echo,
+        on_video_check_result=_open_video_check_result, log=click.echo,
     )
     if driver.connect():
         click.echo("StreamDeck connected.")

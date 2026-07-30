@@ -10,8 +10,8 @@ Tk-specific, nothing terminal-specific. A context supplies two hooks:
   "r" (idle) or "c" is pressed. The Tk UI answers from whatever's selected
   in its Setlist/Inspiration picker; the headless server and CLI answer
   from the last-used project/instrument plus the next untaken track.
-- `on_sound_check_result(path, has_video)`: how to hand off a finished
-  sound check. The Tk UI opens a review dialog; headless/CLI open the OS
+- `on_video_check_result(path, has_video)`: how to hand off a finished
+  video check. The Tk UI opens a review dialog; headless/CLI open the OS
   default player directly (no GUI to pop a window in).
 
 Both hooks — and `log()` — may be called from a background thread (the
@@ -36,16 +36,16 @@ class RecordingDeckDriver:
         self,
         backend: Backend,
         resolve_start_request: Callable[[], StartRecordingRequest | None],
-        on_sound_check_result: Callable[[Path, bool], None] | None = None,
+        on_video_check_result: Callable[[Path, bool], None] | None = None,
         log: Callable[[str], None] | None = None,
     ) -> None:
         self._backend = backend
         self._resolve_start_request = resolve_start_request
-        self._on_sound_check_result = on_sound_check_result
+        self._on_video_check_result = on_video_check_result
         self._log = log or (lambda msg: None)
         self.streamdeck = StreamDeckController()
         self.phase = "idle"  # "idle" | "waiting" | "recording"
-        self.sound_check_phase = "idle"  # "idle" | "recording"
+        self.video_check_phase = "idle"  # "idle" | "recording"
         self._events_subscribed = False
 
     # --- connect / disconnect ---
@@ -62,8 +62,8 @@ class RecordingDeckDriver:
 
     def connect(self, key_callback: Callable[[str], None] | None = None) -> bool:
         """Start listening for backend events — this drives phase tracking
-        and hooks like on_sound_check_result() regardless of whether a
-        physical Stream Deck is present, since e.g. a mouse-triggered sound
+        and hooks like on_video_check_result() regardless of whether a
+        physical Stream Deck is present, since e.g. a mouse-triggered video
         check still needs its result handed off. Then, separately, open the
         Stream Deck selected in settings (StudioConfig.streamdeck_id): does
         no hardware probing at all if none is configured. `key_callback`, if
@@ -81,7 +81,7 @@ class RecordingDeckDriver:
         if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
-        self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
         return True
 
     def disconnect(self) -> None:
@@ -99,9 +99,9 @@ class RecordingDeckDriver:
         self._unsubscribe_backend_events()
         self._backend = backend
         self.phase = "idle"
-        self.sound_check_phase = "idle"
+        self.video_check_phase = "idle"
         self._subscribe_backend_events()
-        self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
 
     # --- key dispatch (the single canonical behavior for every context) ---
 
@@ -115,10 +115,10 @@ class RecordingDeckDriver:
                 elif self.phase == "recording":
                     self._backend.stop_recording()
             elif key == "c":
-                if self.sound_check_phase == "idle":
-                    self._start_sound_check()
+                if self.video_check_phase == "idle":
+                    self._start_video_check()
                 else:
-                    self._backend.stop_sound_check()
+                    self._backend.stop_video_check()
             elif key == "n":
                 self._advance_to_next_track()
             elif key == "b":
@@ -138,10 +138,10 @@ class RecordingDeckDriver:
         if req is not None:
             self._backend.start_recording(req)
 
-    def _start_sound_check(self) -> None:
+    def _start_video_check(self) -> None:
         req = self._resolve_start_request()
         if req is not None:
-            self._backend.start_sound_check(req)
+            self._backend.start_video_check(req)
 
     def _advance_to_next_track(self) -> None:
         """Next: always available. If a take is in progress (waiting or
@@ -187,20 +187,20 @@ class RecordingDeckDriver:
         if event == "recording_status":
             if "phase" in data:
                 self.phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
-        elif event == "sound_check_status":
-            # RemoteServer never broadcasts the raw sound_check_status a
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        elif event == "video_check_status":
+            # RemoteServer never broadcasts the raw video_check_status a
             # server-side check emits (its result_path only means anything
             # on that machine). Over a Remote connection this event only
             # ever reaches us re-dispatched by RemoteBackend after it's
             # transferred the finished file and rewritten result_path to a
-            # local copy (see RemoteBackend._on_raw_event's "sound_check_
-            # video" handling) — so by the time it's here, result_path is
+            # local copy (see RemoteBackend._on_raw_event's "video_check_
+            # result" handling) — so by the time it's here, result_path is
             # always valid for this machine, local or remote alike.
             if "status" in data:
                 self._log(data["status"])
             if "phase" in data:
-                self.sound_check_phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
-            if self.sound_check_phase == "idle" and "result_path" in data and self._on_sound_check_result:
-                self._on_sound_check_result(Path(data["result_path"]), bool(data.get("has_video")))
+                self.video_check_phase = data["phase"]
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+            if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
+                self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))

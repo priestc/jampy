@@ -31,6 +31,7 @@ class AudioEngine:
         output_channels: int = 2,
         monitor_channel: int = 0,
         compressor_settings: CompressorSettings | None = None,
+        monitor_instrument: bool = True,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -39,6 +40,14 @@ class AudioEngine:
         self.input_channels = input_channels
         self.output_channels = output_channels
         self.monitor_channel = monitor_channel
+        # Whether the processed instrument input is added into the live
+        # headphone mix ("production" monitoring mode) or left out of it
+        # entirely ("recording" mode, relying on the audio interface's own
+        # zero-latency hardware direct monitor for the instrument instead).
+        # Either way, the *recorded* mix (mix_recorder, below) always gets
+        # the full instrument+backing blend — this only affects what's sent
+        # to the output device live. See set_monitor_instrument().
+        self.monitor_instrument = monitor_instrument
 
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
@@ -68,6 +77,12 @@ class AudioEngine:
         thread; the audio callback reads self.compressor.settings once per
         block, so this takes effect on the very next block."""
         self.compressor.settings = settings
+
+    def set_monitor_instrument(self, enabled: bool) -> None:
+        """Toggle whether the instrument is included in the live headphone
+        mix — live-safe the same way set_compressor_settings() is (the
+        callback reads self.monitor_instrument once per block)."""
+        self.monitor_instrument = enabled
 
     def start_session_recording(self, output_path: Path) -> None:
         """Start the continuous session-level recorder."""
@@ -128,20 +143,30 @@ class AudioEngine:
         self._peak_level = float(np.max(np.abs(mono)))
 
         # Playback output: mix backing track + input monitoring
-        mix = self.mixer.read(frames)
+        mix = self.mixer.read(frames)  # always stereo, shape (frames, 2)
         self._backing_peak_level = float(np.max(np.abs(mix)))
-        if self.output_channels == 2:
-            # Add mono input to both stereo channels
-            outdata[:] = mix
-            outdata[:, 0] += mono[:, 0]
-            outdata[:, 1] += mono[:, 0]
-        else:
-            outdata[:, 0] = mix[:, 0] + mono[:, 0]
 
-        np.clip(outdata, -1.0, 1.0, out=outdata)
+        # The full production mix (backing/takes + instrument), shaped to
+        # match this stream's actual output_channels — what mix_recorder
+        # captures regardless of monitor_instrument, since it becomes the
+        # produced video's "Mix" audio track and always needs the
+        # instrument in it, even when Recording Monitoring keeps it out of
+        # the live headphone feed sent to outdata below.
+        if self.output_channels == 2:
+            full_mix = mix.copy()
+            full_mix[:, 0] += mono[:, 0]
+            full_mix[:, 1] += mono[:, 0]
+        else:
+            full_mix = mix[:, :1] + mono
+        np.clip(full_mix, -1.0, 1.0, out=full_mix)
+
+        if self.monitor_instrument:
+            outdata[:] = full_mix
+        else:
+            outdata[:] = mix[:, :self.output_channels]
 
         if self.mix_recorder:
-            self.mix_recorder.write(outdata)
+            self.mix_recorder.write(full_mix)
 
         # Check if song ended
         if self.mixer.is_playing and self.mixer.is_finished:

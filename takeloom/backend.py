@@ -197,9 +197,36 @@ class Backend(ABC):
     @abstractmethod
     def set_compressor_settings(self, settings: dict) -> None:
         """Update compressor settings — persisted for next time, and applied
-        immediately to whatever recording/sound-check/session engine is
+        immediately to whatever recording/video-check/session engine is
         currently running (mirrors adjust_backing_volume/adjust_takes_volume)."""
         ...
+
+    # --- live monitoring mode (Record page headphone mix) ---
+
+    @abstractmethod
+    def get_monitoring_mode(self) -> str:
+        """Current live monitoring mode for the Record page's headphone
+        mix during start_recording()/begin_session() — one of:
+
+        - "production": the headphones hear exactly what's about to be
+          written to the take's produced video (backing + other takes +
+          the processed instrument, all mixed together) — a direct preview
+          of the final result, at the cost of the software mix's small
+          round-trip latency.
+        - "recording": the instrument is left out of the software mix
+          entirely (only backing/other takes play through headphones),
+          relying on the audio interface's own zero-latency hardware
+          direct monitor for the instrument itself — used while actually
+          laying down a take, where latency matters more than hearing the
+          finished blend.
+
+        Purely a live toggle — not persisted, and never applied to Video
+        Check (always forced to "recording") or the Latency tab's test
+        (always monitors the instrument)."""
+        ...
+
+    @abstractmethod
+    def set_monitoring_mode(self, mode: str) -> None: ...
 
     @abstractmethod
     def on_event(self, callback: EventCallback) -> None: ...
@@ -220,18 +247,22 @@ class Backend(ABC):
     @abstractmethod
     def stop_latency_test(self) -> None: ...
 
-    # --- sound check (local-only; RemoteBackend refuses) ---
+    # --- video check (local-only; RemoteBackend refuses) ---
 
     @abstractmethod
-    def start_sound_check(self, req: StartRecordingRequest) -> None:
+    def start_video_check(self, req: StartRecordingRequest) -> None:
         """Impromptu, throwaway recording against the currently selected
         backing track (same track/instrument selection as start_recording),
         for the performer to verify mic/camera/levels are set up correctly.
-        Never touches the project's completed_takes_dir or setlist."""
+        Never touches the project's completed_takes_dir or setlist. Always
+        runs in Recording Monitoring (zero-latency instrument passthrough
+        via the audio interface's own hardware direct monitor), regardless
+        of the current monitoring_mode setting — it's meant to be played
+        the same way a real take would be."""
         ...
 
     @abstractmethod
-    def stop_sound_check(self) -> None: ...
+    def stop_video_check(self) -> None: ...
 
     # --- continuous multi-track session recording (local-only; RemoteBackend refuses) ---
 
@@ -308,7 +339,7 @@ class _CameraPreviewManager:
     def push_external_frame(self, jpeg: bytes) -> None:
         """Fan a frame from some other source (currently: VideoRecorder's
         tee'd preview stream while it holds the camera exclusively for a real
-        take/sound check) out to the same subscribers as the normal capture
+        take/video check) out to the same subscribers as the normal capture
         loop — so the Record tab's live feed keeps running throughout a
         recording instead of freezing while this manager's own thread is
         paused for ffmpeg's exclusive access."""
@@ -484,7 +515,7 @@ class _ActiveLatencyTest:
 
 
 @dataclass
-class _ActiveSoundCheck:
+class _ActiveVideoCheck:
     engine: object
     video_recorder: object | None
     take_path: Path
@@ -503,8 +534,13 @@ class LocalBackend(Backend):
         self._record_lock = threading.Lock()
         self._active_recording: _ActiveRecording | None = None
         self._active_latency_test: _ActiveLatencyTest | None = None
-        self._active_sound_check: _ActiveSoundCheck | None = None
+        self._active_video_check: _ActiveVideoCheck | None = None
         self._active_session: _ActiveSession | None = None
+        # Manual live-monitoring toggle for the Record page (see
+        # get_monitoring_mode/set_monitoring_mode) — not persisted, always
+        # starts each launch in "production" (hear the full produced mix).
+        # Video Check ignores this entirely and always runs "recording".
+        self._monitoring_mode: str = "production"
         self._preview = _CameraPreviewManager(self._current_camera_device, on_error=self._on_preview_error)
         # "Sticky" mixer levels: once the operator nudges backing/takes volume,
         # that level carries forward to every track loaded afterward (like a
@@ -544,13 +580,13 @@ class LocalBackend(Backend):
     def _get_active_engine(self):
         """Whichever AudioEngine is currently live, if any — used to apply a
         settings change (e.g. the compressor) immediately rather than only on
-        the next recording/sound-check/session start."""
+        the next recording/video-check/session start."""
         if self._active_recording is not None:
             return self._active_recording.engine
         if self._active_session is not None:
             return self._active_session.engine
-        if self._active_sound_check is not None:
-            return self._active_sound_check.engine
+        if self._active_video_check is not None:
+            return self._active_video_check.engine
         if self._active_latency_test is not None:
             return self._active_latency_test.engine
         return None
@@ -761,12 +797,35 @@ class LocalBackend(Backend):
             if engine is not None:
                 engine.set_compressor_settings(self._compressor_settings)
 
+    # --- live monitoring mode (Record page headphone mix) ---
+
+    def get_monitoring_mode(self) -> str:
+        return self._monitoring_mode
+
+    def set_monitoring_mode(self, mode: str) -> None:
+        if mode not in ("production", "recording"):
+            raise BackendError(f"Unknown monitoring mode '{mode}'.")
+        with self._record_lock:
+            self._monitoring_mode = mode
+            # Only the normal Record-page engine (a real take, or the
+            # session engine a take reuses) respects this live toggle —
+            # Video Check and the Latency test each have their own fixed
+            # monitoring behavior regardless of this setting (see
+            # start_video_check/start_latency_test).
+            engine = None
+            if self._active_recording is not None:
+                engine = self._active_recording.engine
+            elif self._active_session is not None:
+                engine = self._active_session.engine
+            if engine is not None:
+                engine.set_monitor_instrument(mode == "production")
+
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
             if (
                 self._active_recording is not None
                 or self._active_latency_test is not None
-                or self._active_sound_check is not None
+                or self._active_video_check is not None
             ):
                 raise BackendError("Another recording is already in progress.")
 
@@ -863,6 +922,7 @@ class LocalBackend(Backend):
                     output_channels=max(1, output_channels),
                     monitor_channel=input_info.channel - 1,
                     compressor_settings=self._compressor_settings,
+                    monitor_instrument=self._monitoring_mode == "production",
                 )
 
             # The remembered mixer level (this run's, or carried over from the
@@ -905,8 +965,8 @@ class LocalBackend(Backend):
     def _open_video_recorder(self, device: str, output_path: Path) -> "VideoRecorder | None":
         """Pause the live-preview capture loop (ffmpeg needs exclusive access
         to the camera device) and start recording `device` to `output_path` —
-        the one path both a real take (_begin_take()) and a sound check
-        (start_sound_check()) go through, so a sound check's video is
+        the one path both a real take (_begin_take()) and a video check
+        (start_video_check()) go through, so a video check's video is
         captured exactly the way a real take's is, not some separate
         approximation. The VideoRecorder it returns tees a low-res copy of
         every frame back through _CameraPreviewManager.push_external_frame()
@@ -1139,7 +1199,7 @@ class LocalBackend(Backend):
             if (
                 self._active_recording is not None
                 or self._active_latency_test is not None
-                or self._active_sound_check is not None
+                or self._active_video_check is not None
                 or self._active_session is not None
             ):
                 raise BackendError("Another recording is already in progress.")
@@ -1290,14 +1350,14 @@ class LocalBackend(Backend):
                 "video_path": str(active.final_video),
             })
 
-    # --- sound check (local-only; RemoteBackend refuses) ---
+    # --- Video check (local-only; RemoteBackend refuses) ---
 
-    def start_sound_check(self, req: StartRecordingRequest) -> None:
+    def start_video_check(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
             if (
                 self._active_recording is not None
                 or self._active_latency_test is not None
-                or self._active_sound_check is not None
+                or self._active_video_check is not None
                 or self._active_session is not None
             ):
                 raise BackendError("Another recording is already in progress.")
@@ -1317,7 +1377,7 @@ class LocalBackend(Backend):
                 if not req.inspiration_info:
                     raise BackendError("No inspiration track selected.")
                 from .inspiration import find_or_add_inspiration_track
-                # Only mutates this call's in-memory Project — sound check never
+                # Only mutates this call's in-memory Project — video check never
                 # calls save_setlist(), so this never actually lands on disk.
                 track = find_or_add_inspiration_track(project, req.inspiration_info)
             else:
@@ -1330,7 +1390,7 @@ class LocalBackend(Backend):
             backing_path = project.backing_tracks_dir / track.backing_track
             if track.inspiration_track_id and not backing_path.exists():
                 from .inspiration import InspirationError, download_inspiration_track
-                self._emit("sound_check_status", {"status": f"Downloading '{track.name}'..."})
+                self._emit("video_check_status", {"status": f"Downloading '{track.name}'..."})
                 try:
                     download_inspiration_track(track, backing_path, config)
                 except InspirationError as e:
@@ -1369,6 +1429,12 @@ class LocalBackend(Backend):
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
                 compressor_settings=self._compressor_settings,
+                # Video Check is played the same way a real take is, so it
+                # always runs Recording Monitoring (zero-latency hardware
+                # direct monitor for the instrument) regardless of whatever
+                # the Record page's monitoring_mode toggle is currently set
+                # to — see get_monitoring_mode()/set_monitoring_mode().
+                monitor_instrument=False,
             )
 
             if backing_path.exists():
@@ -1383,7 +1449,7 @@ class LocalBackend(Backend):
                     effective_vol = take_info.volume * (self._takes_volume / 100.0)
                     engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
 
-            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_sound_check")
+            work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_video_check")
             take_path = work_dir / "instrument.flac"
             video_raw = work_dir / "video_raw.mp4"
             mix_flac = work_dir / "mix.flac"
@@ -1393,9 +1459,9 @@ class LocalBackend(Backend):
             engine.mixer.reset()
             engine.mixer.set_playing(True)
             engine.start_recording(take_path)
-            engine.set_on_song_end(self._on_sound_check_naturally_ended)
+            engine.set_on_song_end(self._on_video_check_naturally_ended)
 
-            # Sound check always uses the configured camera (unlike the
+            # Video check always uses the configured camera (unlike the
             # latency test, which lets the operator pick a different one to
             # test), and captures it through the exact same
             # _open_video_recorder() path a real take does — so what you see
@@ -1405,37 +1471,37 @@ class LocalBackend(Backend):
             if video_recorder is not None:
                 engine.start_mix_recording(mix_flac)
 
-            self._active_sound_check = _ActiveSoundCheck(
+            self._active_video_check = _ActiveVideoCheck(
                 engine=engine, video_recorder=video_recorder, take_path=take_path,
                 video_raw=video_raw if video_recorder else None,
                 mix_flac=mix_flac if video_recorder else None,
                 final_video=final_video if video_recorder else None,
             )
-            self._emit("sound_check_status", {
+            self._emit("video_check_status", {
                 "phase": "recording",
-                "status": f"Sound check — playing '{track.name}'...",
+                "status": f"Video check — playing '{track.name}'...",
                 "track_name": track.name,
             })
 
-    def stop_sound_check(self) -> None:
+    def stop_video_check(self) -> None:
         with self._record_lock:
-            active = self._active_sound_check
+            active = self._active_video_check
             if active is None:
-                raise BackendError("No sound check in progress.")
-            self._active_sound_check = None
-            self._finish_sound_check(active)
+                raise BackendError("No video check in progress.")
+            self._active_video_check = None
+            self._finish_video_check(active)
 
-    def _on_sound_check_naturally_ended(self) -> None:
+    def _on_video_check_naturally_ended(self) -> None:
         with self._record_lock:
-            active = self._active_sound_check
+            active = self._active_video_check
             if active is None:
                 return
-            self._active_sound_check = None
-            self._finish_sound_check(active)
+            self._active_video_check = None
+            self._finish_video_check(active)
 
-    def _finish_sound_check(self, active: "_ActiveSoundCheck") -> None:
-        """Tear down an in-progress sound check. Called with self._record_lock
-        held and self._active_sound_check already cleared."""
+    def _finish_video_check(self, active: "_ActiveVideoCheck") -> None:
+        """Tear down an in-progress video check. Called with self._record_lock
+        held and self._active_video_check already cleared."""
         active.engine.set_on_song_end(None)
         active.engine.stop_recording()
         active.engine.mixer.set_playing(False)
@@ -1455,18 +1521,18 @@ class LocalBackend(Backend):
             active.mix_flac.unlink(missing_ok=True)
             active.take_path.unlink(missing_ok=True)
             if not ok:
-                self._emit("sound_check_status", {"phase": "idle", "status": "Video mux failed."})
+                self._emit("video_check_status", {"phase": "idle", "status": "Video mux failed."})
                 raise BackendError("Could not combine video and audio.")
-            self._emit("sound_check_status", {
+            self._emit("video_check_status", {
                 "phase": "idle",
-                "status": "Sound check recorded — review it, then close the window to discard it.",
+                "status": "Video check recorded — review it, then close the window to discard it.",
                 "result_path": str(active.final_video),
                 "has_video": True,
             })
         else:
-            self._emit("sound_check_status", {
+            self._emit("video_check_status", {
                 "phase": "idle",
-                "status": "Sound check recorded — review it, then close the window to discard it.",
+                "status": "Video check recorded — review it, then close the window to discard it.",
                 "result_path": str(active.take_path),
                 "has_video": False,
             })
@@ -1489,7 +1555,7 @@ class LocalBackend(Backend):
             if (
                 self._active_recording is not None
                 or self._active_latency_test is not None
-                or self._active_sound_check is not None
+                or self._active_video_check is not None
                 or self._active_session is not None
             ):
                 raise BackendError("Another recording is already in progress.")
@@ -1536,6 +1602,7 @@ class LocalBackend(Backend):
                 output_channels=max(1, output_channels),
                 monitor_channel=input_info.channel - 1,
                 compressor_settings=self._compressor_settings,
+                monitor_instrument=self._monitoring_mode == "production",
             )
             engine.start()
 

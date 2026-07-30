@@ -124,18 +124,18 @@ _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
 # Shared layout for every recording context (Tk UI, headless `takeloom
 # server`, and the CLI) — one table, one set of semantics, so the physical
 # deck behaves identically no matter which one is driving it. `active_state`
-# here is a recording *phase* ("idle"/"waiting"/"recording"); Next and Sound
+# here is a recording *phase* ("idle"/"waiting"/"recording"); Next and Video
 # Check are always available so their active_state is None, while Restart
 # only means anything mid-take and is dimmed otherwise.
 _RECORDING_TOGGLE: tuple = (0, None, None, "r", None, None, None)  # rendered by update_recording_page
 _RECORDING_NEXT: tuple = (1, "skip", "Next", "n", None, (0, 160, 220), (0, 160, 220))
 _RECORDING_RESTART: tuple = (2, "prev", "Restart", "b", "recording", (255, 140, 0), (55, 35, 10))
-_RECORDING_SOUND_CHECK_KEY_INDEX = 3
-_RECORDING_SOUND_CHECK: tuple = (
-    _RECORDING_SOUND_CHECK_KEY_INDEX, None, None, "c", None, None, None,
+_RECORDING_VIDEO_CHECK_KEY_INDEX = 3
+_RECORDING_VIDEO_CHECK: tuple = (
+    _RECORDING_VIDEO_CHECK_KEY_INDEX, None, None, "c", None, None, None,
 )  # rendered by update_recording_page
 
-_RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_SOUND_CHECK]
+_RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_VIDEO_CHECK]
 
 _RECORDING_VOLUME_BUTTONS: list[tuple] = [
     (4, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
@@ -204,7 +204,7 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
         draw.line([cx - r, cy - r, cx + r, cy + r], fill=f, width=lw)
         draw.line([cx + r, cy - r, cx - r, cy + r], fill=f, width=lw)
 
-    elif icon == "soundcheck":  # ✓
+    elif icon == "videocheck":  # ✓
         draw.line([cx - r, cy, cx - q // 2, cy + r // 2], fill=f, width=lw)
         draw.line([cx - q // 2, cy + r // 2, cx + r, cy - r], fill=f, width=lw)
 
@@ -339,7 +339,7 @@ class StreamDeckController:
         by the Tk UI, headless `takeloom server`, and the CLI: a Record/
         Unpause/Stop toggle, Next Track (always available — advances to the
         next untaken track, discarding an in-progress take first if one's
-        active), Restart (dimmed unless actually recording), a Sound Check
+        active), Restart (dimmed unless actually recording), a Video Check
         toggle, and volume controls (dials if available, else buttons).
         Buttons whose index doesn't fit the connected deck are dropped
         rather than drawn out of range (e.g. the 6-key Mini)."""
@@ -362,7 +362,7 @@ class StreamDeckController:
                     self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
             for btn in self._buttons:
                 idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_SOUND_CHECK_KEY_INDEX) or icon is None:
+                if idx in (0, _RECORDING_VIDEO_CHECK_KEY_INDEX) or icon is None:
                     continue
                 # Freshly applying the layout with no phase known yet — treat
                 # as "idle" (dimmed) until the first update_recording_page().
@@ -371,12 +371,12 @@ class StreamDeckController:
             if self._has_dials:
                 self._update_touchscreen()
 
-    def update_recording_page(self, phase: str, sound_check_phase: str = "idle") -> None:
-        """Refresh the Record/Unpause/Stop toggle, the Sound Check toggle,
+    def update_recording_page(self, phase: str, video_check_phase: str = "idle") -> None:
+        """Refresh the Record/Unpause/Stop toggle, the Video Check toggle,
         and dim/light Next/Restart/volume for the current phase. Each toggle
         is dimmed while the other holds the audio/camera hardware — the two
         are mutually exclusive at the backend level. `phase` is one of
-        "idle"/"waiting"/"recording"; `sound_check_phase` is
+        "idle"/"waiting"/"recording"; `video_check_phase` is
         "idle"/"recording". Shared verbatim by the Tk UI, headless server,
         and CLI drivers."""
         if not self.connected:
@@ -386,23 +386,23 @@ class StreamDeckController:
             "waiting":   ("play",   "Unpause",         (230, 160, 0)),
             "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
         }[phase]
-        if sound_check_phase == "recording":
+        if video_check_phase == "recording":
             record_color = (40, 40, 40)
         check_icon, check_label, check_color = {
-            "idle":      ("soundcheck", "Sound Check", (0,   160, 200)),
+            "idle":      ("videocheck", "Video Check", (0,   160, 200)),
             "recording": ("stop",       "Stop",        (230, 60,  60)),
-        }[sound_check_phase]
+        }[video_check_phase]
         if phase != "idle":
             check_color = (40, 40, 40)
         with self._lock:
             self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
-            if any(btn[0] == _RECORDING_SOUND_CHECK_KEY_INDEX for btn in self._buttons):
+            if any(btn[0] == _RECORDING_VIDEO_CHECK_KEY_INDEX for btn in self._buttons):
                 self._deck.set_key_image(
-                    _RECORDING_SOUND_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
+                    _RECORDING_VIDEO_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
                 )
             for btn in self._buttons:
                 idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_SOUND_CHECK_KEY_INDEX) or icon is None:
+                if idx in (0, _RECORDING_VIDEO_CHECK_KEY_INDEX) or icon is None:
                     continue
                 color = active_color if (active_state is None or active_state == phase) else dim_color
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
@@ -446,42 +446,6 @@ class StreamDeckController:
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
             if self._has_dials:
                 self._update_touchscreen(track_name)
-
-    def update_record_page(self, phase: str, sound_check_phase: str = "idle") -> None:
-        """Refresh the Record/Unpause/Stop toggle, the Sound Check toggle (if
-        the connected deck has room for one), and static buttons for the UI
-        Record page. Each toggle is dimmed while the other holds the audio/
-        camera hardware — the two are mutually exclusive at the backend level.
-        `phase` is one of "idle"/"waiting"/"recording"; `sound_check_phase`
-        is "idle"/"recording"."""
-        if not self.connected:
-            return
-        record_icon, record_label, record_color = {
-            "idle":      ("record", "Record",  (0,   200, 0)),
-            "waiting":   ("play",   "Unpause",  (230, 160, 0)),
-            "recording": ("stop",   "Stop",     (230, 60,  60)),
-        }[phase]
-        if sound_check_phase == "recording":
-            record_color = (40, 40, 40)
-        check_icon, check_label, check_color = {
-            "idle":      ("soundcheck", "Sound Check", (0,   160, 200)),
-            "recording": ("stop",       "Stop",        (230, 60,  60)),
-        }[sound_check_phase]
-        if phase != "idle":
-            check_color = (40, 40, 40)
-        with self._lock:
-            self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
-            if any(btn[0] == _SOUND_CHECK_KEY_INDEX for btn in self._buttons):
-                self._deck.set_key_image(
-                    _SOUND_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
-                )
-            for btn in self._buttons:
-                idx, icon, label, _key, _state, active_color, _dim = btn
-                if idx in (0, _SOUND_CHECK_KEY_INDEX) or icon is None:
-                    continue
-                self._deck.set_key_image(idx, self._make_key_image(icon, label, active_color))
-            if self._has_dials:
-                self._update_touchscreen()
 
     def disconnect(self) -> None:
         if self._deck:

@@ -37,7 +37,7 @@ class RemoteBackend(Backend):
         self._preview_lock = threading.Lock()
         self._preview_callbacks: list[FrameCallback] = []
         self._preview_subscribed = False
-        self._sound_check_video_buffer = bytearray()
+        self._video_check_result_buffer = bytearray()
         client._on_event = self._on_raw_event
 
     def is_remote(self) -> bool:
@@ -146,6 +146,14 @@ class RemoteBackend(Backend):
     def set_compressor_settings(self, settings: dict) -> None:
         self._client.call("set_compressor_settings", {"settings": settings})
 
+    # --- live monitoring mode ---
+
+    def get_monitoring_mode(self) -> str:
+        return self._client.call("get_monitoring_mode", {})["mode"]
+
+    def set_monitoring_mode(self, mode: str) -> None:
+        self._client.call("set_monitoring_mode", {"mode": mode})
+
     def on_event(self, callback: EventCallback) -> None:
         self._event_callbacks.append(callback)
 
@@ -174,13 +182,13 @@ class RemoteBackend(Backend):
     def stop_latency_test(self) -> None:
         raise BackendError("Camera latency measurement isn't available over Remote connections yet.")
 
-    # --- sound check (not supported over Remote; see RecordFrame) ---
+    # --- video check (not supported over Remote; see RecordFrame) ---
 
-    def start_sound_check(self, req: StartRecordingRequest) -> None:
-        raise BackendError("Sound check isn't available over Remote connections yet.")
+    def start_video_check(self, req: StartRecordingRequest) -> None:
+        raise BackendError("Video check isn't available over Remote connections yet.")
 
-    def stop_sound_check(self) -> None:
-        raise BackendError("Sound check isn't available over Remote connections yet.")
+    def stop_video_check(self) -> None:
+        raise BackendError("Video check isn't available over Remote connections yet.")
 
     # --- continuous session recording (not supported over Remote; CLI-only) ---
 
@@ -218,13 +226,13 @@ class RemoteBackend(Backend):
                     pass
             return
 
-        if event == "sound_check_video":
-            # Chunked transfer of a sound check result the server ran on its
-            # own attached hardware (Sound Check can't be triggered from a
-            # Remote connection at all — see start_sound_check() below — so
+        if event == "video_check_result":
+            # Chunked transfer of a video check result the server ran on its
+            # own attached hardware (Video Check can't be triggered from a
+            # Remote connection at all — see start_video_check() below — so
             # this is always the server's own local activity, sent here for
             # display since a headless server assumes nobody's watching it
-            # directly). Only one sound check can ever be active at a time
+            # directly). Only one video check can ever be active at a time
             # server-side, so chunks for a given transfer always arrive back
             # to back in order on this one connection — no per-transfer ID
             # needed, just seq==0 to (re)start the buffer.
@@ -234,21 +242,21 @@ class RemoteBackend(Backend):
             except Exception:
                 return
             if seq == 0:
-                self._sound_check_video_buffer = bytearray()
-            self._sound_check_video_buffer += chunk
+                self._video_check_result_buffer = bytearray()
+            self._video_check_result_buffer += chunk
             if seq == total - 1:
                 has_video = bool(data.get("has_video"))
-                work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_sound_check")
+                work_dir = ensure_dir(Path(tempfile.gettempdir()) / "takeloom_remote_video_check")
                 local_path = work_dir / ("result.mp4" if has_video else "result.flac")
-                local_path.write_bytes(bytes(self._sound_check_video_buffer))
-                self._sound_check_video_buffer = bytearray()
-                # Re-dispatched as an ordinary sound_check_status event, now
+                local_path.write_bytes(bytes(self._video_check_result_buffer))
+                self._video_check_result_buffer = bytearray()
+                # Re-dispatched as an ordinary video_check_status event, now
                 # naming a path that actually exists on this machine — same
                 # shape RecordingDeckDriver/RecordFrame already react to for
-                # a locally-triggered sound check.
+                # a locally-triggered video check.
                 for cb in list(self._event_callbacks):
                     try:
-                        cb("sound_check_status", {
+                        cb("video_check_status", {
                             "phase": "idle", "result_path": str(local_path), "has_video": has_video,
                         })
                     except Exception:

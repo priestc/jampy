@@ -102,4 +102,9 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "set_compressor_settings":
         backend.set_compressor_settings(args["settings"])
         return {}
+    if op == "get_monitoring_mode":
+        return {"mode": backend.get_monitoring_mode()}
+    if op == "set_monitoring_mode":
+        backend.set_monitoring_mode(args["mode"])
+        return {}
     raise BackendError(f"Unknown operation: {op}")
