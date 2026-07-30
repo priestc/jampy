@@ -19,6 +19,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
 
+from ..audio.filters import COMPRESSOR_PRESETS
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
 from ..project import Setlist, TrackEntry
@@ -288,6 +289,18 @@ class RecordFrame(ttk.Frame):
         ).grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
 
+        preset_row = ttk.Frame(left)
+        preset_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0), pady=(2, 0))
+        row += 1
+        ttk.Label(preset_row, text="Preset").pack(side="left")
+        self.compressor_preset_var = tk.StringVar(value="")
+        self.compressor_preset_combo = ttk.Combobox(
+            preset_row, textvariable=self.compressor_preset_var,
+            values=list(COMPRESSOR_PRESETS.keys()), state="readonly", width=18,
+        )
+        self.compressor_preset_combo.pack(side="left", padx=(4, 0))
+        self.compressor_preset_combo.bind("<<ComboboxSelected>>", self._on_compressor_preset_selected)
+
         params_row = ttk.Frame(left)
         params_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0), pady=(2, 8))
         row += 1
@@ -331,6 +344,21 @@ class RecordFrame(ttk.Frame):
         self.compressor_threshold_spin.configure(state=state)
         self.compressor_ratio_spin.configure(state=state)
         self.compressor_makeup_spin.configure(state=state)
+
+    def _on_compressor_preset_selected(self, _event: object = None) -> None:
+        preset = COMPRESSOR_PRESETS.get(self.compressor_preset_var.get())
+        if preset is None:
+            return
+        # Picking a preset both fills in the numbers and turns the compressor
+        # on — selecting one only to have it silently stay disabled would be
+        # a confusing dead click.
+        self.compressor_var.set(preset.enabled)
+        self.compressor_threshold_var.set(preset.threshold_db)
+        self.compressor_ratio_var.set(preset.ratio)
+        self.compressor_makeup_var.set(preset.makeup_gain_db)
+        self._compressor_attack_ms = preset.attack_ms
+        self._compressor_release_ms = preset.release_ms
+        self._on_compressor_change()
 
     def _on_compressor_change(self) -> None:
         enabled = self.compressor_var.get()

@@ -22,6 +22,31 @@ class CompressorSettings:
     makeup_gain_db: float = 0.0
 
 
+# Starting points for common instrument sources, not gospel — attack/release
+# in particular are genre/performer-dependent. Picked to be reasonable
+# defaults a performer can nudge from rather than a "correct" setting:
+# faster attack/higher ratio for percussive, transient-heavy sources (drums,
+# bass, picked electric), gentler and slower for sustained/dynamic ones
+# (acoustic, piano) so the compressor smooths without visibly pumping.
+COMPRESSOR_PRESETS: dict[str, CompressorSettings] = {
+    "Acoustic Guitar": CompressorSettings(
+        enabled=True, threshold_db=-20.0, ratio=3.0, attack_ms=15.0, release_ms=150.0, makeup_gain_db=3.0,
+    ),
+    "Electric Guitar": CompressorSettings(
+        enabled=True, threshold_db=-18.0, ratio=3.0, attack_ms=5.0, release_ms=100.0, makeup_gain_db=2.0,
+    ),
+    "Bass Guitar": CompressorSettings(
+        enabled=True, threshold_db=-22.0, ratio=5.0, attack_ms=20.0, release_ms=200.0, makeup_gain_db=4.0,
+    ),
+    "Drums": CompressorSettings(
+        enabled=True, threshold_db=-16.0, ratio=4.0, attack_ms=8.0, release_ms=120.0, makeup_gain_db=3.0,
+    ),
+    "Piano": CompressorSettings(
+        enabled=True, threshold_db=-20.0, ratio=2.5, attack_ms=20.0, release_ms=250.0, makeup_gain_db=2.0,
+    ),
+}
+
+
 def _time_constant_coeff(time_ms: float, sample_rate: int) -> float:
     """One-pole envelope-follower coefficient for a given attack/release time."""
     if time_ms <= 0:
