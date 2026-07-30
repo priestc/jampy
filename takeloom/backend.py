@@ -756,10 +756,14 @@ class LocalBackend(Backend):
         return self._active_recording is not None
 
     def get_levels(self) -> tuple[float, float]:
-        active = self._active_recording
-        if active is None:
+        # Was self._active_recording-only, so the VU meters read as dead
+        # silence during a plain monitoring session (before Record is
+        # pressed) — _get_active_engine() covers that state too, same as
+        # set_compressor_settings already relies on it for.
+        engine = self._get_active_engine()
+        if engine is None:
             return (0.0, 0.0)
-        return (active.engine.peak_level, active.engine.backing_peak_level)
+        return (engine.peak_level, engine.backing_peak_level)
 
     def adjust_backing_volume(self, delta: int) -> None:
         with self._record_lock:
@@ -796,16 +800,30 @@ class LocalBackend(Backend):
         like backing/takes volume) and, when the "recording" monitoring mode
         has the instrument routed through the interface's own hardware
         direct monitor instead, mirrored onto that fader too — see
-        _apply_hardware_direct_monitor."""
+        _apply_hardware_direct_monitor.
+
+        Unlike adjust_backing_volume/adjust_takes_volume (which only make
+        sense mid-take, since they write onto the loaded track's own volume
+        fields), instrument monitoring is meaningful during a plain
+        monitoring session too — before Record is even pressed — so this
+        resolves engine/inst the same way set_monitoring_mode does, not just
+        from self._active_recording."""
         with self._record_lock:
-            active = self._active_recording
-            if active is None:
+            engine = None
+            inst = None
+            if self._active_recording is not None:
+                engine = self._active_recording.engine
+                inst = self._active_recording.inst
+            elif self._active_session is not None:
+                engine = self._active_session.engine
+                inst = self._active_session.inst
+            if engine is None:
                 return
             self._instrument_volume = max(0, self._instrument_volume + delta)
-            active.engine.set_instrument_volume(self._instrument_volume / 100.0)
-            if self._monitoring_mode == "recording":
+            engine.set_instrument_volume(self._instrument_volume / 100.0)
+            if inst is not None and self._monitoring_mode == "recording":
                 config = self.get_config()
-                input_info = config.resolve_input(active.inst.input_label)
+                input_info = config.resolve_input(inst.input_label)
                 self._apply_hardware_direct_monitor(input_info, True)
             self._save_last_volumes()
             self._emit("recording_status", {"status": f"Instrument volume: {self._instrument_volume}%"})
