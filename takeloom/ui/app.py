@@ -33,6 +33,8 @@ TABS = [
     ("Remote", RemoteFrame, True),
 ]
 
+_RETRY_INTERVAL_MS = 10_000  # auto-retry cadence on the "could not connect" screen
+
 
 def _build_tabs(root: tk.Misc, app_state: AppState, select_title: str) -> None:
     """Build the normal tabbed interface (Record, Studio Setup, etc.) and
@@ -98,17 +100,27 @@ def _show_connect_screen(
     on_connected: Callable[[], None], initial_status: str | None = None,
 ) -> None:
     """Blocking "connecting" / "waiting for authorization" / "could not
-    connect" screen with a Retry button, shown in place of the normal tabbed
-    UI until the connection actually succeeds — only then does
-    `on_connected()` run. Shared by an "always connect" remote at startup
-    (`_run_always_remote`) and by recovery from a mid-session disconnect
+    connect" screen shown in place of the normal tabbed UI until the
+    connection actually succeeds — only then does `on_connected()` run.
+    A "could not connect" result auto-retries every `_RETRY_INTERVAL_MS`
+    in the background as well as offering a manual Retry button, so a
+    remote instance recovers on its own once the server comes back.
+    Shared by an "always connect" remote at startup (`_run_always_remote`)
+    and by recovery from a mid-session disconnect
     (`handle_remote_disconnect`)."""
     from .remote import connect_async, remember_remote_token
 
     placeholder = ttk.Frame(root)
     placeholder.pack(fill="both", expand=True, padx=16, pady=16)
+    retry_after_id: str | None = None
 
     def clear() -> None:
+        nonlocal retry_after_id
+        if retry_after_id is not None:
+            placeholder.after_cancel(retry_after_id)
+            retry_after_id = None
+        if not placeholder.winfo_exists():
+            return
         for child in placeholder.winfo_children():
             child.destroy()
 
@@ -126,6 +138,7 @@ def _show_connect_screen(
             on_connected()
 
         def on_error(error: str) -> None:
+            nonlocal retry_after_id
             clear()
             ttk.Label(placeholder, text="Could not connect", font=("TkDefaultFont", 14, "bold")).pack(
                 pady=(60, 8)
@@ -134,6 +147,7 @@ def _show_connect_screen(
                 pady=(0, 16)
             )
             ttk.Button(placeholder, text="Retry", command=attempt).pack()
+            retry_after_id = placeholder.after(_RETRY_INTERVAL_MS, attempt)
 
         connect_async(root, app_state, host, port, token, on_done=on_done, on_error=on_error, on_pending=on_pending)
 
