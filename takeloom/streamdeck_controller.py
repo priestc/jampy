@@ -54,11 +54,24 @@ def _probe_deck(deck) -> tuple[str, str] | None:
     return serial, label
 
 
+# HID transports enforce exclusive access, so if a StreamDeckController in
+# this same process already has a device open (e.g. the Record tab's
+# persistent connection), a second open() from list_streamdecks() below
+# would fail and silently drop that device from the settings dropdown —
+# exactly the "Stream Deck shows as None" bug. deck.id() (the HID device
+# path) is readable straight from enumerate() results with no open() call,
+# so it's a safe key for recognizing "this is a device I already have
+# open" and serving its cached (serial, label) instead of re-opening it.
+_open_by_id: dict[str, tuple[str, str]] = {}
+_open_by_id_lock = threading.Lock()
+
+
 def list_streamdecks() -> list[tuple[str, str]]:
     """Enumerate every currently attached Stream Deck as (serial_number,
-    label) pairs, for a settings dropdown. Each device is briefly opened to
-    read its serial (not available before open()) and closed again — this
-    is a one-off listing call, not a live connection."""
+    label) pairs, for a settings dropdown. Each device not already held
+    open by this process is briefly opened to read its serial (not
+    available before open()) and closed again — this is a one-off listing
+    call, not a live connection."""
     if not _HAVE_STREAMDECK:
         return []
     try:
@@ -68,6 +81,15 @@ def list_streamdecks() -> list[tuple[str, str]]:
         return []
     results = []
     for deck in decks:
+        try:
+            device_key = deck.id()
+        except Exception:
+            device_key = None
+        with _open_by_id_lock:
+            cached = _open_by_id.get(device_key) if device_key is not None else None
+        if cached is not None:
+            results.append(cached)
+            continue
         try:
             deck.open()
         except Exception:
@@ -217,6 +239,7 @@ class StreamDeckController:
 
     def __init__(self) -> None:
         self._deck = None
+        self._device_key: str | None = None
         self._has_dials = False
         self._buttons: list[tuple] = []
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
@@ -248,6 +271,7 @@ class StreamDeckController:
             decks = DeviceManager().enumerate()
             _skip_hidapi_exit_crash()
             target = None
+            target_probe = None
             for deck in decks:
                 try:
                     deck.open()
@@ -256,6 +280,7 @@ class StreamDeckController:
                 probe = _probe_deck(deck)
                 if probe is not None and probe[0] == device_id:
                     target = deck
+                    target_probe = probe
                     break
                 try:
                     deck.close()
@@ -269,6 +294,13 @@ class StreamDeckController:
                 return False
 
             self._deck = target
+            try:
+                self._device_key = target.id()
+            except Exception:
+                self._device_key = None
+            if self._device_key is not None:
+                with _open_by_id_lock:
+                    _open_by_id[self._device_key] = target_probe
             self._deck.reset()
             self._deck.set_brightness(70)
             self._key_callback = key_callback
@@ -286,6 +318,10 @@ class StreamDeckController:
             return True
         except Exception as e:
             self._deck = None
+            if self._device_key is not None:
+                with _open_by_id_lock:
+                    _open_by_id.pop(self._device_key, None)
+            self._device_key = None
             self.last_error = f"{type(e).__name__}: {e}"
             return False
 
@@ -449,12 +485,16 @@ class StreamDeckController:
 
     def disconnect(self) -> None:
         if self._deck:
+            if self._device_key is not None:
+                with _open_by_id_lock:
+                    _open_by_id.pop(self._device_key, None)
             try:
                 self._deck.reset()
                 self._deck.close()
             except Exception:
                 pass
             self._deck = None
+            self._device_key = None
 
     def _make_key_image(self, icon: str | None, label: str | None, color: tuple) -> bytes:
         img = PILHelper.create_image(self._deck, background=color)

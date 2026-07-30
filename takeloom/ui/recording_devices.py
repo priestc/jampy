@@ -133,8 +133,29 @@ class RecordingDevicesFrame(ttk.Frame):
         self.devices = devices
         self.output_devices = [d for d in devices if d["max_output_channels"] > 0]
         self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
-        self._camera_choices = [("", "None")] + cameras
-        self._streamdeck_choices = [("", "None")] + streamdecks
+        # A device that's configured but momentarily not detected (unplugged,
+        # or racing another process for it — see streamdeck_controller.py's
+        # _open_by_id) must still appear as a choice here, selected, using
+        # its last-saved label. Otherwise the dropdown falls back to "None"
+        # (recording_devices.py's "current display" lookups below) and
+        # Save would then read that "None" back and permanently clear the
+        # saved device_id/label, even though the user touched nothing.
+        self._camera_choices = [("", "None")] + self._with_configured_device(
+            cameras, self.config_obj.camera_device if self.config_obj else "",
+            self.config_obj.camera_label if self.config_obj else "",
+        )
+        self._streamdeck_choices = [("", "None")] + self._with_configured_device(
+            streamdecks, self.config_obj.streamdeck_id if self.config_obj else "",
+            self.config_obj.streamdeck_label if self.config_obj else "",
+        )
+
+    @staticmethod
+    def _with_configured_device(
+        detected: list[tuple[str, str]], configured_id: str, configured_label: str,
+    ) -> list[tuple[str, str]]:
+        if not configured_id or any(dev_id == configured_id for dev_id, _ in detected):
+            return list(detected)
+        return list(detected) + [(configured_id, configured_label or configured_id)]
 
     def _build(self) -> None:
         row = 0
