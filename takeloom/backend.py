@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from .audio.filters import CompressorSettings
+from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_direct_monitor
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, next_take_number, take_filename, timestamp_now, wall_timestamp
@@ -813,12 +814,34 @@ class LocalBackend(Backend):
             # monitoring behavior regardless of this setting (see
             # start_video_check/start_latency_test).
             engine = None
+            inst = None
             if self._active_recording is not None:
                 engine = self._active_recording.engine
+                inst = self._active_recording.inst
             elif self._active_session is not None:
                 engine = self._active_session.engine
+                inst = self._active_session.inst
             if engine is not None:
                 engine.set_monitor_instrument(mode == "production")
+            if inst is not None:
+                config = self.get_config()
+                input_info = config.resolve_input(inst.input_label)
+                self._apply_hardware_direct_monitor(input_info, mode == "recording")
+
+    def _apply_hardware_direct_monitor(self, input_info, enabled: bool) -> None:
+        """Best-effort: also flip the audio interface's own zero-latency
+        hardware direct monitor, for interfaces this is known to work on
+        (currently just the studio's Scarlett 4i4 4th Gen — see
+        scarlett2_direct_monitor.py). Silently does nothing for any other
+        input device; failures here (device unplugged, Focusrite Control 2
+        has it open, etc.) are never surfaced — the Record page's on-screen
+        reminder is the fallback either way."""
+        if input_info is None or input_info.device != FOCUSRITE_DEVICE_NAME:
+            return
+        try:
+            set_direct_monitor(input_info.channel, enabled)
+        except Exception:
+            pass
 
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
@@ -924,6 +947,7 @@ class LocalBackend(Backend):
                     compressor_settings=self._compressor_settings,
                     monitor_instrument=self._monitoring_mode == "production",
                 )
+                self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
 
             # The remembered mixer level (this run's, or carried over from the
             # last time anything was recorded) always wins over the track's own
@@ -1436,6 +1460,7 @@ class LocalBackend(Backend):
                 # to — see get_monitoring_mode()/set_monitoring_mode().
                 monitor_instrument=False,
             )
+            self._apply_hardware_direct_monitor(input_info, True)
 
             if backing_path.exists():
                 engine.mixer.add_source("backing", backing_path, volume=self._backing_volume / 100.0)
@@ -1604,6 +1629,7 @@ class LocalBackend(Backend):
                 compressor_settings=self._compressor_settings,
                 monitor_instrument=self._monitoring_mode == "production",
             )
+            self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
             engine.start()
 
             session_name = wall_timestamp().replace(":", "-").replace(" ", "_")

@@ -311,16 +311,19 @@ class RecordFrame(ttk.Frame):
         if self.monitoring_mode_var.get() == "production":
             hint = (
                 "Headphones hear exactly what's going into the take's Mix track. "
-                "There's no known way to flip your audio interface's own Direct "
-                "Monitor from here — turn it off yourself, or you'll also hear a "
-                "raw, unprocessed copy of the instrument layered on top."
+                "Your audio interface's own Direct Monitor is switched off "
+                "automatically on supported hardware (Focusrite Scarlett 4i4) — if "
+                "it isn't (e.g. Focusrite Control 2 is open, which blocks this), "
+                "turn it off yourself, or you'll also hear a raw, unprocessed copy "
+                "of the instrument layered on top."
             )
         else:
             hint = (
-                "Headphones drop the instrument from the software mix — turn on "
-                "your audio interface's own Direct Monitor for zero-latency "
-                "instrument monitoring while you actually play. (Video Check "
-                "always uses this mode, regardless of what's selected here.)"
+                "Headphones drop the instrument from the software mix — your audio "
+                "interface's own Direct Monitor is switched on automatically for "
+                "zero-latency instrument monitoring on supported hardware (Focusrite "
+                "Scarlett 4i4); otherwise turn it on yourself. (Video Check always "
+                "uses this mode, regardless of what's selected here.)"
             )
         self.monitoring_hint_var.set(hint)
 
