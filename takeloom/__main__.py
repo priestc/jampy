@@ -344,12 +344,15 @@ def server_command(disable_color: bool) -> None:
         )
 
     def _open_sound_check_result(path: Path, has_video: bool) -> None:
-        # A headless server is assumed unattended — never launch a player on
-        # its own screen. If any Remote client is connected, send them the
-        # file instead (chunked, since it can be tens of MB) so whichever
-        # machine an operator is actually sitting at can review it in its
-        # own native player. With nobody connected either, the file is just
-        # left in the temp dir for the next sound check to overwrite.
+        # Always open locally — the server is often where the real
+        # monitoring (headphones/speakers) actually lives, so whoever's
+        # sitting at it needs to review the result too, not just whoever's
+        # on a connected Remote client. Also send it to any connected Remote
+        # client (chunked, since it can be tens of MB) so whichever machine
+        # an operator is actually sitting at can review it in its own
+        # native player.
+        from .video.capture import open_in_default_player
+        open_in_default_player(path)
         if server.client_count > 0:
             server.broadcast_file("sound_check_video", path, extra={"has_video": has_video})
 
