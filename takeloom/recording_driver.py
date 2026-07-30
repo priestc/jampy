@@ -46,15 +46,31 @@ class RecordingDeckDriver:
         self.streamdeck = StreamDeckController()
         self.phase = "idle"  # "idle" | "waiting" | "recording"
         self.sound_check_phase = "idle"  # "idle" | "recording"
+        self._events_subscribed = False
 
     # --- connect / disconnect ---
 
+    def _subscribe_backend_events(self) -> None:
+        if not self._events_subscribed:
+            self._backend.on_event(self._on_backend_event)
+            self._events_subscribed = True
+
+    def _unsubscribe_backend_events(self) -> None:
+        if self._events_subscribed:
+            self._backend.off_event(self._on_backend_event)
+            self._events_subscribed = False
+
     def connect(self, key_callback: Callable[[str], None] | None = None) -> bool:
-        """Open the Stream Deck selected in settings (StudioConfig.
-        streamdeck_id) and start listening for backend events. Does nothing
-        — no hardware probing at all — if none is configured. `key_callback`,
-        if given, wraps handle_key (e.g. to marshal onto a UI's main thread)
-        — otherwise handle_key is used directly."""
+        """Start listening for backend events — this drives phase tracking
+        and hooks like on_sound_check_result() regardless of whether a
+        physical Stream Deck is present, since e.g. a mouse-triggered sound
+        check still needs its result handed off. Then, separately, open the
+        Stream Deck selected in settings (StudioConfig.streamdeck_id): does
+        no hardware probing at all if none is configured. `key_callback`, if
+        given, wraps handle_key (e.g. to marshal onto a UI's main thread) —
+        otherwise handle_key is used directly. Returns whether an actual
+        Stream Deck connected."""
+        self._subscribe_backend_events()
         try:
             device_id = self._backend.get_config().streamdeck_id
         except BackendError:
@@ -66,11 +82,10 @@ class RecordingDeckDriver:
             return False
         self.streamdeck.use_recording_layout()
         self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
-        self._backend.on_event(self._on_backend_event)
         return True
 
     def disconnect(self) -> None:
-        self._backend.off_event(self._on_backend_event)
+        self._unsubscribe_backend_events()
         self.streamdeck.disconnect()
 
     def rebind_backend(self, backend: Backend) -> None:
@@ -78,15 +93,14 @@ class RecordingDeckDriver:
         connecting to/disconnecting from a Remote) without touching the
         physical Stream Deck connection itself. Resets phase state to idle
         since the new backend's actual state is unknown until its first
-        event arrives. No-op if not currently connected."""
-        if not self.streamdeck.connected:
-            self._backend = backend
-            return
-        self._backend.off_event(self._on_backend_event)
+        event arrives. Always re-subscribes to the new backend's events,
+        independent of whether a physical Stream Deck is connected — see
+        connect()."""
+        self._unsubscribe_backend_events()
         self._backend = backend
         self.phase = "idle"
         self.sound_check_phase = "idle"
-        self._backend.on_event(self._on_backend_event)
+        self._subscribe_backend_events()
         self.streamdeck.update_recording_page(self.phase, self.sound_check_phase)
 
     # --- key dispatch (the single canonical behavior for every context) ---
