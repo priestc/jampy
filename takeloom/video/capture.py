@@ -5,39 +5,38 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
+from typing import Callable
 
 
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
 
-def _build_capture_cmd(device: str, output_path: Path, framerate: int) -> list[str]:
+def _input_args(device: str, framerate: int) -> list[str]:
     if sys.platform == "darwin":
-        return [
-            "ffmpeg", "-y",
-            "-f", "avfoundation", "-framerate", str(framerate),
-            "-i", f"{device}:none",
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
+        return ["-f", "avfoundation", "-framerate", str(framerate), "-i", f"{device}:none"]
     if sys.platform.startswith("linux"):
-        return [
-            "ffmpeg", "-y",
-            "-f", "v4l2", "-framerate", str(framerate),
-            "-i", device,
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
+        return ["-f", "v4l2", "-framerate", str(framerate), "-i", device]
     if sys.platform.startswith("win"):
-        return [
-            "ffmpeg", "-y",
-            "-f", "dshow", "-framerate", str(framerate),
-            "-i", f"video={device}",
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
+        return ["-f", "dshow", "-framerate", str(framerate), "-i", f"video={device}"]
     raise RuntimeError(f"Camera capture is not supported on platform: {sys.platform}")
+
+
+def _build_capture_cmd(device: str, output_path: Path, framerate: int, stream_preview: bool) -> list[str]:
+    cmd = ["ffmpeg", "-y", *_input_args(device, framerate)]
+    if not stream_preview:
+        return cmd + ["-pix_fmt", "yuv420p", str(output_path)]
+    # Split the decoded feed in two: one branch is encoded to the output file
+    # exactly as before, the other is scaled down and dropped to ~10fps MJPEG
+    # on stdout, for VideoRecorder to relay to the live preview panel while
+    # this process holds the camera device exclusively (see on_preview_frame).
+    return cmd + [
+        "-filter_complex", "[0:v]split=2[rec][prev];[prev]fps=10,scale=320:-2[prevout]",
+        "-map", "[rec]", "-pix_fmt", "yuv420p", str(output_path),
+        "-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1",
+    ]
 
 
 class VideoRecorder:
@@ -47,43 +46,96 @@ class VideoRecorder:
     sends 'q' on ffmpeg's stdin, which it treats as a request to finish
     up and finalize the output file cleanly (rather than leaving a
     truncated moov atom behind).
+
+    If on_preview_frame is given, ffmpeg also tees a low-res MJPEG copy of
+    the feed out to its stdout pipe while it runs — read by a background
+    thread and handed to the callback frame-by-frame — so whoever's showing
+    a live preview keeps seeing real camera frames even while this recorder
+    holds the device exclusively (ffmpeg's avfoundation/v4l2/dshow capture
+    can't share a device with anything else, e.g. a separate cv2 preview
+    loop, hence needing to source the preview from here instead).
     """
 
-    def __init__(self, device: str, output_path: Path, framerate: int = 30) -> None:
+    def __init__(
+        self,
+        device: str,
+        output_path: Path,
+        framerate: int = 30,
+        on_preview_frame: Callable[[bytes], None] | None = None,
+    ) -> None:
         self.device = device
         self.output_path = output_path
         self.framerate = framerate
+        self._on_preview_frame = on_preview_frame
         self._proc: subprocess.Popen | None = None
+        self._preview_thread: threading.Thread | None = None
 
     def start(self) -> bool:
         """Launch the ffmpeg capture process. Returns False if ffmpeg is unavailable."""
         if not ffmpeg_available():
             return False
-        cmd = _build_capture_cmd(self.device, self.output_path, self.framerate)
+        stream_preview = self._on_preview_frame is not None
+        cmd = _build_capture_cmd(self.device, self.output_path, self.framerate, stream_preview)
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if stream_preview else subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        if stream_preview:
+            self._preview_thread = threading.Thread(
+                target=self._read_preview_frames, args=(self._proc,), daemon=True,
+            )
+            self._preview_thread.start()
         return True
+
+    def _read_preview_frames(self, proc: subprocess.Popen) -> None:
+        """Split ffmpeg's raw MJPEG stdout stream into individual JPEG frames
+        (consecutive images, each delimited by its own SOI/EOI markers) and
+        hand each to on_preview_frame."""
+        buf = b""
+        try:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if not chunk:
+                    return
+                buf += chunk
+                while True:
+                    start = buf.find(b"\xff\xd8")
+                    if start == -1:
+                        buf = b""
+                        break
+                    end = buf.find(b"\xff\xd9", start + 2)
+                    if end == -1:
+                        if start > 0:
+                            buf = buf[start:]
+                        break
+                    frame, buf = buf[start:end + 2], buf[end + 2:]
+                    try:
+                        self._on_preview_frame(frame)
+                    except Exception:
+                        pass
+        except (OSError, ValueError):
+            pass
 
     def stop(self, timeout: float = 10.0) -> None:
         """Signal ffmpeg to finish and finalize the output file."""
         proc = self._proc
         self._proc = None
-        if proc is None or proc.poll() is not None:
-            return
-        try:
-            proc.stdin.write(b"q")
-            proc.stdin.flush()
-            proc.wait(timeout=timeout)
-        except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
-            proc.terminate()
+        if proc is not None and proc.poll() is None:
             try:
-                proc.wait(timeout=5.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+                proc.stdin.write(b"q")
+                proc.stdin.flush()
+                proc.wait(timeout=timeout)
+            except (BrokenPipeError, OSError, subprocess.TimeoutExpired):
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+        if self._preview_thread is not None:
+            self._preview_thread.join(timeout=2.0)
+            self._preview_thread = None
 
     @property
     def is_running(self) -> bool:

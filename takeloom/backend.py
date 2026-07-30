@@ -20,7 +20,6 @@ import json
 import socket
 import tempfile
 import threading
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,13 +251,6 @@ class _CameraPreviewManager:
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._paused = False
-        # Sound check records the live camera to disk *without* pausing the
-        # preview (unlike real takes/latency tests, which need exclusive
-        # ffmpeg access to the device) — the capture thread just also feeds
-        # full-resolution frames to this writer while it's set.
-        self._record_path: Path | None = None
-        self._record_fps: float = 24.0
-        self._writer_open = False  # True whenever _run currently holds an open VideoWriter
 
     def subscribe(self, on_frame: FrameCallback) -> PreviewSubscription:
         with self._lock:
@@ -296,34 +288,20 @@ class _CameraPreviewManager:
             if self._subscribers and not self._paused:
                 self._start_thread_locked()
 
-    def start_recording(self, output_path: Path, fps: float = 24.0) -> bool:
-        """Start writing full-resolution frames from the live capture loop to
-        output_path as a silent mp4, without interrupting the JPEG preview
-        stream. Returns False if there's no camera device to capture from.
-        Recorded frames arrive at whatever rate the capture loop is actually
-        managing to read the device at, not necessarily `fps` — see _run()."""
+    def push_external_frame(self, jpeg: bytes) -> None:
+        """Fan a frame from some other source (currently: VideoRecorder's
+        tee'd preview stream while it holds the camera exclusively for a real
+        take/sound check) out to the same subscribers as the normal capture
+        loop — so the Record tab's live feed keeps running throughout a
+        recording instead of freezing while this manager's own thread is
+        paused for ffmpeg's exclusive access."""
         with self._lock:
-            if self._thread is None and not self._paused:
-                self._start_thread_locked()
-            if self._thread is None:
-                return False
-            self._record_path = output_path
-            self._record_fps = fps
-        return True
-
-    def stop_recording(self, timeout: float = 3.0) -> None:
-        """Stop writing to disk and block until the video file has actually
-        been finalized (VideoWriter.release()'d by the capture thread) —
-        callers mux the file immediately after this returns, so it must be
-        safe to read by then, not just "asked to stop"."""
-        with self._lock:
-            self._record_path = None
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            with self._lock:
-                if not self._writer_open:
-                    return
-            time.sleep(0.02)
+            subscribers = list(self._subscribers)
+        for cb in subscribers:
+            try:
+                cb(jpeg)
+            except Exception:
+                pass
 
     def _start_thread_locked(self) -> None:
         device = self._get_camera_device()
@@ -368,53 +346,18 @@ class _CameraPreviewManager:
         consecutive_failures = 0
         max_consecutive_failures = round(self._fps * 3)  # ~3 seconds of nothing but failures
         ever_succeeded = False
-        # Sound check writes the live capture to disk instead of pausing this
-        # loop for an exclusive ffmpeg grab — writer_target tracks whichever
-        # output path start_recording()/stop_recording() last asked for, so a
-        # failed writer.open() (or turning recording off) isn't retried every
-        # single frame.
-        writer = None
-        writer_target: Path | None = None
-        writer_attempted = False
         try:
             while not self._stop_event.is_set():
-                with self._lock:
-                    record_path = self._record_path
-                    record_fps = self._record_fps
-                if record_path != writer_target:
-                    if writer is not None:
-                        writer.release()
-                        with self._lock:
-                            self._writer_open = False
-                    writer = None
-                    writer_target = record_path
-                    writer_attempted = False
                 ok, frame = cap.read()
                 if ok:
                     ever_succeeded = True
                     consecutive_failures = 0
-                    if record_path is not None and writer is None and not writer_attempted:
-                        writer_attempted = True
-                        h0, w0 = frame.shape[:2]
-                        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-                        candidate = cv2.VideoWriter(str(record_path), fourcc, record_fps, (w0, h0))
-                        if candidate.isOpened():
-                            writer = candidate
-                            with self._lock:
-                                self._writer_open = True
-                        else:
-                            candidate.release()
-                            self._report_error(
-                                f"Could not start sound check video recording for device '{device}'."
-                            )
-                    if writer is not None:
-                        writer.write(frame)
                     h, w = frame.shape[:2]
                     new_h = max(1, int(target_width * h / w))
-                    preview_frame = cv2.resize(frame, (target_width, new_h))
+                    frame = cv2.resize(frame, (target_width, new_h))
                     # cv2.imencode expects BGR (what cap.read() already returns) — no color
                     # conversion here, or the encoded JPEG's colors come out swapped.
-                    ok2, buf = cv2.imencode(".jpg", preview_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    ok2, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
                     if ok2:
                         jpeg = buf.tobytes()
                         with self._lock:
@@ -432,13 +375,9 @@ class _CameraPreviewManager:
                             "check camera permissions for this app, then use ↻ Refresh Devices."
                         )
                         return
-                self._stop_event.wait(1.0 / record_fps if record_path is not None else interval)
+                self._stop_event.wait(interval)
         finally:
             cap.release()
-            if writer is not None:
-                writer.release()
-                with self._lock:
-                    self._writer_open = False
 
 
 class _ManagerSubscription(PreviewSubscription):
@@ -530,15 +469,11 @@ class _ActiveLatencyTest:
 @dataclass
 class _ActiveSoundCheck:
     engine: object
+    video_recorder: object | None
     take_path: Path
     video_raw: Path | None
     mix_flac: Path | None
     final_video: Path | None
-    # Sound check video, unlike a real take/latency test, is captured straight
-    # off the live preview loop (see _CameraPreviewManager.start_recording())
-    # instead of pausing it for an exclusive ffmpeg grab — so the operator can
-    # keep watching themselves the whole time they're checking framing/sync.
-    recording_video: bool
 
 
 class LocalBackend(Backend):
@@ -903,19 +838,37 @@ class LocalBackend(Backend):
                 "track_name": track.name,
             })
 
+    def _open_video_recorder(self, device: str, output_path: Path) -> "VideoRecorder | None":
+        """Pause the live-preview capture loop (ffmpeg needs exclusive access
+        to the camera device) and start recording `device` to `output_path` —
+        the one path both a real take (_begin_take()) and a sound check
+        (start_sound_check()) go through, so a sound check's video is
+        captured exactly the way a real take's is, not some separate
+        approximation. The VideoRecorder it returns tees a low-res copy of
+        every frame back through _CameraPreviewManager.push_external_frame()
+        while it runs, so the Record tab's live feed keeps showing real
+        camera frames for the duration instead of freezing.
+
+        Returns None (leaving the preview running untouched) if there's no
+        camera configured, ffmpeg isn't available, or the recorder failed
+        to start."""
+        if not device:
+            return None
+        from .video.capture import VideoRecorder, ffmpeg_available
+        if not ffmpeg_available():
+            return None
+        self._preview.pause()
+        recorder = VideoRecorder(device, output_path, on_preview_frame=self._preview.push_external_frame)
+        if recorder.start():
+            return recorder
+        self._preview.resume()
+        return None
+
     def unpause_recording(self) -> None:
         with self._record_lock:
             active = self._active_recording
             if active is None or active.phase != "waiting":
                 raise BackendError("Not ready to unpause.")
-
-            # Release the preview capture so ffmpeg can open the camera
-            # exclusively — unless a session already owns the camera for its
-            # own continuous video (paused for the whole session in that
-            # case, not per-take).
-            if not active.in_session:
-                self._preview.pause()
-                self._emit("preview_paused", {})
 
             take_num = self._begin_take(active, self.get_config())
             self._emit("recording_status", {
@@ -977,16 +930,14 @@ class LocalBackend(Backend):
         # the duration of a session (matches the legacy start-session CLI,
         # which only ever produced one video for the whole session).
         if config.camera_device and not active.in_session:
-            from .video.capture import VideoRecorder, ffmpeg_available
-            if ffmpeg_available():
-                video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
-                mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
-                final_video = rec_path.with_suffix(".mp4")
-                video_recorder = VideoRecorder(config.camera_device, video_raw)
-                if video_recorder.start():
-                    active.engine.start_mix_recording(mix_flac)
-                else:
-                    video_recorder = None
+            video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
+            mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
+            final_video = rec_path.with_suffix(".mp4")
+            video_recorder = self._open_video_recorder(config.camera_device, video_raw)
+            if video_recorder is not None:
+                active.engine.start_mix_recording(mix_flac)
+            else:
+                video_raw = mix_flac = final_video = None
 
         active.phase = "recording"
         active.take_num = take_num
@@ -1110,7 +1061,6 @@ class LocalBackend(Backend):
 
         if not active.in_session:
             self._preview.resume()
-            self._emit("preview_resumed", {})
         self._emit("recording_status", {"phase": "idle", "status": status})
 
     # --- camera preview ---
@@ -1379,26 +1329,21 @@ class LocalBackend(Backend):
             engine.start_recording(take_path)
             engine.set_on_song_end(self._on_sound_check_naturally_ended)
 
-            recording_video = False
-            if config.camera_device:
-                from .video.capture import ffmpeg_available
-                # Muxing the result still needs ffmpeg even though capture no
-                # longer does — see _finish_sound_check()'s mux_video_audio().
-                if ffmpeg_available():
-                    # Unlike a real take/latency test, sound check doesn't need
-                    # exclusive ffmpeg access to the camera: it records straight
-                    # off the live preview loop, so the operator keeps seeing
-                    # themselves the whole time instead of the feed freezing.
-                    recording_video = self._preview.start_recording(video_raw)
-                    if recording_video:
-                        engine.start_mix_recording(mix_flac)
+            # Sound check always uses the configured camera (unlike the
+            # latency test, which lets the operator pick a different one to
+            # test), and captures it through the exact same
+            # _open_video_recorder() path a real take does — so what you see
+            # played back afterward is a true preview of production
+            # quality/behavior, not a separate approximation.
+            video_recorder = self._open_video_recorder(config.camera_device, video_raw)
+            if video_recorder is not None:
+                engine.start_mix_recording(mix_flac)
 
             self._active_sound_check = _ActiveSoundCheck(
-                engine=engine, take_path=take_path,
-                video_raw=video_raw if recording_video else None,
-                mix_flac=mix_flac if recording_video else None,
-                final_video=final_video if recording_video else None,
-                recording_video=recording_video,
+                engine=engine, video_recorder=video_recorder, take_path=take_path,
+                video_raw=video_raw if video_recorder else None,
+                mix_flac=mix_flac if video_recorder else None,
+                final_video=final_video if video_recorder else None,
             )
             self._emit("sound_check_status", {
                 "phase": "recording",
@@ -1429,10 +1374,11 @@ class LocalBackend(Backend):
         active.engine.stop_recording()
         active.engine.mixer.set_playing(False)
         active.engine.stop()
-        if active.recording_video:
-            self._preview.stop_recording()
+        if active.video_recorder:
+            active.video_recorder.stop()
+            self._preview.resume()
 
-        if active.recording_video and active.video_raw and active.mix_flac and active.final_video:
+        if active.video_recorder and active.video_raw and active.mix_flac and active.final_video:
             from .video.capture import mux_video_audio
             video_offset_ms = self.get_config().video_latency_compensation_ms
             ok = mux_video_audio(
