@@ -124,10 +124,12 @@ class RecordingDeckDriver:
             elif key == "b":
                 if self.phase == "recording":
                     self._backend.restart_take()
-            elif key in ("l", "u", "[", "]"):
-                delta = 5 if key in ("u", "]") else -5
+            elif key in ("l", "u", "[", "]", ",", "."):
+                delta = 5 if key in ("u", "]", ".") else -5
                 if key in ("[", "]"):
                     self._backend.adjust_takes_volume(delta)
+                elif key in (",", "."):
+                    self._backend.adjust_instrument_volume(delta)
                 else:
                     self._backend.adjust_backing_volume(delta)
         except BackendError as e:

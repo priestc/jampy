@@ -178,10 +178,15 @@ class _Scarlett2Device:
         self._usb(_USB_SET_MIX, req, 0)
 
 
-def set_direct_monitor(channel: int, enabled: bool) -> bool:
-    """Best-effort: mute/restore 1-based analogue input `channel`'s own
-    channel-strip fader (see _channel_to_crosspoint) in the mix bus(es)
-    that feed the monitor outputs (MONITOR_MIX_BUSES).
+def set_channel_gain(channel: int, volume: float) -> bool:
+    """Best-effort: set 1-based analogue input `channel`'s own channel-strip
+    fader (see _channel_to_crosspoint) to `volume` (0.0 = off, 1.0 =
+    DIRECT_MONITOR_GAIN, the unity level "confirmed audible at a sane level
+    in live testing" — see module docstring) in the mix bus(es) that feed
+    the monitor outputs (MONITOR_MIX_BUSES). Clamped to [0.0, 1.0]: this
+    reverse-engineered protocol has no confirmed-safe value for boosting a
+    channel past that validated unity level, so callers wanting more volume
+    than that need to do it in software instead.
 
     Returns True if it actually took effect, False if unavailable for any
     reason (pyusb/libusb missing, device not found, wrong device, Focusrite
@@ -202,7 +207,7 @@ def set_direct_monitor(channel: int, enabled: bool) -> bool:
     try:
         with _Scarlett2Device(usb.core, usb.util) as dev:
             dev.init()
-            gain = DIRECT_MONITOR_GAIN if enabled else 0
+            gain = int(DIRECT_MONITOR_GAIN * max(0.0, min(1.0, volume)))
             for bus in MONITOR_MIX_BUSES:
                 gains = dev.get_mix(bus)
                 if gains[crosspoint] != gain:

@@ -142,11 +142,14 @@ _RECORDING_VOLUME_BUTTONS: list[tuple] = [
     (5, "vol_up",   "Vol +",   "u", None, (0,   120, 200), (0,   120, 200)),
     (6, "takes_dn", "Takes -", "[", None, (120,   0, 200), (120,   0, 200)),
     (7, "takes_up", "Takes +", "]", None, (120,   0, 200), (120,   0, 200)),
+    (8, "vol_dn",   "Instr -", ",", None, (0,   160, 90),  (0,   160, 90)),
+    (9, "vol_up",   "Instr +", ".", None, (0,   160, 90),  (0,   160, 90)),
 ]
 
 _SESSION_DIAL_MAP: dict[int, tuple[str, str, str]] = {
     0: ("l", "u", "Backing\nVol"),
     1: ("[", "]", "Takes\nVol"),
+    2: (",", ".", "Instr\nVol"),
 }
 
 _INSPIRATION_DIAL_MAP: dict[int, tuple[str, str, str]] = {

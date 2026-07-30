@@ -89,6 +89,7 @@ class StudioConfig:
     inspiration_volume: float = 1.0
     last_backing_volume: int = 70  # remembered mixer level, seeded onto every newly loaded track
     last_takes_volume: int = 100
+    last_instrument_volume: int = 100  # remembered live-monitor gain for the instrument input
     last_selected_project: str = ""  # prefilled on the Record tab at startup
     last_selected_instrument: str = ""
     latency_compensation_ms: float = 0.0  # ms to trim from start of takes during playback

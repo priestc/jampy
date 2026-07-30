@@ -32,6 +32,7 @@ class AudioEngine:
         monitor_channel: int = 0,
         compressor_settings: CompressorSettings | None = None,
         monitor_instrument: bool = True,
+        instrument_volume: float = 1.0,
     ) -> None:
         self.sample_rate = sample_rate
         self.buffer_size = buffer_size
@@ -48,6 +49,11 @@ class AudioEngine:
         # the full instrument+backing blend — this only affects what's sent
         # to the output device live. See set_monitor_instrument().
         self.monitor_instrument = monitor_instrument
+        # Gain applied to the instrument's live monitor feed only — never to
+        # what's written to disk (recorder/session_recorder, below, capture
+        # `mono` before this is applied), so cranking this to compensate for
+        # a quiet pickup/DI doesn't also inflate the recorded take.
+        self.instrument_volume = instrument_volume
 
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
@@ -83,6 +89,14 @@ class AudioEngine:
         mix — live-safe the same way set_compressor_settings() is (the
         callback reads self.monitor_instrument once per block)."""
         self.monitor_instrument = enabled
+
+    def set_instrument_volume(self, volume: float) -> None:
+        """Adjust the instrument's live monitor gain — live-safe the same
+        way set_compressor_settings() is (the callback reads
+        self.instrument_volume once per block). Unlike the hardware direct
+        monitor fader (scarlett2_direct_monitor.py), this is plain software
+        gain applied before the final clip, so it's free to go above unity."""
+        self.instrument_volume = volume
 
     def start_session_recording(self, output_path: Path) -> None:
         """Start the continuous session-level recorder."""
@@ -152,12 +166,13 @@ class AudioEngine:
         # produced video's "Mix" audio track and always needs the
         # instrument in it, even when Recording Monitoring keeps it out of
         # the live headphone feed sent to outdata below.
+        monitor_mono = mono * self.instrument_volume
         if self.output_channels == 2:
             full_mix = mix.copy()
-            full_mix[:, 0] += mono[:, 0]
-            full_mix[:, 1] += mono[:, 0]
+            full_mix[:, 0] += monitor_mono[:, 0]
+            full_mix[:, 1] += monitor_mono[:, 0]
         else:
-            full_mix = mix[:, :1] + mono
+            full_mix = mix[:, :1] + monitor_mono
         np.clip(full_mix, -1.0, 1.0, out=full_mix)
 
         if self.monitor_instrument:

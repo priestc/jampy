@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from .audio.filters import CompressorSettings
-from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_direct_monitor
+from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
 from .project import Project, Setlist, TakeInfo, TrackEntry
 from .utils import ensure_dir, next_take_number, take_filename, timestamp_now, wall_timestamp
@@ -185,6 +185,9 @@ class Backend(ABC):
 
     @abstractmethod
     def adjust_takes_volume(self, delta: int) -> None: ...
+
+    @abstractmethod
+    def adjust_instrument_volume(self, delta: int) -> None: ...
 
     # --- audio filters (compressor now, more later) ---
 
@@ -552,6 +555,7 @@ class LocalBackend(Backend):
         config = self.get_config()
         self._backing_volume: int = config.last_backing_volume
         self._takes_volume: int = config.last_takes_volume
+        self._instrument_volume: int = config.last_instrument_volume
         self._compressor_settings = CompressorSettings(
             enabled=config.compressor_enabled,
             threshold_db=config.compressor_threshold_db,
@@ -565,6 +569,7 @@ class LocalBackend(Backend):
         config = self.get_config()
         config.last_backing_volume = self._backing_volume
         config.last_takes_volume = self._takes_volume
+        config.last_instrument_volume = self._instrument_volume
         config.save(self._config_path)
 
     def _save_compressor_settings(self) -> None:
@@ -785,6 +790,26 @@ class LocalBackend(Backend):
             self._save_last_volumes()
             self._emit("recording_status", {"status": f"Takes volume: {track.takes_volume}%"})
 
+    def adjust_instrument_volume(self, delta: int) -> None:
+        """Nudge the instrument's live-monitor gain — see
+        AudioEngine.set_instrument_volume. Applied in software (uncapped,
+        like backing/takes volume) and, when the "recording" monitoring mode
+        has the instrument routed through the interface's own hardware
+        direct monitor instead, mirrored onto that fader too — see
+        _apply_hardware_direct_monitor."""
+        with self._record_lock:
+            active = self._active_recording
+            if active is None:
+                return
+            self._instrument_volume = max(0, self._instrument_volume + delta)
+            active.engine.set_instrument_volume(self._instrument_volume / 100.0)
+            if self._monitoring_mode == "recording":
+                config = self.get_config()
+                input_info = config.resolve_input(active.inst.input_label)
+                self._apply_hardware_direct_monitor(input_info, True)
+            self._save_last_volumes()
+            self._emit("recording_status", {"status": f"Instrument volume: {self._instrument_volume}%"})
+
     # --- audio filters (compressor now, more later) ---
 
     def get_compressor_settings(self) -> dict:
@@ -835,11 +860,17 @@ class LocalBackend(Backend):
         scarlett2_direct_monitor.py). Silently does nothing for any other
         input device; failures here (device unplugged, Focusrite Control 2
         has it open, etc.) are never surfaced — the Record page's on-screen
-        reminder is the fallback either way."""
+        reminder is the fallback either way.
+
+        When enabling, uses the operator's current Instrument Volume dial
+        level (self._instrument_volume) rather than a fixed unity gain, so
+        the dial reaches "recording" monitoring mode too, where the
+        instrument is heard purely through this hardware path — see
+        adjust_instrument_volume."""
         if input_info is None or input_info.device != FOCUSRITE_DEVICE_NAME:
             return
         try:
-            set_direct_monitor(input_info.channel, enabled)
+            set_channel_gain(input_info.channel, (self._instrument_volume / 100.0) if enabled else 0.0)
         except Exception:
             pass
 
@@ -946,6 +977,7 @@ class LocalBackend(Backend):
                     monitor_channel=input_info.channel - 1,
                     compressor_settings=self._compressor_settings,
                     monitor_instrument=self._monitoring_mode == "production",
+                    instrument_volume=self._instrument_volume / 100.0,
                 )
                 self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
 
@@ -1628,6 +1660,7 @@ class LocalBackend(Backend):
                 monitor_channel=input_info.channel - 1,
                 compressor_settings=self._compressor_settings,
                 monitor_instrument=self._monitoring_mode == "production",
+                instrument_volume=self._instrument_volume / 100.0,
             )
             self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
             engine.start()

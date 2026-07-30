@@ -138,6 +138,9 @@ class RemoteBackend(Backend):
     def adjust_takes_volume(self, delta: int) -> None:
         self._client.call("adjust_takes_volume", {"delta": delta})
 
+    def adjust_instrument_volume(self, delta: int) -> None:
+        self._client.call("adjust_instrument_volume", {"delta": delta})
+
     # --- audio filters ---
 
     def get_compressor_settings(self) -> dict:
