@@ -124,18 +124,25 @@ _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
 # Shared layout for every recording context (Tk UI, headless `takeloom
 # server`, and the CLI) — one table, one set of semantics, so the physical
 # deck behaves identically no matter which one is driving it. `active_state`
-# here is a recording *phase* ("idle"/"waiting"/"recording"); Next and Video
-# Check are always available so their active_state is None, while Restart
-# only means anything mid-take and is dimmed otherwise.
+# here is a recording *phase* ("idle"/"waiting"/"recording"); Next and the
+# monitor-mode toggle are always available so their active_state is None,
+# while Restart only means anything mid-take and is dimmed otherwise.
 _RECORDING_TOGGLE: tuple = (0, None, None, "r", None, None, None)  # rendered by update_recording_page
 _RECORDING_NEXT: tuple = (1, "skip", "Next", "n", None, (0, 160, 220), (0, 160, 220))
 _RECORDING_RESTART: tuple = (2, "prev", "Restart", "b", "recording", (255, 140, 0), (55, 35, 10))
-_RECORDING_VIDEO_CHECK_KEY_INDEX = 3
-_RECORDING_VIDEO_CHECK: tuple = (
-    _RECORDING_VIDEO_CHECK_KEY_INDEX, None, None, "c", None, None, None,
-)  # rendered by update_recording_page
+_RECORDING_MONITOR_TOGGLE_KEY_INDEX = 3
+_RECORDING_MONITOR_TOGGLE: tuple = (
+    _RECORDING_MONITOR_TOGGLE_KEY_INDEX, None, None, "m", None, None, None,
+)  # rendered by update_monitoring_mode
 
-_RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_VIDEO_CHECK]
+# Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
+# Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
+# hardware direct monitor path used while actually laying down a take);
+# Production reuses the old Video Check button's blue.
+_LIVE_MONITOR_COLOR = (255, 140, 0)
+_PRODUCTION_MONITOR_COLOR = (0, 160, 200)
+
+_RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE]
 
 _RECORDING_VOLUME_BUTTONS: list[tuple] = [
     (4, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
@@ -207,9 +214,17 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
         draw.line([cx - r, cy - r, cx + r, cy + r], fill=f, width=lw)
         draw.line([cx + r, cy - r, cx - r, cy + r], fill=f, width=lw)
 
-    elif icon == "videocheck":  # ✓
-        draw.line([cx - r, cy, cx - q // 2, cy + r // 2], fill=f, width=lw)
-        draw.line([cx - q // 2, cy + r // 2, cx + r, cy - r], fill=f, width=lw)
+    elif icon == "headphones":
+        # Headband arc over two ear cups
+        band_top = cy - r
+        draw.arc([cx - r, band_top, cx + r, band_top + size], start=180, end=360, fill=f, width=lw)
+        cup_w, cup_h = max(3, size // 5), max(4, size // 3)
+        draw.rounded_rectangle(
+            [cx - r - cup_w // 2, cy - cup_h // 2, cx - r + cup_w // 2, cy + cup_h // 2], radius=cup_w // 2, fill=f,
+        )
+        draw.rounded_rectangle(
+            [cx + r - cup_w // 2, cy - cup_h // 2, cx + r + cup_w // 2, cy + cup_h // 2], radius=cup_w // 2, fill=f,
+        )
 
     elif icon in ("vol_dn", "vol_up"):
         # Speaker box + flared cone, then −/+
@@ -342,10 +357,10 @@ class StreamDeckController:
         by the Tk UI, headless `takeloom server`, and the CLI: a Record/
         Unpause/Stop toggle, Next Track (always available — advances to the
         next untaken track, discarding an in-progress take first if one's
-        active), Restart (dimmed unless actually recording), a Video Check
-        toggle, and volume controls (dials if available, else buttons).
-        Buttons whose index doesn't fit the connected deck are dropped
-        rather than drawn out of range (e.g. the 6-key Mini)."""
+        active), Restart (dimmed unless actually recording), the Live/
+        Production monitor toggle, and volume controls (dials if available,
+        else buttons). Buttons whose index doesn't fit the connected deck
+        are dropped rather than drawn out of range (e.g. the 6-key Mini)."""
         self._buttons = list(_RECORDING_BUTTONS)
         if not self._has_dials:
             self._buttons += _RECORDING_VOLUME_BUTTONS
@@ -365,7 +380,7 @@ class StreamDeckController:
                     self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
             for btn in self._buttons:
                 idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_VIDEO_CHECK_KEY_INDEX) or icon is None:
+                if idx in (0, _RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
                     continue
                 # Freshly applying the layout with no phase known yet — treat
                 # as "idle" (dimmed) until the first update_recording_page().
@@ -375,13 +390,15 @@ class StreamDeckController:
                 self._update_touchscreen()
 
     def update_recording_page(self, phase: str, video_check_phase: str = "idle") -> None:
-        """Refresh the Record/Unpause/Stop toggle, the Video Check toggle,
-        and dim/light Next/Restart/volume for the current phase. Each toggle
-        is dimmed while the other holds the audio/camera hardware — the two
-        are mutually exclusive at the backend level. `phase` is one of
-        "idle"/"waiting"/"recording"; `video_check_phase` is
-        "idle"/"recording". Shared verbatim by the Tk UI, headless server,
-        and CLI drivers."""
+        """Refresh the Record/Unpause/Stop toggle and dim/light Next/
+        Restart/volume for the current phase. The Record toggle is dimmed
+        while a Video Check — triggered from the Tk UI or a Remote client;
+        there's no Stream Deck button for it — holds the audio/camera
+        hardware, since the two are mutually exclusive at the backend
+        level. `phase` is one of "idle"/"waiting"/"recording";
+        `video_check_phase` is "idle"/"recording". Shared verbatim by the
+        Tk UI, headless server, and CLI drivers. The monitor-mode toggle key
+        (index 3) is refreshed separately — see update_monitoring_mode()."""
         if not self.connected:
             return
         record_icon, record_label, record_color = {
@@ -391,26 +408,36 @@ class StreamDeckController:
         }[phase]
         if video_check_phase == "recording":
             record_color = (40, 40, 40)
-        check_icon, check_label, check_color = {
-            "idle":      ("videocheck", "Video Check", (0,   160, 200)),
-            "recording": ("stop",       "Stop",        (230, 60,  60)),
-        }[video_check_phase]
-        if phase != "idle":
-            check_color = (40, 40, 40)
         with self._lock:
             self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
-            if any(btn[0] == _RECORDING_VIDEO_CHECK_KEY_INDEX for btn in self._buttons):
-                self._deck.set_key_image(
-                    _RECORDING_VIDEO_CHECK_KEY_INDEX, self._make_key_image(check_icon, check_label, check_color)
-                )
             for btn in self._buttons:
                 idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_VIDEO_CHECK_KEY_INDEX) or icon is None:
+                if idx in (0, _RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
                     continue
                 color = active_color if (active_state is None or active_state == phase) else dim_color
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
                 self._update_touchscreen()
+
+    def update_monitoring_mode(self, mode: str) -> None:
+        """Redraw the monitor-mode toggle key (index 3) to reflect the
+        current Production/Recording monitoring mode (see
+        Backend.get_monitoring_mode/set_monitoring_mode) — "recording" is
+        labeled "Live Monitor" here, since on the deck it reads as "the
+        zero-latency direct-hardware path used while actually laying down a
+        take" rather than the backend's internal name for it. Called on
+        connect (with whatever the current mode already is) and again
+        whenever it changes, from any client — see RecordingDeckDriver."""
+        if not self.connected:
+            return
+        if not any(btn[0] == _RECORDING_MONITOR_TOGGLE_KEY_INDEX for btn in self._buttons):
+            return
+        label = "Live\nMonitor" if mode == "recording" else "Production\nMonitor"
+        color = _LIVE_MONITOR_COLOR if mode == "recording" else _PRODUCTION_MONITOR_COLOR
+        with self._lock:
+            self._deck.set_key_image(
+                _RECORDING_MONITOR_TOGGLE_KEY_INDEX, self._make_key_image("headphones", label, color)
+            )
 
     def _on_key_change(self, deck, key_index: int, pressed: bool) -> None:
         if not pressed:

@@ -11,6 +11,7 @@ Created once in `app.py:run()` and passed into every tab constructor.
 
 from __future__ import annotations
 
+import threading
 from typing import Callable
 
 from ..backend import Backend, LocalBackend
@@ -27,6 +28,10 @@ class AppState:
         self.remote_name: str = ""  # hostname of the connected remote; "" when backend is local
         self.recording_active: bool = False
         self._listeners: list[Listener] = []
+        # Best-effort — see LocalBackend.start_monitoring(). Off the main
+        # thread so a slow/misbehaving audio device can't delay the window
+        # from appearing.
+        threading.Thread(target=self.local_backend.start_monitoring, daemon=True).start()
 
     def add_listener(self, listener: Listener) -> None:
         self._listeners.append(listener)

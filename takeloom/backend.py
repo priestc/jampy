@@ -233,6 +233,18 @@ class Backend(ABC):
     def set_monitoring_mode(self, mode: str) -> None: ...
 
     @abstractmethod
+    def restart_monitoring(self) -> bool:
+        """Point the ambient monitor-only stream (see start_monitoring()) at
+        whatever config.last_selected_instrument is now — call after
+        changing that (e.g. the Record page's instrument dropdown) so live
+        listening follows the switch immediately rather than only at next
+        startup/resume. A no-op, not an error, if a real take/session/
+        video-check/latency test currently holds the hardware, or nothing
+        actually changed. Returns whether a monitor stream is open
+        afterward."""
+        ...
+
+    @abstractmethod
     def on_event(self, callback: EventCallback) -> None: ...
 
     @abstractmethod
@@ -528,6 +540,19 @@ class _ActiveVideoCheck:
     final_video: Path | None
 
 
+@dataclass
+class _ActiveMonitor:
+    """A live-listening-only audio stream — no recorder/session attached,
+    just the instrument audible in the headphones. Opened by
+    start_monitoring() for config.last_selected_instrument as soon as the
+    backend starts, so Production/Recording monitoring mode (and the
+    Instrument Volume dial) has something to act on before Record is ever
+    pressed. Superseded (see _close_active_monitor()/start_recording()) the
+    moment anything else needs the audio hardware."""
+    engine: object
+    inst: object
+
+
 class LocalBackend(Backend):
     """Direct local implementation — talks to this machine's config, disk,
     and audio/video hardware. Historical RecordFrame behavior, unchanged."""
@@ -540,6 +565,7 @@ class LocalBackend(Backend):
         self._active_latency_test: _ActiveLatencyTest | None = None
         self._active_video_check: _ActiveVideoCheck | None = None
         self._active_session: _ActiveSession | None = None
+        self._active_monitor: _ActiveMonitor | None = None
         # Manual live-monitoring toggle for the Record page (see
         # get_monitoring_mode/set_monitoring_mode) — not persisted, always
         # starts each launch in "production" (hear the full produced mix).
@@ -595,7 +621,24 @@ class LocalBackend(Backend):
             return self._active_video_check.engine
         if self._active_latency_test is not None:
             return self._active_latency_test.engine
+        if self._active_monitor is not None:
+            return self._active_monitor.engine
         return None
+
+    def _get_active_engine_and_inst(self):
+        """Like _get_active_engine(), but also returns the Instrument it's
+        currently open for (None if there isn't one, e.g. mid Video Check)
+        — needed by anything that must resolve the instrument's InputLabel
+        (hardware direct monitor, live monitoring mode). Checked in the same
+        priority order: an actual take always wins over the ambient
+        monitor-only stream."""
+        if self._active_recording is not None:
+            return self._active_recording.engine, self._active_recording.inst
+        if self._active_session is not None:
+            return self._active_session.engine, self._active_session.inst
+        if self._active_monitor is not None:
+            return self._active_monitor.engine, self._active_monitor.inst
+        return None, None
 
     def hostname(self) -> str:
         return socket.gethostname()
@@ -804,19 +847,11 @@ class LocalBackend(Backend):
 
         Unlike adjust_backing_volume/adjust_takes_volume (which only make
         sense mid-take, since they write onto the loaded track's own volume
-        fields), instrument monitoring is meaningful during a plain
-        monitoring session too — before Record is even pressed — so this
-        resolves engine/inst the same way set_monitoring_mode does, not just
-        from self._active_recording."""
+        fields), instrument monitoring is meaningful any time an engine is
+        open at all — including the ambient monitor-only stream opened by
+        start_monitoring() before Record is ever pressed."""
         with self._record_lock:
-            engine = None
-            inst = None
-            if self._active_recording is not None:
-                engine = self._active_recording.engine
-                inst = self._active_recording.inst
-            elif self._active_session is not None:
-                engine = self._active_session.engine
-                inst = self._active_session.inst
+            engine, inst = self._get_active_engine_and_inst()
             if engine is None:
                 return
             self._instrument_volume = max(0, self._instrument_volume + delta)
@@ -851,25 +886,20 @@ class LocalBackend(Backend):
             raise BackendError(f"Unknown monitoring mode '{mode}'.")
         with self._record_lock:
             self._monitoring_mode = mode
-            # Only the normal Record-page engine (a real take, or the
-            # session engine a take reuses) respects this live toggle —
-            # Video Check and the Latency test each have their own fixed
-            # monitoring behavior regardless of this setting (see
+            # The normal Record-page engine (a real take, the session engine
+            # a take reuses, or the ambient monitor-only stream opened by
+            # start_monitoring()) respects this live toggle — Video Check
+            # and the Latency test each have their own fixed monitoring
+            # behavior regardless of this setting (see
             # start_video_check/start_latency_test).
-            engine = None
-            inst = None
-            if self._active_recording is not None:
-                engine = self._active_recording.engine
-                inst = self._active_recording.inst
-            elif self._active_session is not None:
-                engine = self._active_session.engine
-                inst = self._active_session.inst
+            engine, inst = self._get_active_engine_and_inst()
             if engine is not None:
                 engine.set_monitor_instrument(mode == "production")
             if inst is not None:
                 config = self.get_config()
                 input_info = config.resolve_input(inst.input_label)
                 self._apply_hardware_direct_monitor(input_info, mode == "recording")
+            self._emit("monitoring_mode_changed", {"mode": mode})
 
     def _apply_hardware_direct_monitor(self, input_info, enabled: bool) -> None:
         """Best-effort: also flip the audio interface's own zero-latency
@@ -891,6 +921,94 @@ class LocalBackend(Backend):
             set_channel_gain(input_info.channel, (self._instrument_volume / 100.0) if enabled else 0.0)
         except Exception:
             pass
+
+    def start_monitoring(self) -> bool:
+        """Best-effort: open a live, listen-only audio stream for
+        config.last_selected_instrument, with nothing recorded to disk —
+        so the operator can hear themselves in whatever monitoring mode is
+        selected the moment the app/server starts, rather than only once a
+        take begins (see set_monitoring_mode/adjust_instrument_volume,
+        which both now reach this stream too via
+        _get_active_engine_and_inst()).
+
+        A no-op, not an error, if there's no instrument selected yet,
+        another engine already holds the hardware, or the device can't be
+        opened for any reason — this is a nice-to-have layered on top of
+        start_recording()/begin_session()/start_video_check()/
+        start_latency_test(), which each call _close_active_monitor() first
+        to take the hardware for themselves. Returns whether a monitor
+        stream actually opened."""
+        with self._record_lock:
+            return self._start_monitoring_locked()
+
+    def _start_monitoring_locked(self) -> bool:
+        """start_monitoring()'s body, for callers that already hold
+        self._record_lock (the teardown of any other engine, so ambient
+        monitoring resumes right after)."""
+        if (
+            self._active_recording is not None
+            or self._active_latency_test is not None
+            or self._active_video_check is not None
+            or self._active_session is not None
+            or self._active_monitor is not None
+        ):
+            return False
+        config = self.get_config()
+        inst = config.get_instrument(config.last_selected_instrument)
+        if inst is None:
+            return False
+        input_info = config.resolve_input(inst.input_label)
+        if input_info is None:
+            return False
+        try:
+            import sounddevice as sd
+            from .audio.devices import resolve_device
+            out_dev = resolve_device(sd, config.output_device, "output")
+            in_dev = resolve_device(sd, input_info.device, "input")
+            if in_dev is None or (config.output_device and out_dev is None):
+                return False
+            in_info = sd.query_devices(in_dev, "input")
+            out_info = sd.query_devices(out_dev, "output")
+            if input_info.channel > in_info["max_input_channels"]:
+                return False
+            output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+            from .audio.engine import AudioEngine
+            engine = AudioEngine(
+                sample_rate=config.sample_rate,
+                buffer_size=config.buffer_size,
+                input_device=in_dev,
+                output_device=out_dev,
+                input_channels=max(input_info.channel, 1),
+                output_channels=max(1, output_channels),
+                monitor_channel=input_info.channel - 1,
+                compressor_settings=self._compressor_settings,
+                monitor_instrument=self._monitoring_mode == "production",
+                instrument_volume=self._instrument_volume / 100.0,
+            )
+            engine.start()
+        except Exception:
+            return False
+        self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
+        self._active_monitor = _ActiveMonitor(engine=engine, inst=inst)
+        return True
+
+    def _close_active_monitor(self) -> None:
+        """Release start_monitoring()'s ambient stream so something else can
+        open the hardware exclusively. Called with self._record_lock already
+        held, same as _apply_hardware_direct_monitor."""
+        if self._active_monitor is not None:
+            self._active_monitor.engine.stop()
+            self._active_monitor = None
+
+    def restart_monitoring(self) -> bool:
+        with self._record_lock:
+            config = self.get_config()
+            if self._active_monitor is not None:
+                if self._active_monitor.inst.name.lower() == (config.last_selected_instrument or "").lower():
+                    return True  # already monitoring the right thing
+                self._close_active_monitor()
+            return self._start_monitoring_locked()
 
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
@@ -916,6 +1034,16 @@ class LocalBackend(Backend):
                     f"A session is active for '{session.inst.name}' in '{session.project.name}' — "
                     "end it before recording a different project/instrument."
                 )
+
+            # start_monitoring()'s ambient stream, if any, gets reused below
+            # when it's already open for this exact instrument (no audible
+            # glitch right as recording begins) — otherwise it has to be
+            # released now so this take can open the hardware for itself.
+            reuse_monitor_engine = (
+                self._active_monitor is not None and self._active_monitor.inst.name.lower() == inst.name.lower()
+            )
+            if self._active_monitor is not None and not reuse_monitor_engine:
+                self._close_active_monitor()
 
             is_new_inspiration_track = False
             if req.track_source == "playlist":
@@ -953,6 +1081,11 @@ class LocalBackend(Backend):
                 # project/instrument (checked above) — reuse it rather than
                 # opening a second one on the same hardware.
                 engine = session.engine
+            elif reuse_monitor_engine:
+                # Likewise reuse start_monitoring()'s already-open stream for
+                # this exact instrument instead of opening a second one.
+                engine = self._active_monitor.engine
+                self._active_monitor = None
             else:
                 try:
                     import sounddevice as sd
@@ -1188,6 +1321,7 @@ class LocalBackend(Backend):
             if active.phase == "waiting":
                 if not active.in_session:
                     active.engine.stop()
+                    self._start_monitoring_locked()
                 self._discard_new_inspiration_track(active)
                 active.project.save_setlist()  # keep any volume tweaks made before unpausing
                 self._emit("recording_status", {"phase": "idle", "status": "Recording cancelled."})
@@ -1234,6 +1368,7 @@ class LocalBackend(Backend):
 
         if not active.in_session:
             engine.stop()
+            self._start_monitoring_locked()
 
         if active.video_recorder:
             active.video_recorder.stop()
@@ -1279,6 +1414,7 @@ class LocalBackend(Backend):
                 raise BackendError("Another recording is already in progress.")
             if not camera_device:
                 raise BackendError("Select a camera first.")
+            self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
 
             config = self.get_config()
             inst = config.get_instrument(instrument_name)
@@ -1390,6 +1526,7 @@ class LocalBackend(Backend):
             active.engine.mixer.set_playing(False)
             active.engine.stop()
             active.video_recorder.stop()
+            self._start_monitoring_locked()
 
             if active.camera_paired_with_preview:
                 self._preview.resume()
@@ -1435,6 +1572,7 @@ class LocalBackend(Backend):
                 or self._active_session is not None
             ):
                 raise BackendError("Another recording is already in progress.")
+            self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
 
             config = self.get_config()
             project = self._open_project(req.project_name)
@@ -1581,6 +1719,7 @@ class LocalBackend(Backend):
         active.engine.stop_recording()
         active.engine.mixer.set_playing(False)
         active.engine.stop()
+        self._start_monitoring_locked()
         if active.video_recorder:
             active.video_recorder.stop()
             self._preview.resume()
@@ -1634,6 +1773,7 @@ class LocalBackend(Backend):
                 or self._active_session is not None
             ):
                 raise BackendError("Another recording is already in progress.")
+            self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
 
             config = self.get_config()
             project = self._open_project(project_name)
@@ -1734,6 +1874,7 @@ class LocalBackend(Backend):
             self._active_session = None
 
             session.engine.stop()  # closes the stream and every recorder on it (per-take/session/mix)
+            self._start_monitoring_locked()
 
             if session.video_recorder:
                 session.video_recorder.stop()

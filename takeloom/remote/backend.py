@@ -157,6 +157,9 @@ class RemoteBackend(Backend):
     def set_monitoring_mode(self, mode: str) -> None:
         self._client.call("set_monitoring_mode", {"mode": mode})
 
+    def restart_monitoring(self) -> bool:
+        return self._client.call("restart_monitoring", {})["monitoring"]
+
     def on_event(self, callback: EventCallback) -> None:
         self._event_callbacks.append(callback)
 

@@ -7,12 +7,15 @@ This module touches only `Backend` and `StreamDeckController` — nothing
 Tk-specific, nothing terminal-specific. A context supplies two hooks:
 
 - `resolve_start_request()`: how to pick a project/instrument/track when
-  "r" (idle) or "c" is pressed. The Tk UI answers from whatever's selected
+  "r" (idle) or "n" is pressed. The Tk UI answers from whatever's selected
   in its Setlist/Inspiration picker; the headless server and CLI answer
   from the last-used project/instrument plus the next untaken track.
 - `on_video_check_result(path, has_video)`: how to hand off a finished
-  video check. The Tk UI opens a review dialog; headless/CLI open the OS
-  default player directly (no GUI to pop a window in).
+  video check — there's no Stream Deck button for starting one anymore
+  (key index 3 is now the Live/Production monitor toggle, "m"), but a
+  check started from the Tk UI or a Remote client still finishes here.
+  The Tk UI opens a review dialog; headless/CLI open the OS default
+  player directly (no GUI to pop a window in).
 
 Both hooks — and `log()` — may be called from a background thread (the
 Stream Deck's own key-event thread, or a backend event callback); a
@@ -82,6 +85,7 @@ class RecordingDeckDriver:
             return False
         self.streamdeck.use_recording_layout()
         self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self._refresh_monitoring_mode()
         return True
 
     def disconnect(self) -> None:
@@ -102,6 +106,13 @@ class RecordingDeckDriver:
         self.video_check_phase = "idle"
         self._subscribe_backend_events()
         self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self._refresh_monitoring_mode()
+
+    def _refresh_monitoring_mode(self) -> None:
+        try:
+            self.streamdeck.update_monitoring_mode(self._backend.get_monitoring_mode())
+        except BackendError:
+            pass
 
     # --- key dispatch (the single canonical behavior for every context) ---
 
@@ -114,16 +125,13 @@ class RecordingDeckDriver:
                     self._backend.unpause_recording()
                 elif self.phase == "recording":
                     self._backend.stop_recording()
-            elif key == "c":
-                if self.video_check_phase == "idle":
-                    self._start_video_check()
-                else:
-                    self._backend.stop_video_check()
             elif key == "n":
                 self._advance_to_next_track()
             elif key == "b":
                 if self.phase == "recording":
                     self._backend.restart_take()
+            elif key == "m":
+                self._toggle_monitoring_mode()
             elif key in ("l", "u", "[", "]", ",", "."):
                 delta = 5 if key in ("u", "]", ".") else -5
                 if key in ("[", "]"):
@@ -140,10 +148,14 @@ class RecordingDeckDriver:
         if req is not None:
             self._backend.start_recording(req)
 
-    def _start_video_check(self) -> None:
-        req = self._resolve_start_request()
-        if req is not None:
-            self._backend.start_video_check(req)
+    def _toggle_monitoring_mode(self) -> None:
+        current = self._backend.get_monitoring_mode()
+        self._backend.set_monitoring_mode("production" if current == "recording" else "recording")
+        # _on_backend_event below also redraws the key once the backend's
+        # monitoring_mode_changed event arrives — for a RemoteBackend that's
+        # a second network round trip away, so update it right away here
+        # too rather than leaving the key stale until the event catches up.
+        self._refresh_monitoring_mode()
 
     def _advance_to_next_track(self) -> None:
         """Next: always available. If a take is in progress (waiting or
@@ -206,3 +218,9 @@ class RecordingDeckDriver:
                 self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
+        elif event == "monitoring_mode_changed":
+            # Fired by set_monitoring_mode() from any client (this deck's
+            # own "m" key, the Tk UI's radio toggle, or a Remote client) —
+            # keeps the physical key in sync regardless of who changed it.
+            if "mode" in data:
+                self.streamdeck.update_monitoring_mode(data["mode"])

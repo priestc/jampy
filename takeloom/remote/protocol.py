@@ -110,4 +110,6 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "set_monitoring_mode":
         backend.set_monitoring_mode(args["mode"])
         return {}
+    if op == "restart_monitoring":
+        return {"monitoring": backend.restart_monitoring()}
     raise BackendError(f"Unknown operation: {op}")

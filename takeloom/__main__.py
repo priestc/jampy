@@ -324,6 +324,13 @@ def server_command(disable_color: bool) -> None:
     for warning in check_configured_devices(backend, include_streamdeck=False):
         log(warning, err=True)
 
+    # Best-effort: open live monitoring for the last-used instrument right
+    # away, so the operator can hear themselves in headphones immediately —
+    # not only once a take/session/video-check actually starts. See
+    # LocalBackend.start_monitoring().
+    if backend.start_monitoring():
+        log(f"Live-monitoring '{backend.get_config().last_selected_instrument}'.")
+
     # Optional attached StreamDeck: fully drives a session with no UI client
     # needed at all, via the same RecordingDeckDriver the Tk UI uses. With
     # no track picker of its own, this context always targets the last-used

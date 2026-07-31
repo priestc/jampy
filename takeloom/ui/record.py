@@ -293,7 +293,7 @@ class RecordFrame(ttk.Frame):
             value="production", command=self._on_monitoring_mode_change,
         ).pack(side="left")
         ttk.Radiobutton(
-            mode_row, text="Recording Monitoring", variable=self.monitoring_mode_var,
+            mode_row, text="Live Monitoring", variable=self.monitoring_mode_var,
             value="recording", command=self._on_monitoring_mode_change,
         ).pack(side="left", padx=(12, 0))
 
@@ -624,17 +624,28 @@ class RecordFrame(ttk.Frame):
         self._refresh_playlist()
         self._update_start_button_state()
         if _event is not None:
-            self._persist_last_selection()
+            self._persist_last_selection(restart_monitor=True)
 
-    def _persist_last_selection(self) -> None:
-        """Remembered so the Record tab reopens on the same pair next launch."""
+    def _persist_last_selection(self, restart_monitor: bool = False) -> None:
+        """Remembered so the Record tab reopens on the same pair next
+        launch. restart_monitor=True (instrument dropdown only — the
+        project dropdown doesn't affect what's being monitored) also points
+        the ambient monitor stream at the newly selected instrument right
+        away, chained after the save so it reads the updated config rather
+        than racing it — see Backend.restart_monitoring()."""
         if self.config_obj is None:
             return
         self.config_obj.last_selected_instrument = self.instrument_var.get()
         self.config_obj.last_selected_project = self.project_var.get()
         backend = self.app_state.backend
         config = self.config_obj
-        self._run_backend(lambda: backend.save_config(config))
+
+        def _save() -> None:
+            backend.save_config(config)
+            if restart_monitor:
+                backend.restart_monitoring()
+
+        self._run_backend(_save)
 
     def _on_playlist_select(self, _event: object = None) -> None:
         sel = self.playlist_listbox.curselection()
