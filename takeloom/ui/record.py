@@ -297,40 +297,11 @@ class RecordFrame(ttk.Frame):
             value="recording", command=self._on_monitoring_mode_change,
         ).pack(side="left", padx=(12, 0))
 
-        self.monitoring_hint_var = tk.StringVar()
-        ttk.Label(
-            left, textvariable=self.monitoring_hint_var, foreground="#666666", wraplength=360,
-        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 8))
-        row += 1
-        self._update_monitoring_hint()
         return row
-
-    def _update_monitoring_hint(self) -> None:
-        if not hasattr(self, "monitoring_hint_var"):
-            return
-        if self.monitoring_mode_var.get() == "production":
-            hint = (
-                "Headphones hear exactly what's going into the take's Mix track. "
-                "Your audio interface's own Direct Monitor is switched off "
-                "automatically on supported hardware (Focusrite Scarlett 4i4) — if "
-                "it isn't (e.g. Focusrite Control 2 is open, which blocks this), "
-                "turn it off yourself, or you'll also hear a raw, unprocessed copy "
-                "of the instrument layered on top."
-            )
-        else:
-            hint = (
-                "Headphones drop the instrument from the software mix — your audio "
-                "interface's own Direct Monitor is switched on automatically for "
-                "zero-latency instrument monitoring on supported hardware (Focusrite "
-                "Scarlett 4i4); otherwise turn it on yourself. (Video Check always "
-                "uses this mode, regardless of what's selected here.)"
-            )
-        self.monitoring_hint_var.set(hint)
 
     def _on_monitoring_mode_change(self) -> None:
         mode = self.monitoring_mode_var.get()
         self._monitoring_mode = mode
-        self._update_monitoring_hint()
         backend = self.app_state.backend
         self._run_backend(lambda: backend.set_monitoring_mode(mode))
 

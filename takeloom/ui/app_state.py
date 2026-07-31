@@ -15,6 +15,7 @@ import threading
 from typing import Callable
 
 from ..backend import Backend, LocalBackend
+from . import sleep_guard
 
 Listener = Callable[[], None]
 
@@ -26,12 +27,24 @@ class AppState:
         self.local_backend = LocalBackend()
         self.backend: Backend = self.local_backend
         self.remote_name: str = ""  # hostname of the connected remote; "" when backend is local
-        self.recording_active: bool = False
+        self._recording_active: bool = False
         self._listeners: list[Listener] = []
         # Best-effort — see LocalBackend.start_monitoring(). Off the main
         # thread so a slow/misbehaving audio device can't delay the window
         # from appearing.
         threading.Thread(target=self.local_backend.start_monitoring, daemon=True).start()
+
+    @property
+    def recording_active(self) -> bool:
+        return self._recording_active
+
+    @recording_active.setter
+    def recording_active(self, value: bool) -> None:
+        if value == self._recording_active:
+            return
+        self._recording_active = value
+        # Keeps the display from sleeping/locking mid-take; see sleep_guard.
+        sleep_guard.set_active(value)
 
     def add_listener(self, listener: Listener) -> None:
         self._listeners.append(listener)
