@@ -1,5 +1,7 @@
 # Deployment
 
+Always push every commit to `origin` (`main`) right after making it — no need to ask first. This is a standing authorization for `git push` specifically in this repo; it doesn't extend to other destructive/shared-state git operations (force-push, reset --hard, etc.), which still need confirmation as usual.
+
 There are two machines running `takeloom`, installed differently:
 
 - The laptop ("Framework"), reachable via `ssh framework` (non-interactive/key-auth works). Installed via `pipx` directly from this GitHub repo (`takeloom @ git+https://github.com/priestc/takeloom.git`) — not an editable clone, so picking up new code requires a reinstall, not a `git pull`.
