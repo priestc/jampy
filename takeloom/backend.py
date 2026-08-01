@@ -643,6 +643,19 @@ class LocalBackend(Backend):
     def hostname(self) -> str:
         return socket.gethostname()
 
+    def ip_address(self) -> str:
+        """Best-effort numeric LAN IP, useful alongside hostname() since
+        mDNS names like 'Mac.local' don't always resolve for every client."""
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            try:
+                # UDP "connect" sends nothing on the wire; it just asks the
+                # OS which local interface/address would be used to reach
+                # this destination, which is the LAN IP we want.
+                s.connect(("8.8.8.8", 80))
+                return s.getsockname()[0]
+            except OSError:
+                return "unknown"
+
     def _current_camera_device(self) -> str:
         return self.get_config().camera_device
 

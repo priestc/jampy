@@ -14,8 +14,8 @@ from __future__ import annotations
 import threading
 from typing import Callable
 
+from .. import sleep_guard
 from ..backend import Backend, LocalBackend
-from . import sleep_guard
 
 Listener = Callable[[], None]
 

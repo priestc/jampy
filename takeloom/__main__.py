@@ -259,6 +259,9 @@ def setup_recording_devices() -> None:
 )
 def ui_command(remote_ip: str | None) -> None:
     """Launch the graphical Takeloom interface."""
+    from . import update_check
+    update_check.check_and_restart(log=click.echo)
+
     from .ui.app import run
     run(remote_ip=remote_ip)
 
@@ -297,6 +300,9 @@ def server_command(disable_color: bool) -> None:
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
 
+    from . import sleep_guard
+    sleep_guard.track_backend(backend)
+
     def request_authorization(ip: str, client_name: str) -> bool:
         log(f"\nPairing request from '{client_name}' ({ip})")
         try:
@@ -317,7 +323,7 @@ def server_command(disable_color: bool) -> None:
         log(f"Error: could not start server: {e}", err=True)
         raise SystemExit(1)
 
-    log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()})")
+    log(f"takeloom server listening on port {listen_port} (host: {backend.hostname()}, ip: {backend.ip_address()})")
     # StreamDeck is checked separately below, via the real connection attempt
     # (driver.connect()), which reports a more specific error than a plain
     # not-found when a device is selected but fails to open.
@@ -681,6 +687,7 @@ def start_session(instrument: str) -> None:
     audio+video recording spanning every track (begin_session()/
     end_session()), which the UI/server don't use.
     """
+    from . import sleep_guard
     from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .recording_driver import RecordingDeckDriver
 
@@ -732,6 +739,7 @@ def start_session(instrument: str) -> None:
         raise SystemExit(1)
 
     backend = LocalBackend()
+    sleep_guard.track_backend(backend)
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
@@ -1170,6 +1178,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     project = None
 
     if is_recording:
+        from . import sleep_guard
         from .audio.engine import AudioEngine
 
         cwd = Path.cwd()
@@ -1364,6 +1373,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                         engine.mixer.reset()
                         if auto_play_next:
                             engine.start_recording(rec_path)
+                            sleep_guard.set_active(True)
                             engine.mixer.set_playing(True)
                             recording_active = True
                             auto_play_next = False
@@ -1388,6 +1398,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 engine.mixer.set_playing(False)
                                 if recording_active:
                                     engine.stop_recording()
+                                    sleep_guard.set_active(False)
                                 if rec_path.exists():
                                     rec_path.unlink()
                                 click.echo("\nQuitting inspiration mode.")
@@ -1403,6 +1414,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 else:
                                     if not recording_active:
                                         engine.start_recording(rec_path)
+                                        sleep_guard.set_active(True)
                                         click.echo(f"  [rec] Recording take {take_num}: {fname}")
                                         recording_active = True
                                     engine.mixer.set_playing(True)
@@ -1413,6 +1425,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 engine.mixer.set_playing(False)
                                 if recording_active:
                                     engine.stop_recording()
+                                    sleep_guard.set_active(False)
                                     if rec_path.exists():
                                         rec_path.unlink()
                                     recording_active = False
@@ -1436,6 +1449,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 click.echo(f"  Volume: {int(volume * 100)}%")
                         if recording_active:
                             engine.stop_recording()
+                            sleep_guard.set_active(False)
                         if not skip and recording_active:
                             from .project import TakeInfo
                             take = TakeInfo(instrument=instrument, take_number=take_num, filename=fname)

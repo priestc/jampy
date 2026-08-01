@@ -10,3 +10,9 @@ Any change **except code that only affects server mode** (i.e. changes confined 
 1. Push to `origin` (`main`).
 2. `ssh framework "pipx install --force git+https://github.com/priestc/takeloom.git"`.
 3. Nothing further needed for the Mac Mini — just make sure `takeloom` (or `takeloom server`) is restarted there to pick up the change.
+
+# Testing setup
+
+- All actual hardware — audio interfaces (the Scarlett 4i4) and the Stream Deck — is attached to the **Mac Mini**, and only the Mac Mini ever runs `takeloom server` or performs an actual recording. Nothing is ever plugged into the laptop.
+- The **laptop ("Framework")** only ever runs `takeloom` in remote mode — connecting to the Mac Mini's `takeloom server` via the Remote tab / `--remote=IP` — to control a session running on the Mac Mini. It never has a device attached and a recording is never started or written locally on it, so the CLI recording paths (`start-session`, `inspiration`) are effectively unused/untested there in practice; treat bugs reported "on the laptop" as remote-mode bugs first.
+- The laptop sleeps whenever it's unplugged, which is its normal state (it's rarely plugged in). Keep this in mind for anything that assumes it stays awake/reachable — e.g. it can drop off the network mid-session, and any "don't sleep while recording" behavior only matters there for the remote-viewing UI, not a local recording session.
