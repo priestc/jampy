@@ -252,7 +252,6 @@ class RecordFrame(ttk.Frame):
         self.backing_meter.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 12))
         row += 1
 
-        row = self._build_monitoring_mode(left, row)
         row = self._build_audio_filters(left, row)
 
         self.selection_var = tk.StringVar(value="No track selected")
@@ -280,36 +279,6 @@ class RecordFrame(ttk.Frame):
             self.video_check_button.grid_remove()
         elif not instrument_names or not self._project_names:
             self.video_check_button.state(["disabled"])
-
-    # --- live monitoring mode (Record page headphone mix) ---
-
-    def _build_monitoring_mode(self, left: ttk.Frame, row: int) -> int:
-        ttk.Label(left, text="Monitoring", font=("TkDefaultFont", 11, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w", pady=(0, 2)
-        )
-        row += 1
-
-        self.monitoring_mode_var = tk.StringVar(value=self._monitoring_mode)
-        mode_row = ttk.Frame(left)
-        mode_row.grid(row=row, column=0, columnspan=2, sticky="w", padx=(16, 0))
-        row += 1
-        ttk.Radiobutton(
-            mode_row, text="Production Monitoring", variable=self.monitoring_mode_var,
-            value="production", command=self._on_monitoring_mode_change,
-        ).pack(side="left")
-        ttk.Radiobutton(
-            mode_row, text="Live Monitoring", variable=self.monitoring_mode_var,
-            value="recording", command=self._on_monitoring_mode_change,
-        ).pack(side="left", padx=(12, 0))
-
-        return row
-
-    def _on_monitoring_mode_change(self) -> None:
-        mode = self.monitoring_mode_var.get()
-        self._monitoring_mode = mode
-        self.streamdeck_emulator.update_monitoring_mode(mode)
-        backend = self.app_state.backend
-        self._run_backend(lambda: backend.set_monitoring_mode(mode))
 
     # --- audio filters (compressor now, more later) ---
 
@@ -964,6 +933,14 @@ class RecordFrame(ttk.Frame):
                 # result) — it's subscribed to this same event independently,
                 # regardless of whether Video Check was triggered by mouse or
                 # by the physical Stream Deck.
+        elif event == "monitoring_mode_changed":
+            # Fired by Backend.set_monitoring_mode() from any client — this
+            # frame's own emulator "m" key, a physical Stream Deck, or a
+            # Remote client — so the emulator's monitor-toggle tile stays in
+            # sync no matter which one changed it.
+            if "mode" in data:
+                self._monitoring_mode = data["mode"]
+                self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
         elif event == "preview_paused":
             self.preview_label.configure(text="Recording — preview paused", image="")
         elif event == "preview_resumed":
