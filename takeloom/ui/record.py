@@ -47,6 +47,10 @@ class RecordFrame(ttk.Frame):
         self._selected_inspiration_info: dict | None = None
         self._selected_track_source: str | None = None  # "playlist" | "inspiration"
         self._inspiration_tracks: list[dict] = []
+        # Set by _auto_select_default_track() when the setlist is empty —
+        # inspiration tracks load asynchronously, so the actual auto-select
+        # happens once _on_inspiration_loaded() gets a result.
+        self._auto_select_inspiration_pending = False
 
         self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
         self._video_check_phase = "idle"  # "idle" | "recording"
@@ -422,11 +426,11 @@ class RecordFrame(ttk.Frame):
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
 
-        notebook = ttk.Notebook(right)
+        self.notebook = notebook = ttk.Notebook(right)
         notebook.grid(row=0, column=0, sticky="nsew")
 
         setlist_tab = ttk.Frame(notebook)
-        inspiration_tab = ttk.Frame(notebook)
+        self.inspiration_tab = inspiration_tab = ttk.Frame(notebook)
         notebook.add(setlist_tab, text="Setlist")
         notebook.add(inspiration_tab, text="Inspiration")
 
@@ -519,11 +523,19 @@ class RecordFrame(ttk.Frame):
         for t in tracks:
             self.inspiration_listbox.insert(tk.END, self._inspiration_display(t))
 
+        if self._auto_select_inspiration_pending:
+            self._auto_select_inspiration_pending = False
+            if tracks and self._selected_track_source is None:
+                self.notebook.select(self.inspiration_tab)
+                self.inspiration_listbox.selection_set(0)
+                self._on_inspiration_select()
+
     def _clear_selection(self) -> None:
         self._selected_track = None
         self._selected_track_index = None
         self._selected_inspiration_info = None
         self._selected_track_source = None
+        self._auto_select_inspiration_pending = False
         if hasattr(self, "selection_var"):
             self.selection_var.set("No track selected")
         self._update_start_button_state()
@@ -573,6 +585,20 @@ class RecordFrame(ttk.Frame):
         self._setlist = Setlist.from_dict(data)
         self._refresh_playlist()
         self._refresh_inspiration()
+        self._auto_select_default_track()
+
+    def _auto_select_default_track(self) -> None:
+        """Pick a sensible starting track so Record is one click away right
+        after opening: the setlist's first track, or — if the setlist is
+        empty — the Inspiration tab's first track once it's loaded (see
+        _on_inspiration_loaded, since that load is async)."""
+        if self._selected_track_source is not None:
+            return  # already selected (e.g. this ran once for this project already)
+        if self._setlist and self._setlist.tracks:
+            self.playlist_listbox.selection_set(0)
+            self._on_playlist_select()
+        else:
+            self._auto_select_inspiration_pending = True
 
     def _refresh_playlist_from_server(self) -> None:
         """Re-fetch just the current project's setlist (e.g. after a take
