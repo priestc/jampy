@@ -7,9 +7,12 @@ There are two machines running `takeloom`, installed differently:
 
 Any change **except code that only affects server mode** (i.e. changes confined to the headless `takeloom server` path — see `takeloom/__main__.py`'s `server_command` and anything only reachable from it) should be automatically deployed once committed:
 
-1. Push to `origin` (`main`).
-2. `ssh framework "pipx install --force git+https://github.com/priestc/takeloom.git"`.
+1. Push to `origin` (`main`). That's the only step to take here — do not `ssh framework` to reinstall.
+2. The laptop no longer gets deployed to manually. `takeloom ui` checks GitHub's `main` on launch and self-updates (reinstalls + restarts) if it's behind — see `takeloom/update_check.py`. The user's habit is to close and reopen the app on the laptop before testing, which is what actually picks up the new commit; nothing needs to happen on the laptop from this side beyond the push.
 3. Nothing further needed for the Mac Mini — just make sure `takeloom` (or `takeloom server`) is restarted there to pick up the change.
+
+Manual laptop reinstall (reference only — for troubleshooting if auto-update ever fails or misbehaves, not part of the normal flow above):
+`ssh framework "pipx install --force git+https://github.com/priestc/takeloom.git"`
 
 # Testing setup
 
