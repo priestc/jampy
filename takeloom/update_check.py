@@ -62,7 +62,10 @@ def check_and_restart(log=print) -> None:
     if installed is None:
         return
     latest = _latest_commit()
-    if latest is None or latest == installed:
+    if latest is None:
+        return
+    if latest == installed:
+        log(f"takeloom {metadata.version('takeloom')} ({installed[:8]}) — already on the latest version.")
         return
 
     log(f"Update available ({installed[:8]} -> {latest[:8]}) — installing...")
