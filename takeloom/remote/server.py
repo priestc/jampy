@@ -41,6 +41,17 @@ def _timestamp() -> str:
     return datetime.datetime.now().strftime("%H:%M:%S")
 
 
+# Pure getters that clients call to refresh their own view (e.g. on
+# connect, or after an event) rather than because the operator did
+# anything. Logging these would drown out the ops that actually matter —
+# see _handle_request, which only logs ops outside this set.
+_READ_ONLY_OPS = {
+    "hostname", "get_config", "list_audio_devices", "list_cameras",
+    "list_projects", "get_setlist", "query_inspiration_tracks",
+    "is_recording", "get_compressor_settings", "get_monitoring_mode",
+}
+
+
 def _is_local_network(ip: str) -> bool:
     """True for loopback/private/link-local addresses — i.e. not reachable
     from the public internet even if this machine's own NAT/firewall is
@@ -289,7 +300,8 @@ class _ClientHandler(socketserver.StreamRequestHandler):
         op = msg.get("op")
         args = msg.get("args") or {}
         who = f"{self.client_name} ({self.client_address[0]})"
-        self._owner._log(f"[{_timestamp()}] {who} -> {op} {args}")
+        if op not in _READ_ONLY_OPS:
+            self._owner._log(f"[{_timestamp()}] {who}: {op}" + (f" {args}" if args else ""))
         try:
             if op == "subscribe_preview":
                 if self._preview_sub is None:
@@ -302,7 +314,6 @@ class _ClientHandler(socketserver.StreamRequestHandler):
                 result = {}
             else:
                 result = dispatch(self._owner.backend, op, args)
-            self._owner._log(f"[{_timestamp()}]   <- ok {result}")
             self._write({"kind": "response", "id": req_id, "ok": True, "result": result})
         except BackendError as e:
             self._owner._log(f"[{_timestamp()}]   <- error: {e}")

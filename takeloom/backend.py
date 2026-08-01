@@ -36,6 +36,13 @@ class BackendError(Exception):
     """Raised by any Backend method on failure. Message is safe to show to the user."""
 
 
+# A take that's recorded past this length is always kept, even if the user
+# stops or restarts before the backing track's natural end — losing that
+# much performance to a slip of the finger is worse than an extra unwanted
+# take sitting in the list.
+MIN_KEPT_TAKE_SECONDS = 10 * 60
+
+
 @dataclass
 class StartRecordingRequest:
     project_name: str
@@ -1226,27 +1233,44 @@ class LocalBackend(Backend):
         """Discard the take in progress and start it over from 0:00 — same
         track/instrument/session, a fresh take number. Only valid while
         actually recording (unlike stop_recording(), the active session
-        itself survives this — it's a redo, not a cancel)."""
+        itself survives this — it's a redo, not a cancel). A take that's
+        already run past MIN_KEPT_TAKE_SECONDS is kept rather than discarded,
+        same as stop_recording()."""
         with self._record_lock:
             active = self._active_recording
             if active is None or active.phase != "recording":
                 raise BackendError("Not currently recording.")
 
+            keep = active.engine.recording_elapsed >= MIN_KEPT_TAKE_SECONDS
+            kept_take_num = active.take_num
+
             active.engine.set_on_song_end(None)
             active.engine.stop_recording()
             active.engine.mixer.set_playing(False)
-            active.rec_path.unlink(missing_ok=True)
+
+            if keep:
+                self._persist_take(active)
+                active.project.save_setlist()
+                self._log_session_event("take_finished", f"track={active.track.name} take={kept_take_num} kept=True")
+            else:
+                active.rec_path.unlink(missing_ok=True)
+
+            video_status = ""
             if active.video_recorder:
                 active.video_recorder.stop()
-                if active.video_raw:
-                    active.video_raw.unlink(missing_ok=True)
-                if active.mix_flac:
-                    active.mix_flac.unlink(missing_ok=True)
+                if keep:
+                    video_status = self._mux_take_video(active)
+                else:
+                    if active.video_raw:
+                        active.video_raw.unlink(missing_ok=True)
+                    if active.mix_flac:
+                        active.mix_flac.unlink(missing_ok=True)
 
             take_num = self._begin_take(active, self.get_config(), event_type="restart")
+            kept_note = f" (take {kept_take_num} kept{video_status})" if keep else ""
             self._emit("recording_status", {
                 "phase": "recording",
-                "status": f"Restarted '{active.track.name}' from the beginning — take {take_num}",
+                "status": f"Restarted '{active.track.name}' from the beginning — take {take_num}{kept_note}",
                 "track_name": active.track.name,
                 "take_number": take_num,
             })
@@ -1323,8 +1347,9 @@ class LocalBackend(Backend):
 
     def stop_recording(self) -> None:
         """User-initiated stop. Before the backing track finishes on its own
-        this discards the take as incomplete; during the pre-recording
-        'waiting' phase it just cancels the load."""
+        this discards the take as incomplete — unless it's already run past
+        MIN_KEPT_TAKE_SECONDS, in which case it's kept regardless. During the
+        pre-recording 'waiting' phase it just cancels the load."""
         with self._record_lock:
             active = self._active_recording
             if active is None:
@@ -1340,7 +1365,8 @@ class LocalBackend(Backend):
                 self._emit("recording_status", {"phase": "idle", "status": "Recording cancelled."})
                 return
 
-            self._finish_recording(active, keep=False)
+            keep = active.engine.recording_elapsed >= MIN_KEPT_TAKE_SECONDS
+            self._finish_recording(active, keep=keep)
 
     def _discard_new_inspiration_track(self, active: "_ActiveRecording") -> None:
         """Undo find_or_add_inspiration_track's addition when a take never
@@ -1367,11 +1393,7 @@ class LocalBackend(Backend):
         engine.mixer.set_playing(False)
 
         if keep:
-            take_info = TakeInfo(
-                instrument=active.inst.name, take_number=active.take_num, filename=active.rec_path.name,
-            )
-            active.track.set_preferred_take(active.inst.name, take_info)
-            status = f"Saved take {active.take_num} for '{active.track.name}'"
+            status = self._persist_take(active)
         else:
             active.rec_path.unlink(missing_ok=True)
             self._discard_new_inspiration_track(active)
@@ -1386,21 +1408,7 @@ class LocalBackend(Backend):
         if active.video_recorder:
             active.video_recorder.stop()
             if keep:
-                from .video.capture import format_watermark_text, mux_video_audio
-                config = self.get_config()
-                musician = active.inst.musician or config.studio_musician
-                watermark_text = format_watermark_text(
-                    musician, active.inst.name, active.record_start_wall_time, active.track.name,
-                )
-                if mux_video_audio(
-                    active.video_raw, active.mix_flac, active.rec_path, active.final_video,
-                    watermark_text=watermark_text, video_offset_ms=config.video_latency_compensation_ms,
-                ):
-                    active.video_raw.unlink(missing_ok=True)
-                    active.mix_flac.unlink(missing_ok=True)
-                    status += " + video"
-                else:
-                    status += "; video mux failed"
+                status += self._mux_take_video(active)
             else:
                 active.video_raw.unlink(missing_ok=True)
                 active.mix_flac.unlink(missing_ok=True)
@@ -1408,6 +1416,35 @@ class LocalBackend(Backend):
         if not active.in_session:
             self._preview.resume()
         self._emit("recording_status", {"phase": "idle", "status": status})
+
+    def _persist_take(self, active: "_ActiveRecording") -> str:
+        """Record active's current take as its track's preferred take.
+        Called with self._record_lock held, after the take's audio file is
+        finalized on disk (engine.stop_recording() already called)."""
+        take_info = TakeInfo(
+            instrument=active.inst.name, take_number=active.take_num, filename=active.rec_path.name,
+        )
+        active.track.set_preferred_take(active.inst.name, take_info)
+        return f"Saved take {active.take_num} for '{active.track.name}'"
+
+    def _mux_take_video(self, active: "_ActiveRecording") -> str:
+        """Mux active's raw video + monitor-mix audio into its final
+        produced video. Called after active.video_recorder.stop(); returns a
+        status suffix describing the outcome."""
+        from .video.capture import format_watermark_text, mux_video_audio
+        config = self.get_config()
+        musician = active.inst.musician or config.studio_musician
+        watermark_text = format_watermark_text(
+            musician, active.inst.name, active.record_start_wall_time, active.track.name,
+        )
+        if mux_video_audio(
+            active.video_raw, active.mix_flac, active.rec_path, active.final_video,
+            watermark_text=watermark_text, video_offset_ms=config.video_latency_compensation_ms,
+        ):
+            active.video_raw.unlink(missing_ok=True)
+            active.mix_flac.unlink(missing_ok=True)
+            return " + video"
+        return "; video mux failed"
 
     # --- camera preview ---
 
