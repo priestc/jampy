@@ -14,7 +14,7 @@ except ImportError:
     _HAVE_STREAMDECK = False
 
 try:
-    from PIL import ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont
     _HAVE_PIL = True
 except ImportError:
     _HAVE_PIL = False
@@ -123,28 +123,32 @@ _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
 
 # Shared layout for every recording context (Tk UI, headless `takeloom
 # server`, and the CLI) — one table, one set of semantics, so the physical
-# deck behaves identically no matter which one is driving it. `active_state`
+# deck (and the Tk UI's on-screen emulator — see ui/streamdeck_emulator.py)
+# behaves identically no matter which one is driving it. `active_state`
 # here is a recording *phase* ("idle"/"waiting"/"recording"); Next and the
 # monitor-mode toggle are always available so their active_state is None,
 # while Restart only means anything mid-take and is dimmed otherwise.
 _RECORDING_TOGGLE: tuple = (0, None, None, "r", None, None, None)  # rendered by update_recording_page
 _RECORDING_NEXT: tuple = (1, "skip", "Next", "n", None, (0, 160, 220), (0, 160, 220))
 _RECORDING_RESTART: tuple = (2, "prev", "Restart", "b", "recording", (255, 140, 0), (55, 35, 10))
-_RECORDING_MONITOR_TOGGLE_KEY_INDEX = 3
+RECORDING_MONITOR_TOGGLE_KEY_INDEX = 3
 _RECORDING_MONITOR_TOGGLE: tuple = (
-    _RECORDING_MONITOR_TOGGLE_KEY_INDEX, None, None, "m", None, None, None,
+    RECORDING_MONITOR_TOGGLE_KEY_INDEX, None, None, "m", None, None, None,
 )  # rendered by update_monitoring_mode
 
 # Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
 # Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
 # hardware direct monitor path used while actually laying down a take);
 # Production reuses the old Video Check button's blue.
-_LIVE_MONITOR_COLOR = (255, 140, 0)
-_PRODUCTION_MONITOR_COLOR = (0, 160, 200)
+LIVE_MONITOR_COLOR = (255, 140, 0)
+PRODUCTION_MONITOR_COLOR = (0, 160, 200)
 
-_RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE]
+# RECORDING_BUTTONS/RECORDING_VOLUME_BUTTONS are public (no leading
+# underscore): the Tk UI's on-screen emulator (ui/streamdeck_emulator.py)
+# draws the exact same button set as the physical device from these tables.
+RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE]
 
-_RECORDING_VOLUME_BUTTONS: list[tuple] = [
+RECORDING_VOLUME_BUTTONS: list[tuple] = [
     (4, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
     (5, "vol_up",   "Vol +",   "u", None, (0,   120, 200), (0,   120, 200)),
     (6, "takes_dn", "Takes -", "[", None, (120,   0, 200), (120,   0, 200)),
@@ -250,6 +254,63 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
         draw.line([bx1, by, bx2, by], fill=f, width=lw)
         if icon == "takes_up":
             draw.line([cx, by - lw * 2, cx, by + lw * 2], fill=f, width=lw)
+
+
+def _paint_key_face(draw: "ImageDraw.ImageDraw", size: tuple[int, int], icon: str | None, label: str | None) -> None:
+    """Paint one key's icon + label onto an already-created image of the
+    given (w, h) — the part of key rendering that's identical whether the
+    destination is a real deck's native image format (_make_key_image) or
+    a plain PIL image for the Tk UI's on-screen emulator (render_button_image)."""
+    w, h = size
+    if icon:
+        icon_size = int(h * 0.42)
+        icon_cy = int(h * 0.38)
+        _draw_icon(draw, icon, w // 2, icon_cy, icon_size)
+    if label:
+        label_y = h - int(h * 0.14)
+        draw.text((w // 2, label_y), label, anchor="mm", font=_load_font(11), fill="white")
+
+
+def render_button_image(icon: str | None, label: str | None, color: tuple, size: int = 72) -> "Image.Image":
+    """Render one key's face as a plain, deck-independent PIL image — used
+    by the Tk UI's on-screen Stream Deck emulator (ui/streamdeck_emulator.py)
+    so it draws pixel-identical buttons to the physical device without a
+    connected deck. Compare _make_key_image, the hardware-native-format
+    equivalent used for an actually-connected deck."""
+    img = Image.new("RGB", (size, size), color)
+    _paint_key_face(ImageDraw.Draw(img), (size, size), icon, label)
+    return img
+
+
+def recording_toggle_visual(phase: str, video_check_phase: str) -> tuple[str, str, tuple]:
+    """(icon, label, color) for the Record/Unpause/Stop toggle (key 0) —
+    shared by the physical deck (update_recording_page) and the Tk UI's
+    on-screen emulator so the two always render identically."""
+    icon, label, color = {
+        "idle":      ("record", "Start Recording", (0,   200, 0)),
+        "waiting":   ("play",   "Unpause",         (230, 160, 0)),
+        "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
+    }[phase]
+    if video_check_phase == "recording":
+        color = (40, 40, 40)
+    return icon, label, color
+
+
+def monitor_toggle_visual(mode: str) -> tuple[str, str, tuple]:
+    """(icon, label, color) for the monitor-mode toggle key — see
+    update_monitoring_mode()."""
+    label = "Live\nMonitor" if mode == "recording" else "Production\nMonitor"
+    color = LIVE_MONITOR_COLOR if mode == "recording" else PRODUCTION_MONITOR_COLOR
+    return "headphones", label, color
+
+
+def button_visual(btn: tuple, phase: str) -> tuple[str, str, tuple]:
+    """(icon, label, color) for any other recording-layout button, dimmed
+    or lit according to whether its active_state matches the current phase
+    — see the _RECORDING_* table comment above for the tuple shape."""
+    _idx, icon, label, _key, active_state, active_color, dim_color = btn
+    color = active_color if (active_state is None or active_state == phase) else dim_color
+    return icon, label, color
 
 
 class StreamDeckController:
@@ -361,9 +422,9 @@ class StreamDeckController:
         Production monitor toggle, and volume controls (dials if available,
         else buttons). Buttons whose index doesn't fit the connected deck
         are dropped rather than drawn out of range (e.g. the 6-key Mini)."""
-        self._buttons = list(_RECORDING_BUTTONS)
+        self._buttons = list(RECORDING_BUTTONS)
         if not self._has_dials:
-            self._buttons += _RECORDING_VOLUME_BUTTONS
+            self._buttons += RECORDING_VOLUME_BUTTONS
         self._dial_map = dict(_SESSION_DIAL_MAP)
         if not self.connected:
             return
@@ -379,12 +440,12 @@ class StreamDeckController:
                 if idx not in used_indices:
                     self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
             for btn in self._buttons:
-                idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
+                idx, icon, _label, _key, _active_state, _active_color, _dim_color = btn
+                if idx in (0, RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
                     continue
                 # Freshly applying the layout with no phase known yet — treat
                 # as "idle" (dimmed) until the first update_recording_page().
-                color = dim_color if active_state is not None else active_color
+                icon, label, color = button_visual(btn, "idle")
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
                 self._update_touchscreen()
@@ -397,24 +458,20 @@ class StreamDeckController:
         hardware, since the two are mutually exclusive at the backend
         level. `phase` is one of "idle"/"waiting"/"recording";
         `video_check_phase` is "idle"/"recording". Shared verbatim by the
-        Tk UI, headless server, and CLI drivers. The monitor-mode toggle key
-        (index 3) is refreshed separately — see update_monitoring_mode()."""
+        Tk UI, headless server, and CLI drivers (and mirrored on-screen by
+        the Tk UI's emulator via the same recording_toggle_visual()/
+        button_visual() helpers). The monitor-mode toggle key (index 3) is
+        refreshed separately — see update_monitoring_mode()."""
         if not self.connected:
             return
-        record_icon, record_label, record_color = {
-            "idle":      ("record", "Start Recording", (0,   200, 0)),
-            "waiting":   ("play",   "Unpause",         (230, 160, 0)),
-            "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
-        }[phase]
-        if video_check_phase == "recording":
-            record_color = (40, 40, 40)
+        record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
         with self._lock:
             self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
             for btn in self._buttons:
-                idx, icon, label, _key, active_state, active_color, dim_color = btn
-                if idx in (0, _RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
+                idx, icon, _label, _key, _active_state, _active_color, _dim_color = btn
+                if idx in (0, RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
                     continue
-                color = active_color if (active_state is None or active_state == phase) else dim_color
+                icon, label, color = button_visual(btn, phase)
                 self._deck.set_key_image(idx, self._make_key_image(icon, label, color))
             if self._has_dials:
                 self._update_touchscreen()
@@ -430,13 +487,12 @@ class StreamDeckController:
         whenever it changes, from any client — see RecordingDeckDriver."""
         if not self.connected:
             return
-        if not any(btn[0] == _RECORDING_MONITOR_TOGGLE_KEY_INDEX for btn in self._buttons):
+        if not any(btn[0] == RECORDING_MONITOR_TOGGLE_KEY_INDEX for btn in self._buttons):
             return
-        label = "Live\nMonitor" if mode == "recording" else "Production\nMonitor"
-        color = _LIVE_MONITOR_COLOR if mode == "recording" else _PRODUCTION_MONITOR_COLOR
+        icon, label, color = monitor_toggle_visual(mode)
         with self._lock:
             self._deck.set_key_image(
-                _RECORDING_MONITOR_TOGGLE_KEY_INDEX, self._make_key_image("headphones", label, color)
+                RECORDING_MONITOR_TOGGLE_KEY_INDEX, self._make_key_image(icon, label, color)
             )
 
     def _on_key_change(self, deck, key_index: int, pressed: bool) -> None:
@@ -492,15 +548,7 @@ class StreamDeckController:
 
     def _make_key_image(self, icon: str | None, label: str | None, color: tuple) -> bytes:
         img = PILHelper.create_image(self._deck, background=color)
-        draw = ImageDraw.Draw(img)
-        w, h = img.size
-        if icon:
-            icon_size = int(h * 0.42)
-            icon_cy = int(h * 0.38)
-            _draw_icon(draw, icon, w // 2, icon_cy, icon_size)
-        if label:
-            label_y = h - int(h * 0.14)
-            draw.text((w // 2, label_y), label, anchor="mm", font=_load_font(11), fill="white")
+        _paint_key_face(ImageDraw.Draw(img), img.size, icon, label)
         return PILHelper.to_native_format(self._deck, img)
 
     def _update_touchscreen(self, track_name: str | None = None) -> None:

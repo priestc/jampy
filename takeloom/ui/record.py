@@ -28,6 +28,7 @@ from ..utils import format_duration
 from .app_state import AppState
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
+from .streamdeck_emulator import StreamDeckEmulator
 from .video_check_dialog import VideoCheckDialog
 
 
@@ -264,10 +265,10 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
-        self.record_button = ttk.Button(left, text="Start Recording", command=self._on_toggle_recording)
-        self.record_button.grid(row=row, column=0, columnspan=2, pady=(8, 0))
-        if not instrument_names or not self._project_names:
-            self.record_button.state(["disabled"])
+        self.streamdeck_emulator = StreamDeckEmulator(left, on_key=self._on_emulator_key)
+        self.streamdeck_emulator.grid(row=row, column=0, columnspan=2, pady=(8, 0))
+        self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
+        self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
         row += 1
 
         self.video_check_button = ttk.Button(
@@ -306,6 +307,7 @@ class RecordFrame(ttk.Frame):
     def _on_monitoring_mode_change(self) -> None:
         mode = self.monitoring_mode_var.get()
         self._monitoring_mode = mode
+        self.streamdeck_emulator.update_monitoring_mode(mode)
         backend = self.app_state.backend
         self._run_backend(lambda: backend.set_monitoring_mode(mode))
 
@@ -672,22 +674,13 @@ class RecordFrame(ttk.Frame):
         self._update_start_button_state()
 
     def _update_start_button_state(self) -> None:
-        if not hasattr(self, "record_button"):
+        if not hasattr(self, "video_check_button"):
             return
         ready = (
             bool(self.instrument_var.get())
             and self._project_name is not None
             and self._selected_track_source is not None
         )
-        if self._phase != "idle":
-            self.record_button.state(["!disabled"])
-        else:
-            # Also blocked while a video check has the audio/camera hardware —
-            # the two are mutually exclusive at the backend level.
-            self.record_button.state(["!disabled"] if (ready and self._video_check_phase == "idle") else ["disabled"])
-
-        if not hasattr(self, "video_check_button"):
-            return
         if self._video_check_phase != "idle":
             self.video_check_button.state(["!disabled"])
         else:
@@ -795,6 +788,20 @@ class RecordFrame(ttk.Frame):
 
     # --- recording ---
 
+    def _on_emulator_key(self, key: str) -> None:
+        """Dispatch a click on the on-screen Stream Deck emulator. "r"
+        (Start/Unpause/Stop) reuses this frame's own request-building and
+        loading-state handling verbatim — same as a mouse click on the old
+        ttk button did — since it's the one key with real Tk-side UI state
+        to manage. Every other key (Next/Restart/Monitor/volume) has no Tk
+        equivalent of its own and goes straight through the shared driver,
+        exactly like a physical Stream Deck press does (see
+        _on_streamdeck_key)."""
+        if key == "r":
+            self._on_toggle_recording()
+        else:
+            self._streamdeck_driver.handle_key(key)
+
     def _on_toggle_recording(self) -> None:
         if self._phase == "idle":
             self._start_recording()
@@ -832,7 +839,7 @@ class RecordFrame(ttk.Frame):
         if req is None:
             return
 
-        self.record_button.state(["disabled"])
+        self.streamdeck_emulator.set_key_enabled(0, False)
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
         backend = self.app_state.backend
@@ -846,10 +853,11 @@ class RecordFrame(ttk.Frame):
             messagebox.showerror("Cannot start", error)
             self._set_controls_enabled(True)
             self.status_var.set("")
+            self.streamdeck_emulator.set_key_enabled(0, True)
             self._update_start_button_state()
 
     def _unpause_recording(self) -> None:
-        self.record_button.state(["disabled"])
+        self.streamdeck_emulator.set_key_enabled(0, False)
         backend = self.app_state.backend
         self._run_backend(
             lambda: backend.unpause_recording(), lambda _result, error: self._on_unpause_result(error)
@@ -860,15 +868,15 @@ class RecordFrame(ttk.Frame):
         # via _handle_backend_event — nothing left to do here.
         if error:
             messagebox.showerror("Cannot unpause", error)
-            self.record_button.state(["!disabled"])
+            self.streamdeck_emulator.set_key_enabled(0, True)
 
     def _stop_recording(self) -> None:
-        self.record_button.state(["disabled"])
+        self.streamdeck_emulator.set_key_enabled(0, False)
         backend = self.app_state.backend
         self._run_backend(lambda: backend.stop_recording(), lambda _result, error: self._on_stop_result(error))
 
     def _on_stop_result(self, error: str | None) -> None:
-        self.record_button.state(["!disabled"])
+        self.streamdeck_emulator.set_key_enabled(0, True)
         if error:
             messagebox.showerror("Stop failed", error)
 
@@ -920,7 +928,6 @@ class RecordFrame(ttk.Frame):
     def _on_backend_event(self, event: str, data: dict) -> None:
         self.after(0, lambda: self._handle_backend_event(event, data))
 
-    _PHASE_BUTTON_TEXT = {"idle": "Start Recording", "waiting": "Unpause", "recording": "Stop Recording"}
     _VIDEO_CHECK_BUTTON_TEXT = {"idle": "Video Check", "recording": "Stop Video Check"}
 
     def _update_recording_active(self) -> None:
@@ -935,8 +942,8 @@ class RecordFrame(ttk.Frame):
             if "phase" in data:
                 self._phase = data["phase"]
                 self._update_recording_active()
-                self.record_button.configure(text=self._PHASE_BUTTON_TEXT[self._phase])
-                self.record_button.state(["!disabled"])
+                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
+                self.streamdeck_emulator.set_key_enabled(0, True)
                 self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
                     self._refresh_playlist_from_server()
@@ -947,6 +954,7 @@ class RecordFrame(ttk.Frame):
             if "phase" in data:
                 self._video_check_phase = data["phase"]
                 self._update_recording_active()
+                self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
                 self.video_check_button.configure(text=self._VIDEO_CHECK_BUTTON_TEXT[self._video_check_phase])
                 self.video_check_button.state(["!disabled"])
                 self._set_controls_enabled(self._video_check_phase == "idle")
