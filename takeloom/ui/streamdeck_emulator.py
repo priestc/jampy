@@ -26,8 +26,12 @@ from ..streamdeck_controller import (
     recording_toggle_visual,
     render_button_image,
 )
+from .platform_style import scaled_px
 
-_KEY_SIZE = 68
+# Rendered pixel size of each key image — outside ttk's styling system, so
+# it needs its own Linux scaling (see platform_style.py) rather than
+# picking up the ttk font/padding normalization automatically.
+_KEY_SIZE = scaled_px(68)
 _COLS = 5
 _ALL_BUTTONS: list[tuple] = list(RECORDING_BUTTONS) + list(RECORDING_VOLUME_BUTTONS)
 
@@ -56,7 +60,7 @@ class StreamDeckEmulator(ttk.Frame):
                 self, borderwidth=0, highlightthickness=0, relief="flat", cursor="hand2",
                 command=lambda k=key_char: self._on_key(k),
             )
-            button.grid(row=row, column=col, padx=3, pady=3)
+            button.grid(row=row, column=col, padx=scaled_px(3), pady=scaled_px(3))
             self._buttons[idx] = button
 
         self._redraw()

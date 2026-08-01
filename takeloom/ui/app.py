@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Callable
@@ -14,6 +13,7 @@ from ..device_check import check_configured_devices
 from .app_state import AppState
 from .instruments import InstrumentsFrame
 from .latency import LatencyFrame
+from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
 from .recording_devices import RecordingDevicesFrame
 from .remote import RemoteFrame
@@ -201,13 +201,7 @@ def handle_remote_disconnect(root: tk.Misc, app_state: AppState, host: str, port
 
 def run(remote_ip: str | None = None) -> None:
     root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
-    if sys.platform.startswith("linux"):
-        # Many Linux setups (bad EDID physical-size data, VMs, some laptop
-        # panels) make Tk miscompute the display DPI, so point-sized fonts
-        # render much smaller than the same code produces on macOS. Pin the
-        # DPI assumption to 96, what a 100%-scaled Linux desktop actually
-        # uses, so text comes out the same size as on macOS.
-        root.tk.call("tk", "scaling", 96 / 72)
+    normalize_platform_style(root)
     root.title("Takeloom")
 
     app_state = AppState()
