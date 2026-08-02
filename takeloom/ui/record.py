@@ -17,7 +17,7 @@ import io
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from ..audio.filters import COMPRESSOR_PRESETS
 from ..backend import BackendError, StartRecordingRequest
@@ -424,6 +424,12 @@ class RecordFrame(ttk.Frame):
         self.playlist_listbox.pack(side="left", fill="both", expand=True)
         playlist_scroll.pack(side="right", fill="y")
         self.playlist_listbox.bind("<<ListboxSelect>>", self._on_playlist_select)
+        # Button-3 covers Windows/Linux/modern macOS right-click; the other
+        # two are fallbacks for older Tk-on-macOS builds and trackpads
+        # without a distinct right-click gesture.
+        self.playlist_listbox.bind("<Button-3>", self._on_playlist_right_click)
+        self.playlist_listbox.bind("<Button-2>", self._on_playlist_right_click)
+        self.playlist_listbox.bind("<Control-Button-1>", self._on_playlist_right_click)
 
         inspiration_tab.columnconfigure(0, weight=1)
         inspiration_tab.rowconfigure(2, weight=1)
@@ -638,6 +644,67 @@ class RecordFrame(ttk.Frame):
         self.inspiration_listbox.selection_clear(0, tk.END)
         self.selection_var.set(f"Selected: {self._selected_track.name} (playlist)")
         self._update_start_button_state()
+
+    def _on_playlist_right_click(self, event: object) -> None:
+        if self._phase != "idle" or not self._setlist:
+            return  # don't let the setlist change out from under an active take
+        index = self.playlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
+        if index < 0 or index >= len(self._setlist.tracks):
+            return
+        self.playlist_listbox.selection_clear(0, tk.END)
+        self.playlist_listbox.selection_set(index)
+        self._on_playlist_select()
+
+        menu = tk.Menu(self, tearoff=0)
+        menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
+        menu.add_command(label="Delete", command=lambda: self._on_delete_track(index))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
+        finally:
+            menu.grab_release()
+
+    def _on_rename_track(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+        new_name = simpledialog.askstring(
+            "Rename Track", "Track name:", initialvalue=track.name, parent=self,
+        )
+        new_name = (new_name or "").strip()
+        if not new_name or new_name == track.name:
+            return
+        track.name = new_name
+        if self._selected_track_index == index:
+            self.selection_var.set(f"Selected: {track.name} (playlist)")
+        self._save_setlist_and_refresh()
+
+    def _on_delete_track(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+        if not messagebox.askyesno("Delete Track", f'Remove "{track.name}" from the playlist?', parent=self):
+            return
+        self._setlist.remove_track(index)
+        if self._selected_track_index == index:
+            self._clear_selection()
+        self._save_setlist_and_refresh()
+
+    def _save_setlist_and_refresh(self) -> None:
+        if not self._project_name or not self._setlist:
+            return
+        backend = self.app_state.backend
+        project_name = self._project_name
+        setlist_data = self._setlist.to_dict()
+        self._run_backend(
+            lambda: backend.save_setlist(project_name, setlist_data),
+            lambda _result, error: self._on_setlist_saved(error),
+        )
+
+    def _on_setlist_saved(self, error: str | None) -> None:
+        if error:
+            messagebox.showerror("Save failed", error)
+            return
+        self._refresh_playlist()
 
     def _on_inspiration_select(self, _event: object = None) -> None:
         sel = self.inspiration_listbox.curselection()
