@@ -1,8 +1,11 @@
-"""Recording Devices screen: sample rate, buffer, output device, input labels, camera.
+"""Recording Devices screen: sample rate, buffer, output device, camera,
+Stream Deck.
 
 Mirrors the fields configured by the `takeloom setup-recording-devices` CLI
-command. Reads/writes whichever machine's config `app_state.backend`
-currently points at, and queries that same machine's audio/camera devices.
+command (input labels excepted — see studio_setup.py, grouped there with
+instruments instead). Reads/writes whichever machine's config
+`app_state.backend` currently points at, and queries that same machine's
+audio/camera devices.
 """
 
 from __future__ import annotations
@@ -12,72 +15,12 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ..backend import BackendError
-from ..config import (
-    InputLabel,
-    StudioConfig,
-    VALID_BUFFER_SIZES,
-    VALID_SAMPLE_RATES,
-)
+from ..config import StudioConfig, VALID_BUFFER_SIZES, VALID_SAMPLE_RATES
 from .app_state import AppState
 
 
-class _InputRow(ttk.Frame):
-    """One editable input-label row: label text, device choice, channel number."""
-
-    def __init__(
-        self,
-        master: tk.Misc,
-        input_devices: list[dict],
-        on_remove,
-        label: str = "",
-        device: str = "",
-        channel: int = 1,
-    ) -> None:
-        super().__init__(master)
-        self.input_devices = input_devices
-        self._on_remove = on_remove
-
-        self.label_var = tk.StringVar(value=label)
-        self.device_var = tk.StringVar(value=device)
-        self.channel_var = tk.IntVar(value=channel or 1)
-
-        ttk.Entry(self, textvariable=self.label_var, width=18).grid(row=0, column=0, padx=(0, 6))
-
-        self.device_box = ttk.Combobox(self, textvariable=self.device_var, width=28)
-        self.device_box.grid(row=0, column=1, padx=(0, 6))
-        self.device_box.bind("<<ComboboxSelected>>", lambda _e: self._update_channel_range())
-
-        self.channel_spin = ttk.Spinbox(self, from_=1, to=64, textvariable=self.channel_var, width=4)
-        self.channel_spin.grid(row=0, column=2, padx=(0, 6))
-
-        ttk.Button(self, text="Remove", command=lambda: self._on_remove(self)).grid(row=0, column=3)
-
-        self.set_input_devices(input_devices)
-
-    def set_input_devices(self, input_devices: list[dict]) -> None:
-        """Refresh the device dropdown's choices, e.g. after a device reload."""
-        self.input_devices = input_devices
-        device_names = [d["name"] for d in input_devices]
-        self.device_box.configure(values=device_names, state="readonly" if device_names else "normal")
-        self._update_channel_range()
-
-    def _update_channel_range(self) -> None:
-        dev = next((d for d in self.input_devices if d["name"] == self.device_var.get()), None)
-        max_ch = dev["max_input_channels"] if dev else 64
-        self.channel_spin.configure(to=max(1, max_ch))
-        if max_ch and self.channel_var.get() > max_ch:
-            self.channel_var.set(max_ch)
-
-    def to_input_label(self) -> InputLabel | None:
-        label = self.label_var.get().strip()
-        device = self.device_var.get().strip()
-        if not label or not device:
-            return None
-        return InputLabel(label=label, device=device, channel=self.channel_var.get())
-
-
 class RecordingDevicesFrame(ttk.Frame):
-    """Form for sample rate, buffer, output device, input labels, and camera."""
+    """Form for sample rate, buffer, output device, camera, and Stream Deck."""
 
     def __init__(self, master: tk.Misc, app_state: AppState) -> None:
         super().__init__(master)
@@ -85,10 +28,8 @@ class RecordingDevicesFrame(ttk.Frame):
         self.config_obj: StudioConfig | None = None
         self.devices: list[dict] = []
         self.output_devices: list[dict] = []
-        self.input_devices: list[dict] = []
         self._camera_choices: list[tuple[str, str]] = []
         self._streamdeck_choices: list[tuple[str, str]] = []
-        self._input_rows: list[_InputRow] = []
 
         ttk.Label(self, text="Loading...").pack(anchor="w")
         self._initial_load()
@@ -124,7 +65,6 @@ class RecordingDevicesFrame(ttk.Frame):
             return
         self.config_obj = config
         self._set_devices(devices, cameras, streamdecks)
-        self._input_rows = []
         self._build()
 
     def _set_devices(
@@ -132,7 +72,6 @@ class RecordingDevicesFrame(ttk.Frame):
     ) -> None:
         self.devices = devices
         self.output_devices = [d for d in devices if d["max_output_channels"] > 0]
-        self.input_devices = [d for d in devices if d["max_input_channels"] > 0]
         # A device that's configured but momentarily not detected (unplugged,
         # or racing another process for it — see streamdeck_controller.py's
         # _open_by_id) must still appear as a choice here, selected, using
@@ -210,28 +149,6 @@ class RecordingDevicesFrame(ttk.Frame):
         ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
         row += 1
 
-        ttk.Label(self, text="Input Labels", font=("TkDefaultFont", 11, "bold")).grid(
-            row=row, column=0, columnspan=2, sticky="w"
-        )
-        row += 1
-
-        self.rows_container = ttk.Frame(self)
-        self.rows_container.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(4, 0))
-        row += 1
-
-        for il in self.config_obj.input_labels:
-            self._add_input_row(label=il.label, device=il.device, channel=il.channel)
-        if not self.config_obj.input_labels:
-            self._add_input_row()
-
-        ttk.Button(self, text="+ Add Input", command=self._add_input_row).grid(
-            row=row, column=0, sticky="w", pady=(4, 10)
-        )
-        row += 1
-
-        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
-        row += 1
-
         ttk.Label(self, text="Camera", font=("TkDefaultFont", 11, "bold")).grid(
             row=row, column=0, columnspan=2, sticky="w"
         )
@@ -290,26 +207,11 @@ class RecordingDevicesFrame(ttk.Frame):
         output_names = [d["name"] for d in self.output_devices]
         self.output_device_box.configure(values=output_names, state="readonly" if output_names else "normal")
 
-        for row_widget in self._input_rows:
-            row_widget.set_input_devices(self.input_devices)
-
         camera_display = [display for _dev_id, display in self._camera_choices]
         self.camera_box.configure(values=camera_display)
 
         streamdeck_display = [display for _dev_id, display in self._streamdeck_choices]
         self.streamdeck_box.configure(values=streamdeck_display)
-
-    def _add_input_row(self, label: str = "", device: str = "", channel: int = 1) -> None:
-        row_widget = _InputRow(
-            self.rows_container, self.input_devices, self._remove_input_row,
-            label=label, device=device, channel=channel,
-        )
-        row_widget.pack(fill="x", pady=2)
-        self._input_rows.append(row_widget)
-
-    def _remove_input_row(self, row_widget: _InputRow) -> None:
-        row_widget.destroy()
-        self._input_rows.remove(row_widget)
 
     # --- reload devices ---
 
@@ -350,7 +252,6 @@ class RecordingDevicesFrame(ttk.Frame):
         self._set_devices(devices, cameras, streamdecks)
         for child in self.winfo_children():
             child.destroy()
-        self._input_rows = []
         self._build()
         self.status_var.set(f"Devices reloaded ({len(self.devices)} found).")
 
@@ -374,7 +275,6 @@ class RecordingDevicesFrame(ttk.Frame):
             self.config_obj.latency_compensation_ms = float(self.latency_var.get())
         except ValueError:
             pass
-        self.config_obj.input_labels = [il for row in self._input_rows if (il := row.to_input_label())]
 
         camera_display = self.camera_var.get()
         camera_device, camera_label = next(

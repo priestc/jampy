@@ -2,9 +2,9 @@
 
 Holds the active Backend (local or remote) plus a tiny pub/sub so tabs that
 get rebuilt from scratch on every tab switch (Studio Setup, Recording
-Devices, Instruments — see app.py's `rebuild()`) can pick up the current
-backend on construction, while the persistent Record/Remote tabs react to a
-backend swap in place without being destroyed.
+Devices — see app.py's `rebuild()`) can pick up the current backend on
+construction, while the persistent Record/Remote tabs react to a backend
+swap in place without being destroyed.
 
 Created once in `app.py:run()` and passed into every tab constructor.
 """

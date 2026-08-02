@@ -11,7 +11,6 @@ from tkinterdnd2 import TkinterDnD
 from ..backend import BackendError
 from ..device_check import check_configured_devices
 from .app_state import AppState
-from .instruments import InstrumentsFrame
 from .latency import LatencyFrame
 from .platform_style import normalize as normalize_platform_style
 from .record import RecordFrame
@@ -28,7 +27,6 @@ TABS = [
     ("Record", RecordFrame, True),
     ("Studio Setup", StudioSetupFrame, False),
     ("Recording Devices", RecordingDevicesFrame, False),
-    ("Instruments", InstrumentsFrame, False),
     ("Latency", LatencyFrame, True),
     ("Remote", RemoteFrame, True),
 ]

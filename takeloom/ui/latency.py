@@ -146,7 +146,7 @@ class LatencyFrame(ttk.Frame):
 
         if not instrument_names:
             ttk.Label(
-                self, text="No instruments configured. Set them up on the Instruments tab first.",
+                self, text="No instruments configured. Set them up on the Studio Setup tab first.",
                 foreground="#b00020",
             ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(4, 0))
             row += 1
