@@ -1,0 +1,223 @@
+"""Add to Playlist dialog: a drop zone for local audio/video files and
+YouTube URLs, used to add backing tracks to a project already selected on
+the Record tab.
+
+Shares its drag-and-drop/queue mechanics with NewProjectDialog, but skips
+the project-creation step (the project already exists) and starts
+processing each item the moment it's queued rather than waiting for a
+single "Create" click, so tracks appear in the Setlist one at a time as
+they finish instead of all at once at the end.
+"""
+
+from __future__ import annotations
+
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from typing import Callable
+
+from tkinterdnd2 import DND_FILES, DND_TEXT
+
+from ..backend import Backend, BackendError
+from ..youtube import is_youtube_url
+from .new_project_dialog import URLPromptDialog
+
+
+class AddToPlaylistDialog(tk.Toplevel):
+    """Popup for adding local files / YouTube URLs as backing tracks to an
+    existing project. `on_track_added` fires after every successful add
+    (not just once at the end) so the caller can refresh its track list
+    live as items finish."""
+
+    _PLACEHOLDER = "Drag audio files or YouTube URLs here, or use the buttons below"
+
+    def __init__(
+        self, master: tk.Misc, backend: Backend, project_name: str, on_track_added: Callable[[], None],
+    ) -> None:
+        super().__init__(master)
+        self.title("Add to Playlist")
+        self.resizable(False, False)
+        self.transient(master)
+
+        self._backend = backend
+        self._project_name = project_name
+        self._on_track_added = on_track_added
+        self._items: list[dict] = []  # {"source": str, "kind": "file"|"youtube", "status": str}
+        self._processing = False
+        self.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text=f"Adding to: {project_name}", font=("TkDefaultFont", 11, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        )
+
+        self.drop_zone = tk.Listbox(
+            frame, height=8, width=56, background="#1a1a1a", foreground="white",
+            selectbackground="#2a6db0", highlightthickness=1, highlightbackground="#444444",
+        )
+        self.drop_zone.grid(row=1, column=0, columnspan=2, sticky="ew")
+        self.drop_zone.drop_target_register(DND_FILES, DND_TEXT)
+        self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Button(button_row, text="Add Files...", command=self._on_browse_files).pack(side="left")
+        ttk.Button(button_row, text="Add YouTube URL...", command=self._on_add_url).pack(side="left", padx=(8, 0))
+        ttk.Button(button_row, text="Remove Selected", command=self._on_remove_selected).pack(side="left", padx=(8, 0))
+
+        self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
+        self.progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+        self.status_var = tk.StringVar(value="")
+        ttk.Label(frame, textvariable=self.status_var, foreground="#2a7d2a", wraplength=400).grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+
+        footer = ttk.Frame(frame)
+        footer.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        self.close_button = ttk.Button(footer, text="Done", command=self.destroy)
+        self.close_button.pack(side="left")
+
+        self._refresh_list()
+
+    # --- collecting sources ---
+
+    def _add_item(self, source: str, kind: str) -> None:
+        source = source.strip()
+        if not source or any(i["source"] == source for i in self._items):
+            return
+        self._items.append({"source": source, "kind": kind, "status": "Pending"})
+        self._refresh_list()
+        self._process_next()
+
+    def _refresh_list(self) -> None:
+        self.drop_zone.delete(0, tk.END)
+        if not self._items:
+            self.drop_zone.insert(0, self._PLACEHOLDER)
+            self.drop_zone.itemconfig(0, foreground="#888888")
+            return
+        for item in self._items:
+            self.drop_zone.insert(tk.END, f"{item['source']}  —  {item['status']}")
+
+    def _on_drop(self, event: object) -> None:
+        for raw in self._split_dnd_data(event.data):  # type: ignore[attr-defined]
+            kind = "youtube" if is_youtube_url(raw) else "file"
+            self._add_item(raw, kind)
+
+    @staticmethod
+    def _split_dnd_data(data: str) -> list[str]:
+        """tkinterdnd2 wraps each dropped item in {...} when it contains
+        whitespace, and separates items by whitespace otherwise."""
+        items = []
+        buf = ""
+        depth = 0
+        for ch in data:
+            if ch == "{":
+                depth += 1
+                continue
+            if ch == "}":
+                depth -= 1
+                continue
+            if ch.isspace() and depth == 0:
+                if buf:
+                    items.append(buf)
+                    buf = ""
+                continue
+            buf += ch
+        if buf:
+            items.append(buf)
+        return items
+
+    def _on_browse_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Add Backing Tracks",
+            filetypes=[
+                ("Audio/video files", "*.flac *.wav *.mp3 *.m4a *.aac *.ogg *.opus "
+                                       "*.mp4 *.m4v *.mov *.mkv *.webm *.avi"),
+                ("All files", "*.*"),
+            ],
+            parent=self,
+        )
+        for p in paths:
+            self._add_item(p, "file")
+
+    def _on_add_url(self) -> None:
+        dialog = URLPromptDialog(self)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        if not is_youtube_url(dialog.result):
+            messagebox.showerror("Not a YouTube URL", "Only YouTube URLs are supported here.", parent=self)
+            return
+        self._add_item(dialog.result, "youtube")
+
+    def _on_remove_selected(self) -> None:
+        # Only "Pending" (not yet started) items can be pulled back out —
+        # one already downloading/copying can't be cancelled mid-flight,
+        # and a finished one is either already on disk or worth keeping
+        # visible as a record of the failure.
+        sel = list(self.drop_zone.curselection())
+        if not sel or not self._items:
+            return
+        for index in sorted(sel, reverse=True):
+            if index < len(self._items) and self._items[index]["status"] == "Pending":
+                del self._items[index]
+        self._refresh_list()
+
+    def _on_window_close(self) -> None:
+        if self._processing:
+            return  # a download in flight would just be orphaned, not stopped — see NewProjectDialog
+        self.destroy()
+
+    # --- sequential processing (one at a time, so the progress bar means something) ---
+
+    def _process_next(self) -> None:
+        if self._processing:
+            return
+        item = next((i for i in self._items if i["status"] == "Pending"), None)
+        if item is None:
+            return
+        self._processing = True
+        item["status"] = "Working..."
+        if self.winfo_exists():
+            self.close_button.state(["disabled"])
+            self.progress["value"] = 0
+            self._refresh_list()
+
+        backend = self._backend
+        project_name = self._project_name
+
+        def worker() -> None:
+            try:
+                if item["kind"] == "youtube":
+                    def on_progress(percent: float | None, message: str) -> None:
+                        self.after(0, lambda: self._update_progress(percent, message))
+                    backend.add_youtube_backing_track(project_name, item["source"], on_progress=on_progress)
+                else:
+                    backend.add_local_backing_track(project_name, item["source"])
+                self.after(0, lambda: self._on_item_done(item, None))
+            except BackendError as e:
+                self.after(0, lambda err=str(e): self._on_item_done(item, err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_progress(self, percent: float | None, message: str) -> None:
+        if not self.winfo_exists():
+            return
+        if percent is not None:
+            self.progress["value"] = percent
+        self.status_var.set(message)
+
+    def _on_item_done(self, item: dict, error: str | None) -> None:
+        item["status"] = f"Failed: {error}" if error else "Done"
+        self._processing = False
+        if not error:
+            self._on_track_added()
+        if self.winfo_exists():
+            self.progress["value"] = 0
+            self.status_var.set("")
+            self._refresh_list()
+            self.close_button.state(["!disabled"])
+        self._process_next()

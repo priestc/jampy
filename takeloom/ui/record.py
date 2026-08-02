@@ -25,6 +25,7 @@ from ..config import StudioConfig
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
+from .add_to_playlist_dialog import AddToPlaylistDialog
 from .app_state import AppState
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
@@ -406,9 +407,14 @@ class RecordFrame(ttk.Frame):
         notebook.add(inspiration_tab, text="Inspiration")
 
         setlist_tab.columnconfigure(0, weight=1)
-        setlist_tab.rowconfigure(0, weight=1)
+        setlist_tab.rowconfigure(1, weight=1)
+        setlist_header = ttk.Frame(setlist_tab)
+        setlist_header.grid(row=0, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(setlist_header, text="Setlist", font=("TkDefaultFont", 11, "bold")).pack(side="left")
+        ttk.Button(setlist_header, text="+ Add to Playlist", command=self._on_add_to_playlist).pack(side="right")
+
         playlist_wrap = ttk.Frame(setlist_tab)
-        playlist_wrap.grid(row=0, column=0, sticky="nsew", pady=(8, 0))
+        playlist_wrap.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
         playlist_scroll = ttk.Scrollbar(playlist_wrap, orient="vertical")
         self.playlist_listbox = tk.Listbox(
             playlist_wrap, height=10, exportselection=False,
@@ -530,6 +536,12 @@ class RecordFrame(ttk.Frame):
 
     def _on_new_project(self) -> None:
         NewProjectDialog(self, self.app_state.backend, self._on_project_created)
+
+    def _on_add_to_playlist(self) -> None:
+        if not self._project_name:
+            messagebox.showerror("Cannot add", "Select a project first.")
+            return
+        AddToPlaylistDialog(self, self.app_state.backend, self._project_name, self._refresh_playlist_from_server)
 
     def _on_project_created(self, project_name: str) -> None:
         backend = self.app_state.backend

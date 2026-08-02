@@ -144,7 +144,7 @@ class NewProjectDialog(tk.Toplevel):
             self._add_item(p, "file")
 
     def _on_add_url(self) -> None:
-        dialog = _URLPromptDialog(self)
+        dialog = URLPromptDialog(self)
         self.wait_window(dialog)
         if not dialog.result:
             return
@@ -262,7 +262,7 @@ class NewProjectDialog(tk.Toplevel):
         self.cancel_button.state(["!disabled"])
 
 
-class _URLPromptDialog(tk.Toplevel):
+class URLPromptDialog(tk.Toplevel):
     def __init__(self, master: tk.Misc) -> None:
         super().__init__(master)
         self.title("Add YouTube URL")
