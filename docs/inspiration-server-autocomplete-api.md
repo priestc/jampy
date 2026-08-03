@@ -19,7 +19,7 @@ Takeloom.
 ## Background: what's calling this, and why
 
 Takeloom is a desktop app for recording multi-instrument backing-track
-sessions. One of its dialogs — "Add to Playlist" — lets a musician add a
+sessions. One of its dialogs — "Add to Setlist" — lets a musician add a
 track to a project's setlist by typing an artist and/or title instead of
 picking from a pre-filtered browse list. That dialog already has two text
 fields (Artist, Title) wired up to autocomplete-as-you-type — a dropdown
@@ -235,8 +235,8 @@ Match the existing `/library/api/tracks/` endpoint's conventions:
 This side is already done and live in the Takeloom repo:
 `search_artist_suggestions`/`search_title_suggestions` in
 `takeloom/inspiration.py` call these two endpoints, feeding the Add to
-Playlist dialog's Artist/Title autocomplete fields
-(`takeloom/ui/add_to_playlist_dialog.py`). The client accepts both the
+Setlist dialog's Artist/Title autocomplete fields
+(`takeloom/ui/add_to_setlist_dialog.py`). The client accepts both the
 old (bare string) and new (full track object) shapes from Titles — it
 only gets to skip the secondary by-name search once a given response
 actually includes an `id`. There's nothing further to do on the Takeloom

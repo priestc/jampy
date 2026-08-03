@@ -1,4 +1,4 @@
-"""Add to Playlist dialog: add one backing track to a project already
+"""Add to Setlist dialog: add one backing track to a project already
 selected on the Record tab, from a local file, a YouTube URL, or the
 inspiration server — one tab per source, each embedded directly in this
 dialog rather than behind its own popup.
@@ -196,8 +196,8 @@ class _AutocompleteEntry(ttk.Frame):
         self.entry.bind("<Return>", callback)
 
 
-class AddToPlaylistDialog(tk.Toplevel):
-    """Add a single backing track to `project_name`'s playlist. Three
+class AddToSetlistDialog(tk.Toplevel):
+    """Add a single backing track to `project_name`'s setlist. Three
     tabs — File, YouTube URL, Inspiration — share one Add button that
     acts on whichever tab is currently selected; switching tabs doesn't
     lose anything typed into the others. `on_track_added` fires once, on
@@ -209,7 +209,7 @@ class AddToPlaylistDialog(tk.Toplevel):
         self, master: tk.Misc, backend: Backend, project_name: str, on_track_added: Callable[[], None],
     ) -> None:
         super().__init__(master)
-        self.title("Add to Playlist")
+        self.title("Add to Setlist")
         self.resizable(False, False)
         self.transient(master)
 

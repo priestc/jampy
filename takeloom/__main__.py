@@ -353,7 +353,7 @@ def server_command(disable_color: bool) -> None:
             return None
         return StartRecordingRequest(
             project_name=project_name, instrument_name=instrument_name,
-            track_source="playlist", track_index=index,
+            track_source="setlist", track_index=index,
         )
 
     def _open_video_check_result(path: Path, has_video: bool) -> None:
@@ -760,7 +760,7 @@ def start_session(instrument: str) -> None:
             return None
         return StartRecordingRequest(
             project_name=project.name, instrument_name=inst.name,
-            track_source="playlist", track_index=index,
+            track_source="setlist", track_index=index,
         )
 
     def _open_video_check_result(path: Path, has_video: bool) -> None:

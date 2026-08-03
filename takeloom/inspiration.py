@@ -57,7 +57,7 @@ def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dic
 def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
     """Query radioserver directly by artist and/or title, independent of a
     project's own configured inspiration filters — backs the Add to
-    Playlist dialog's "Add from Inspiration" search, as opposed to
+    Setlist dialog's "Add from Inspiration" search, as opposed to
     query_inspiration_tracks()'s per-project filtered browsing."""
     filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
     if not filters:
@@ -130,12 +130,12 @@ def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
 
 
 def search_artist_suggestions(config: StudioConfig, partial: str, limit: int = 10) -> list[str]:
-    """Autocomplete suggestions for the Add to Playlist dialog's Artist field."""
+    """Autocomplete suggestions for the Add to Setlist dialog's Artist field."""
     return _get_suggestions(config, "artists", {"q": partial.strip(), "limit": limit})
 
 
 def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[dict]:
-    """Autocomplete suggestions for the Add to Playlist dialog's Title
+    """Autocomplete suggestions for the Add to Setlist dialog's Title
     field, optionally narrowed to a specific artist. Each result is a
     track dict (id/artist/title/year/format/duration) — see
     docs/inspiration-server-autocomplete-api.md — so selecting one can

@@ -47,8 +47,8 @@ MIN_KEPT_TAKE_SECONDS = 10 * 60
 class StartRecordingRequest:
     project_name: str
     instrument_name: str
-    track_source: str  # "playlist" | "inspiration"
-    track_index: int | None = None       # for track_source == "playlist"
+    track_source: str  # "setlist" | "inspiration"
+    track_index: int | None = None       # for track_source == "setlist"
     inspiration_info: dict | None = None  # for track_source == "inspiration"
 
 
@@ -116,7 +116,7 @@ class Backend(ABC):
     def next_untaken_track_index(
         self, project_name: str, instrument_name: str, start_index: int = 0,
     ) -> int | None:
-        """Index of the first playlist track from start_index onward that
+        """Index of the first setlist track from start_index onward that
         doesn't already have a take for instrument_name, or None if every
         remaining track already has one. Pure setlist query on top of
         get_setlist() — concrete here (not per-subclass) since it needs no
@@ -167,7 +167,7 @@ class Backend(ABC):
         on_progress: Callable[[float | None, str], None] | None = None,
     ) -> dict:
         """Search the inspiration server by artist and/or title and add the
-        exact match as a backing track — the Add to Playlist dialog's
+        exact match as a backing track — the Add to Setlist dialog's
         "Add from Inspiration" search, as opposed to picking one off the
         Inspiration tab's per-project filtered browse list. Downloads the
         audio immediately (unlike selecting an Inspiration-tab track for
@@ -188,7 +188,7 @@ class Backend(ABC):
     ) -> dict:
         """Add a specific, already-known inspiration track directly, with
         no by-name search step — used when `track_info` came straight off
-        the Add to Playlist dialog's Title autocomplete (which returns
+        the Add to Setlist dialog's Title autocomplete (which returns
         full track records, not just title strings — see
         docs/inspiration-server-autocomplete-api.md), so the exact track
         the user picked in the dropdown is the exact track that gets
@@ -204,7 +204,7 @@ class Backend(ABC):
 
     @abstractmethod
     def search_inspiration_artists(self, partial: str) -> list[str]:
-        """Autocomplete suggestions for the Add to Playlist dialog's Artist
+        """Autocomplete suggestions for the Add to Setlist dialog's Artist
         field, from the inspiration server's autocomplete endpoint (see
         docs/inspiration-server-autocomplete-api.md). Returns [] rather
         than raising on any failure — this fires on every keystroke, so a
@@ -1166,7 +1166,7 @@ class LocalBackend(Backend):
                 self._close_active_monitor()
 
             is_new_inspiration_track = False
-            if req.track_source == "playlist":
+            if req.track_source == "setlist":
                 if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
                     raise BackendError("Invalid track selection.")
                 track = project.setlist.tracks[req.track_index]
@@ -1176,12 +1176,12 @@ class LocalBackend(Backend):
                 from .inspiration import find_or_add_inspiration_track
                 existing_ids = {t.inspiration_track_id for t in project.setlist.tracks if t.inspiration_track_id}
                 track = find_or_add_inspiration_track(project, req.inspiration_info)
-                # Only added to the playlist on disk once a take actually completes
+                # Only added to the setlist on disk once a take actually completes
                 # (see _finish_recording/stop_recording) — a discarded or cancelled
                 # take shouldn't leave an orphaned entry behind.
                 is_new_inspiration_track = track.inspiration_track_id not in existing_ids
             else:
-                raise BackendError("Select a track from the Playlist or Inspiration list first.")
+                raise BackendError("Select a track from the Setlist or Inspiration list first.")
 
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:
@@ -1470,7 +1470,7 @@ class LocalBackend(Backend):
 
     def _discard_new_inspiration_track(self, active: "_ActiveRecording") -> None:
         """Undo find_or_add_inspiration_track's addition when a take never
-        completes — an inspiration track should only land in the playlist
+        completes — an inspiration track should only land in the setlist
         once it actually has a finished take."""
         if not active.is_new_inspiration_track:
             return
@@ -1731,7 +1731,7 @@ class LocalBackend(Backend):
             if inst is None:
                 raise BackendError(f"Instrument '{req.instrument_name}' not found.")
 
-            if req.track_source == "playlist":
+            if req.track_source == "setlist":
                 if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
                     raise BackendError("Invalid track selection.")
                 track = project.setlist.tracks[req.track_index]
@@ -1743,7 +1743,7 @@ class LocalBackend(Backend):
                 # calls save_setlist(), so this never actually lands on disk.
                 track = find_or_add_inspiration_track(project, req.inspiration_info)
             else:
-                raise BackendError("Select a track from the Playlist or Inspiration list first.")
+                raise BackendError("Select a track from the Setlist or Inspiration list first.")
 
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:

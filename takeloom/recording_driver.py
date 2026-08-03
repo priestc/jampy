@@ -181,7 +181,7 @@ class RecordingDeckDriver:
             time.sleep(0.5)
         else:
             req = self._resolve_start_request()
-            if req is None or req.track_source != "playlist":
+            if req is None or req.track_source != "setlist":
                 return
             project_name, instrument_name = req.project_name, req.instrument_name
             start_index = (req.track_index or 0) + 1
@@ -192,7 +192,7 @@ class RecordingDeckDriver:
             return
         self._backend.start_recording(StartRecordingRequest(
             project_name=project_name, instrument_name=instrument_name,
-            track_source="playlist", track_index=index,
+            track_source="setlist", track_index=index,
         ))
 
     # --- backend events ---

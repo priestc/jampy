@@ -1,5 +1,5 @@
 """Record page: pick an instrument + project, choose a track from the
-project's playlist or from your inspiration library, preview the camera,
+project's setlist or from your inspiration library, preview the camera,
 and record a take.
 
 Everything here goes through `app_state.backend` — in local mode that's a
@@ -25,7 +25,7 @@ from ..config import StudioConfig
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
-from .add_to_playlist_dialog import AddToPlaylistDialog
+from .add_to_setlist_dialog import AddToSetlistDialog
 from .app_state import AppState
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
@@ -47,7 +47,7 @@ class RecordFrame(ttk.Frame):
         self._selected_track: TrackEntry | None = None
         self._selected_track_index: int | None = None
         self._selected_inspiration_info: dict | None = None
-        self._selected_track_source: str | None = None  # "playlist" | "inspiration"
+        self._selected_track_source: str | None = None  # "setlist" | "inspiration"
         self._inspiration_tracks: list[dict] = []
         # Set by _auto_select_default_track() when the setlist is empty —
         # inspiration tracks load asynchronously, so the actual auto-select
@@ -425,29 +425,34 @@ class RecordFrame(ttk.Frame):
         notebook.add(inspiration_tab, text="Inspiration")
 
         setlist_tab.columnconfigure(0, weight=1)
-        setlist_tab.rowconfigure(1, weight=1)
+        setlist_tab.rowconfigure(2, weight=1)
         setlist_header = ttk.Frame(setlist_tab)
         setlist_header.grid(row=0, column=0, sticky="ew", pady=(8, 0))
         ttk.Label(setlist_header, text="Setlist", font=("TkDefaultFont", 11, "bold")).pack(side="left")
-        ttk.Button(setlist_header, text="+ Add to Playlist", command=self._on_add_to_playlist).pack(side="right")
+        ttk.Button(setlist_header, text="+ Add to Setlist", command=self._on_add_to_setlist).pack(side="right")
 
-        playlist_wrap = ttk.Frame(setlist_tab)
-        playlist_wrap.grid(row=1, column=0, sticky="nsew", pady=(4, 0))
-        playlist_scroll = ttk.Scrollbar(playlist_wrap, orient="vertical")
-        self.playlist_listbox = tk.Listbox(
-            playlist_wrap, height=10, exportselection=False,
-            yscrollcommand=playlist_scroll.set,
+        self.setlist_total_var = tk.StringVar(value="")
+        ttk.Label(setlist_tab, textvariable=self.setlist_total_var, foreground="#666666").grid(
+            row=1, column=0, sticky="w", pady=(2, 4)
         )
-        playlist_scroll.configure(command=self.playlist_listbox.yview)
-        self.playlist_listbox.pack(side="left", fill="both", expand=True)
-        playlist_scroll.pack(side="right", fill="y")
-        self.playlist_listbox.bind("<<ListboxSelect>>", self._on_playlist_select)
+
+        setlist_wrap = ttk.Frame(setlist_tab)
+        setlist_wrap.grid(row=2, column=0, sticky="nsew", pady=(4, 0))
+        setlist_scroll = ttk.Scrollbar(setlist_wrap, orient="vertical")
+        self.setlist_listbox = tk.Listbox(
+            setlist_wrap, height=10, exportselection=False,
+            yscrollcommand=setlist_scroll.set,
+        )
+        setlist_scroll.configure(command=self.setlist_listbox.yview)
+        self.setlist_listbox.pack(side="left", fill="both", expand=True)
+        setlist_scroll.pack(side="right", fill="y")
+        self.setlist_listbox.bind("<<ListboxSelect>>", self._on_setlist_select)
         # Button-3 covers Windows/Linux/modern macOS right-click; the other
         # two are fallbacks for older Tk-on-macOS builds and trackpads
         # without a distinct right-click gesture.
-        self.playlist_listbox.bind("<Button-3>", self._on_playlist_right_click)
-        self.playlist_listbox.bind("<Button-2>", self._on_playlist_right_click)
-        self.playlist_listbox.bind("<Control-Button-1>", self._on_playlist_right_click)
+        self.setlist_listbox.bind("<Button-3>", self._on_setlist_right_click)
+        self.setlist_listbox.bind("<Button-2>", self._on_setlist_right_click)
+        self.setlist_listbox.bind("<Control-Button-1>", self._on_setlist_right_click)
 
         inspiration_tab.columnconfigure(0, weight=1)
         inspiration_tab.rowconfigure(2, weight=1)
@@ -492,13 +497,24 @@ class RecordFrame(ttk.Frame):
         year_str = f" ({year})" if year else ""
         return f"{artist} - {title}{year_str}  {dur}"
 
-    def _refresh_playlist(self) -> None:
-        self.playlist_listbox.delete(0, tk.END)
+    def _refresh_setlist(self) -> None:
+        self.setlist_listbox.delete(0, tk.END)
         if not self._setlist:
+            self.setlist_total_var.set("")
             return
         inst_name = self.instrument_var.get()
         for track in self._setlist.tracks:
-            self.playlist_listbox.insert(tk.END, self._track_display(track, inst_name))
+            self.setlist_listbox.insert(tk.END, self._track_display(track, inst_name))
+        self._update_setlist_total()
+
+    def _update_setlist_total(self) -> None:
+        tracks = self._setlist.tracks if self._setlist else []
+        if not tracks:
+            self.setlist_total_var.set("")
+            return
+        total = sum(t.duration_seconds for t in tracks)
+        track_word = "track" if len(tracks) == 1 else "tracks"
+        self.setlist_total_var.set(f"{len(tracks)} {track_word} — {format_duration(total)} total")
 
     def _refresh_inspiration(self) -> None:
         self.inspiration_listbox.delete(0, tk.END)
@@ -543,8 +559,8 @@ class RecordFrame(ttk.Frame):
 
     def _on_project_change(self, _event: object = None) -> None:
         self._clear_selection()
-        if hasattr(self, "playlist_listbox"):
-            self.playlist_listbox.delete(0, tk.END)
+        if hasattr(self, "setlist_listbox"):
+            self.setlist_listbox.delete(0, tk.END)
         self._setlist = None
         project_name = self.project_var.get() if hasattr(self, "project_var") else ""
         self._project_name = project_name or None
@@ -561,11 +577,11 @@ class RecordFrame(ttk.Frame):
     def _on_new_project(self) -> None:
         NewProjectDialog(self, self.app_state.backend, self._on_project_created)
 
-    def _on_add_to_playlist(self) -> None:
+    def _on_add_to_setlist(self) -> None:
         if not self._project_name:
             messagebox.showerror("Cannot add", "Select a project first.")
             return
-        AddToPlaylistDialog(self, self.app_state.backend, self._project_name, self._refresh_playlist_from_server)
+        AddToSetlistDialog(self, self.app_state.backend, self._project_name, self._refresh_setlist_from_server)
 
     def _on_project_created(self, project_name: str) -> None:
         backend = self.app_state.backend
@@ -590,7 +606,7 @@ class RecordFrame(ttk.Frame):
             self.selection_var.set(f"Could not load project: {error}")
             return
         self._setlist = Setlist.from_dict(data)
-        self._refresh_playlist()
+        self._refresh_setlist()
         self._refresh_inspiration()
         self._auto_select_default_track()
 
@@ -602,12 +618,12 @@ class RecordFrame(ttk.Frame):
         if self._selected_track_source is not None:
             return  # already selected (e.g. this ran once for this project already)
         if self._setlist and self._setlist.tracks:
-            self.playlist_listbox.selection_set(0)
-            self._on_playlist_select()
+            self.setlist_listbox.selection_set(0)
+            self._on_setlist_select()
         else:
             self._auto_select_inspiration_pending = True
 
-    def _refresh_playlist_from_server(self) -> None:
+    def _refresh_setlist_from_server(self) -> None:
         """Re-fetch just the current project's setlist (e.g. after a take
         finishes) without disturbing the current project/instrument selection
         or re-querying inspiration tracks."""
@@ -622,10 +638,10 @@ class RecordFrame(ttk.Frame):
 
     def _apply_refreshed_setlist(self, data: dict) -> None:
         self._setlist = Setlist.from_dict(data)
-        self._refresh_playlist()
+        self._refresh_setlist()
 
     def _on_instrument_change(self, _event: object = None) -> None:
-        self._refresh_playlist()
+        self._refresh_setlist()
         self._update_start_button_state()
         if _event is not None:
             self._persist_last_selection(restart_monitor=True)
@@ -651,27 +667,27 @@ class RecordFrame(ttk.Frame):
 
         self._run_backend(_save)
 
-    def _on_playlist_select(self, _event: object = None) -> None:
-        sel = self.playlist_listbox.curselection()
+    def _on_setlist_select(self, _event: object = None) -> None:
+        sel = self.setlist_listbox.curselection()
         if not sel or not self._setlist:
             return
         self._selected_track = self._setlist.tracks[sel[0]]
         self._selected_track_index = sel[0]
         self._selected_inspiration_info = None
-        self._selected_track_source = "playlist"
+        self._selected_track_source = "setlist"
         self.inspiration_listbox.selection_clear(0, tk.END)
-        self.selection_var.set(f"Selected: {self._selected_track.name} (playlist)")
+        self.selection_var.set(f"Selected: {self._selected_track.name} (setlist)")
         self._update_start_button_state()
 
-    def _on_playlist_right_click(self, event: object) -> None:
+    def _on_setlist_right_click(self, event: object) -> None:
         if self._phase != "idle" or not self._setlist:
             return  # don't let the setlist change out from under an active take
-        index = self.playlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
+        index = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
         if index < 0 or index >= len(self._setlist.tracks):
             return
-        self.playlist_listbox.selection_clear(0, tk.END)
-        self.playlist_listbox.selection_set(index)
-        self._on_playlist_select()
+        self.setlist_listbox.selection_clear(0, tk.END)
+        self.setlist_listbox.selection_set(index)
+        self._on_setlist_select()
 
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
@@ -693,14 +709,14 @@ class RecordFrame(ttk.Frame):
             return
         track.name = new_name
         if self._selected_track_index == index:
-            self.selection_var.set(f"Selected: {track.name} (playlist)")
+            self.selection_var.set(f"Selected: {track.name} (setlist)")
         self._save_setlist_and_refresh()
 
     def _on_delete_track(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
             return
         track = self._setlist.tracks[index]
-        if not messagebox.askyesno("Delete Track", f'Remove "{track.name}" from the playlist?', parent=self):
+        if not messagebox.askyesno("Delete Track", f'Remove "{track.name}" from the setlist?', parent=self):
             return
         self._setlist.remove_track(index)
         if self._selected_track_index == index:
@@ -722,7 +738,7 @@ class RecordFrame(ttk.Frame):
         if error:
             messagebox.showerror("Save failed", error)
             return
-        self._refresh_playlist()
+        self._refresh_setlist()
 
     def _on_inspiration_select(self, _event: object = None) -> None:
         sel = self.inspiration_listbox.curselection()
@@ -733,7 +749,7 @@ class RecordFrame(ttk.Frame):
         self._selected_track_index = None
         self._selected_inspiration_info = info
         self._selected_track_source = "inspiration"
-        self.playlist_listbox.selection_clear(0, tk.END)
+        self.setlist_listbox.selection_clear(0, tk.END)
         artist = info.get("artist", "Unknown")
         title = info.get("title", "Unknown")
         self.selection_var.set(f"Selected: {artist} - {title} (inspiration)")
@@ -776,7 +792,7 @@ class RecordFrame(ttk.Frame):
         self.instrument_combo.configure(state=combo_state)
         self.project_combo.configure(state=combo_state)
         list_state = "normal" if enabled else "disabled"
-        self.playlist_listbox.configure(state=list_state)
+        self.setlist_listbox.configure(state=list_state)
         self.inspiration_listbox.configure(state=list_state)
         self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
 
@@ -906,17 +922,17 @@ class RecordFrame(ttk.Frame):
             messagebox.showerror("Cannot start", "Select an instrument and a project first.")
             return None
 
-        if self._selected_track_source == "playlist" and self._selected_track_index is not None:
+        if self._selected_track_source == "setlist" and self._selected_track_index is not None:
             return StartRecordingRequest(
                 project_name=self._project_name, instrument_name=instrument_name,
-                track_source="playlist", track_index=self._selected_track_index,
+                track_source="setlist", track_index=self._selected_track_index,
             )
         elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
             return StartRecordingRequest(
                 project_name=self._project_name, instrument_name=instrument_name,
                 track_source="inspiration", inspiration_info=self._selected_inspiration_info,
             )
-        messagebox.showerror("Cannot start", "Select a track from the Playlist or Inspiration list first.")
+        messagebox.showerror("Cannot start", "Select a track from the Setlist or Inspiration list first.")
         return None
 
     def _start_recording(self) -> None:
@@ -1085,7 +1101,7 @@ class RecordFrame(ttk.Frame):
                 self.streamdeck_emulator.set_key_enabled(0, True)
                 self._set_controls_enabled(self._phase == "idle")
                 if self._phase == "idle":
-                    self._refresh_playlist_from_server()
+                    self._refresh_setlist_from_server()
                 self._update_start_button_state()
         elif event == "video_check_status":
             if "status" in data:
