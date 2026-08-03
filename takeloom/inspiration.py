@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -68,6 +69,44 @@ def _describe(artist: str, title: str) -> str:
     if artist and title:
         return f'"{artist} - {title}"'
     return f'"{artist or title}"'
+
+
+def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list[str]:
+    """GET one of the inspiration server's autocomplete endpoints (see
+    docs/inspiration-server-autocomplete-api.md). Autocomplete fires on
+    every keystroke and isn't a user-triggered action the way search/
+    download are, so failures here are swallowed and return [] rather
+    than raising InspirationError — a slow/unreachable/unconfigured
+    server should just mean no suggestions, not an error popup while
+    someone is mid-word."""
+    if not config.inspiration_server or not config.inspiration_api_key or not params.get("q"):
+        return []
+    server = config.inspiration_server.rstrip("/")
+    query = urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        f"{server}/library/api/autocomplete/{kind}/?{query}",
+        headers={"Authorization": f"Bearer {config.inspiration_api_key}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except (urllib.error.URLError, ValueError, OSError):
+        return []
+    return data.get("suggestions", [])
+
+
+def search_artist_suggestions(config: StudioConfig, partial: str, limit: int = 10) -> list[str]:
+    """Autocomplete suggestions for the Add to Playlist dialog's Artist field."""
+    return _get_suggestions(config, "artists", {"q": partial.strip(), "limit": limit})
+
+
+def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[str]:
+    """Autocomplete suggestions for the Add to Playlist dialog's Title
+    field, optionally narrowed to a specific artist."""
+    params = {"q": partial.strip(), "limit": limit}
+    if artist.strip():
+        params["artist"] = artist.strip()
+    return _get_suggestions(config, "titles", params)
 
 
 def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:

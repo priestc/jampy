@@ -23,37 +23,62 @@ from ..youtube import is_youtube_url
 from .new_project_dialog import URLPromptDialog
 
 
-def _no_suggestions(_text: str) -> list[str]:
-    """Placeholder autocomplete source: the inspiration server has no
-    search-as-you-type endpoint yet. Swap this out for a real query in
-    InspirationSearchDialog once one exists — _AutocompleteCombobox itself
-    doesn't need to change."""
-    return []
-
-
 class _AutocompleteCombobox(ttk.Frame):
-    """A Combobox that re-queries `suggest(text) -> list[str]` on every
-    keystroke and pops its own dropdown open with the results, instead of
-    a plain Combobox's fixed `values` list."""
+    """A Combobox that debounces keystrokes, fetches suggestions on a
+    background thread via `fetch(text) -> list[str]` (a Backend call —
+    see docs/inspiration-server-autocomplete-api.md — so this works the
+    same over Remote as it does locally), and pops its own dropdown open
+    with the results. A plain Combobox only offers a fixed `values` list;
+    querying the network on every single keystroke with no debouncing
+    would both flood the server and, done synchronously, stall the UI."""
 
-    def __init__(self, master: tk.Misc, suggest: Callable[[str], list[str]], width: int = 30) -> None:
+    _DEBOUNCE_MS = 200
+    _NAV_KEYS = ("Up", "Down", "Return", "Escape", "Tab")
+
+    def __init__(self, master: tk.Misc, fetch: Callable[[str], list[str]], width: int = 30) -> None:
         super().__init__(master)
-        self._suggest = suggest
+        self._fetch = fetch
+        self._pending_after_id: str | None = None
         self.var = tk.StringVar()
         self.combo = ttk.Combobox(self, textvariable=self.var, width=width)
         self.combo.pack(fill="x")
         self.combo.bind("<KeyRelease>", self._on_key_release)
+        self.bind("<Destroy>", self._on_destroy)
 
     def _on_key_release(self, event: object) -> None:
-        if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):  # type: ignore[attr-defined]
+        if event.keysym in self._NAV_KEYS:  # type: ignore[attr-defined]
             return
+        if self._pending_after_id is not None:
+            self.after_cancel(self._pending_after_id)
+        self._pending_after_id = self.after(self._DEBOUNCE_MS, self._kick_off_fetch)
+
+    def _kick_off_fetch(self) -> None:
+        self._pending_after_id = None
         text = self.var.get().strip()
-        matches = self._suggest(text) if text else []
+        if not text:
+            self.combo.configure(values=[])
+            self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            return
+
+        def worker() -> None:
+            matches = self._fetch(text)
+            self.after(0, lambda: self._apply_results(text, matches))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_results(self, text: str, matches: list[str]) -> None:
+        if not self.winfo_exists() or self.var.get().strip() != text:
+            return  # stale response for text the user has since changed — discard it
         self.combo.configure(values=matches)
         if matches:
             self.combo.event_generate("<Down>")  # ttk's own trick for posting the dropdown programmatically
         else:
             self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+
+    def _on_destroy(self, _event: object) -> None:
+        if self._pending_after_id is not None:
+            self.after_cancel(self._pending_after_id)
+            self._pending_after_id = None
 
     def get(self) -> str:
         return self.var.get()
@@ -67,10 +92,12 @@ class _AutocompleteCombobox(ttk.Frame):
 
 class InspirationSearchDialog(tk.Toplevel):
     """Prompt for an artist and/or title to add from the inspiration
-    server. Both fields autocomplete via _AutocompleteCombobox, currently
-    wired to _no_suggestions until the server grows a search endpoint."""
+    server. Both fields autocomplete live against the inspiration
+    server's autocomplete endpoints via `backend` — the Title field's
+    suggestions narrow to whatever's currently typed in Artist, if
+    anything."""
 
-    def __init__(self, master: tk.Misc) -> None:
+    def __init__(self, master: tk.Misc, backend: Backend) -> None:
         super().__init__(master)
         self.title("Add from Inspiration")
         self.resizable(False, False)
@@ -81,11 +108,14 @@ class InspirationSearchDialog(tk.Toplevel):
         frame.pack(fill="both", expand=True)
 
         ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.artist_field = _AutocompleteCombobox(frame, suggest=_no_suggestions)
+        self.artist_field = _AutocompleteCombobox(frame, fetch=backend.search_inspiration_artists)
         self.artist_field.grid(row=0, column=1, sticky="ew")
 
         ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.title_field = _AutocompleteCombobox(frame, suggest=_no_suggestions)
+        self.title_field = _AutocompleteCombobox(
+            frame,
+            fetch=lambda text: backend.search_inspiration_titles(text, artist=self.artist_field.get().strip()),
+        )
         self.title_field.grid(row=1, column=1, sticky="ew")
 
         frame.columnconfigure(1, weight=1)
@@ -241,7 +271,7 @@ class AddToPlaylistDialog(tk.Toplevel):
         self._add_item(dialog.result, "youtube")
 
     def _on_add_inspiration(self) -> None:
-        dialog = InspirationSearchDialog(self)
+        dialog = InspirationSearchDialog(self, self._backend)
         self.wait_window(dialog)
         if not dialog.result:
             return

@@ -48,6 +48,7 @@ def _timestamp() -> str:
 _READ_ONLY_OPS = {
     "hostname", "get_config", "list_audio_devices", "list_cameras",
     "list_projects", "get_setlist", "query_inspiration_tracks",
+    "search_inspiration_artists", "search_inspiration_titles",
     "is_recording", "get_compressor_settings", "get_monitoring_mode",
 }
 

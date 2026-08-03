@@ -115,6 +115,20 @@ class RemoteBackend(Backend):
         )
         return result["tracks"]
 
+    def search_inspiration_artists(self, partial: str) -> list[str]:
+        try:
+            return self._client.call("search_inspiration_artists", {"partial": partial})["suggestions"]
+        except BackendError:
+            return []  # autocomplete fires on every keystroke — a connection hiccup shouldn't surface as an error
+
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
+        try:
+            return self._client.call(
+                "search_inspiration_titles", {"partial": partial, "artist": artist},
+            )["suggestions"]
+        except BackendError:
+            return []
+
     # --- recording ---
 
     def start_recording(self, req: StartRecordingRequest) -> None:

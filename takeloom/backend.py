@@ -177,6 +177,22 @@ class Backend(ABC):
     @abstractmethod
     def query_inspiration_tracks(self, project_name: str) -> list[dict]: ...
 
+    @abstractmethod
+    def search_inspiration_artists(self, partial: str) -> list[str]:
+        """Autocomplete suggestions for the Add to Playlist dialog's Artist
+        field, from the inspiration server's autocomplete endpoint (see
+        docs/inspiration-server-autocomplete-api.md). Returns [] rather
+        than raising on any failure — this fires on every keystroke, so a
+        slow/unreachable server should just mean no suggestions, not an
+        error dialog interrupting typing."""
+        ...
+
+    @abstractmethod
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
+        """Same as search_inspiration_artists, for the Title field.
+        `artist`, if given, narrows suggestions to that artist's tracks."""
+        ...
+
     # --- recording ---
 
     @abstractmethod
@@ -827,6 +843,14 @@ class LocalBackend(Backend):
             return query_inspiration_tracks(project, config)
         except InspirationError as e:
             raise BackendError(str(e)) from e
+
+    def search_inspiration_artists(self, partial: str) -> list[str]:
+        from .inspiration import search_artist_suggestions
+        return search_artist_suggestions(self.get_config(), partial)
+
+    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
+        from .inspiration import search_title_suggestions
+        return search_title_suggestions(self.get_config(), partial, artist=artist)
 
     # --- events ---
 
