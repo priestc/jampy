@@ -50,6 +50,17 @@ class RecordingDeckDriver:
         self.phase = "idle"  # "idle" | "waiting" | "recording"
         self.video_check_phase = "idle"  # "idle" | "recording"
         self._events_subscribed = False
+        # True if start_recording_with_session() is the one that opened the
+        # currently-active session (as opposed to one already active before
+        # that press — e.g. the CLI's own explicit start-session, or a
+        # session opened separately elsewhere) — see that method and
+        # _release_owned_session().
+        self._session_owned = False
+        # True only for the duration of _advance_to_next_track()'s internal
+        # stop_recording() call — suppresses _on_backend_event's automatic
+        # session-release for that one transition, since Next means "keep
+        # going," not "stop for good." See _advance_to_next_track().
+        self._advancing = False
 
     # --- connect / disconnect ---
 
@@ -84,7 +95,7 @@ class RecordingDeckDriver:
         if not self.streamdeck.connect(key_callback or self.handle_key, device_id=device_id):
             return False
         self.streamdeck.use_recording_layout()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self._session_capable())
         self._refresh_monitoring_mode()
         return True
 
@@ -104,9 +115,17 @@ class RecordingDeckDriver:
         self._backend = backend
         self.phase = "idle"
         self.video_check_phase = "idle"
+        self._session_owned = False
         self._subscribe_backend_events()
-        self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+        self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self._session_capable())
         self._refresh_monitoring_mode()
+
+    def _session_capable(self) -> bool:
+        """Whether the record-toggle key should fold session begin/end into
+        its start/stop press — see start_recording_with_session() and
+        recording_toggle_visual(). False over a Remote connection, where
+        begin_session()/end_session() aren't available at all."""
+        return not self._backend.is_remote()
 
     def _refresh_monitoring_mode(self) -> None:
         try:
@@ -146,7 +165,48 @@ class RecordingDeckDriver:
     def _start_recording(self) -> None:
         req = self._resolve_start_request()
         if req is not None:
+            self.start_recording_with_session(req)
+
+    def start_recording_with_session(self, req: StartRecordingRequest) -> None:
+        """start_recording(), auto-opening a session for req's project/
+        instrument first if this backend supports one and none is active
+        yet — folds begin_session() into the record-toggle key's "start"
+        press so a Stream Deck (physical or the Tk UI's on-screen twin, via
+        RecordFrame's own mouse-driven start) gets session logging/video
+        for a take with no separate control needed. Remembers whether this
+        call is the one that opened it (see _release_owned_session, fired
+        automatically once phase goes back to "idle" — see
+        _on_backend_event) — a session already active (opened elsewhere,
+        e.g. the CLI's `start-session`, or the Tk UI's own Start/End Session
+        button for a deliberate multi-track session) is left untouched
+        either way, so a single take here doesn't cut it short. Rolls the
+        just-opened session back if start_recording() itself then fails, so
+        a failed take never leaves an orphaned, take-less session open."""
+        self._session_owned = False
+        if self._session_capable() and not self._backend.is_session_active():
+            self._backend.begin_session(req.project_name, req.instrument_name)
+            self._session_owned = True
+        try:
             self._backend.start_recording(req)
+        except BackendError:
+            self._release_owned_session()
+            raise
+
+    def _release_owned_session(self) -> None:
+        """Close the session start_recording_with_session() opened, if any.
+        Called once a take it started actually finishes (see
+        _on_backend_event's "recording" -> "idle" transition check) or
+        _advance_to_next_track() runs out of tracks to advance to. Restart
+        ("b") never triggers this, and Next ("n") only does when it bails
+        out with nothing left to record — otherwise a session stays open
+        across it, since "next song" isn't "I'm done"."""
+        if not self._session_owned:
+            return
+        self._session_owned = False
+        try:
+            self._backend.end_session()
+        except BackendError as e:
+            self._log(f"StreamDeck: failed to end session: {e}")
 
     def _toggle_monitoring_mode(self) -> None:
         current = self._backend.get_monitoring_mode()
@@ -162,11 +222,24 @@ class RecordingDeckDriver:
         recording), discard it and advance from there; otherwise start from
         wherever resolve_start_request() would currently target. Same
         behavior everywhere — previously the UI only allowed this while
-        idle and the headless server only while recording."""
+        idle and the headless server only while recording.
+
+        A session owned by start_recording_with_session() stays open across
+        this — Next is "keep going, next song," not "I'm done" — so the
+        stop_recording() below runs with _advancing set, which tells
+        _on_backend_event's "recording" -> "idle" watcher to leave it alone
+        even though this take genuinely did just end. It's only actually
+        closed if this method ends up bailing out with nothing further to
+        record (see the two _release_owned_session() calls below)."""
         if self.phase != "idle":
             target = self._backend.get_active_recording_target()
-            self._backend.stop_recording()
+            self._advancing = True
+            try:
+                self._backend.stop_recording()
+            finally:
+                self._advancing = False
             if target is None:
+                self._release_owned_session()
                 return
             project_name, instrument_name, current_index = target
             start_index = current_index + 1
@@ -189,19 +262,39 @@ class RecordingDeckDriver:
         index = self._backend.next_untaken_track_index(project_name, instrument_name, start_index)
         if index is None:
             self._log(f"No more tracks in '{project_name}' need a take for '{instrument_name}'.")
+            self._release_owned_session()
             return
-        self._backend.start_recording(StartRecordingRequest(
-            project_name=project_name, instrument_name=instrument_name,
-            track_source="setlist", track_index=index,
-        ))
+        try:
+            self._backend.start_recording(StartRecordingRequest(
+                project_name=project_name, instrument_name=instrument_name,
+                track_source="setlist", track_index=index,
+            ))
+        except BackendError:
+            self._release_owned_session()
+            raise
 
     # --- backend events ---
 
     def _on_backend_event(self, event: str, data: dict) -> None:
         if event == "recording_status":
             if "phase" in data:
-                self.phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+                new_phase = data["phase"]
+                # A take that was actually recording just genuinely ended —
+                # whether by the record-toggle key's own stop press, or the
+                # backing track simply playing out to its natural end.
+                # Deliberately keyed off this transition rather than the "r"
+                # key's stop branch directly, so it fires the same way no
+                # matter which of those two triggered it, or whether the
+                # take was started via a physical key press, the Tk UI's
+                # on-screen emulator, or a Remote client driving this same
+                # backend. Restart ("b") never passes through "idle" on its
+                # way to the redone take, so it never reaches here; Next
+                # ("n") does pass through "idle" but sets _advancing first
+                # to suppress this exact check — see _advance_to_next_track().
+                if self.phase == "recording" and new_phase == "idle" and not self._advancing:
+                    self._release_owned_session()
+                self.phase = new_phase
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self._session_capable())
         elif event == "video_check_status":
             # RemoteServer never broadcasts the raw video_check_status a
             # server-side check emits (its result_path only means anything
@@ -215,7 +308,7 @@ class RecordingDeckDriver:
                 self._log(data["status"])
             if "phase" in data:
                 self.video_check_phase = data["phase"]
-                self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+                self.streamdeck.update_recording_page(self.phase, self.video_check_phase, self._session_capable())
             if self.video_check_phase == "idle" and "result_path" in data and self._on_video_check_result:
                 self._on_video_check_result(Path(data["result_path"]), bool(data.get("has_video")))
         elif event == "monitoring_mode_changed":

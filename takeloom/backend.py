@@ -353,6 +353,16 @@ class Backend(ABC):
     @abstractmethod
     def end_session(self) -> None: ...
 
+    def is_session_active(self) -> bool:
+        """Whether a begin_session() recording is currently open. Concrete
+        default (not abstract) — always False for a backend that doesn't
+        support sessions at all (RemoteBackend inherits this unchanged),
+        same reasoning as list_streamdecks(). Used by RecordingDeckDriver's
+        record-toggle key to decide whether pressing it should open a
+        session of its own (see start_recording_with_session()) or leave
+        an already-active one (opened elsewhere) alone."""
+        return False
+
 
 class _CameraPreviewManager:
     """Owns the single physical camera's capture loop and fans JPEG frames out
@@ -2056,6 +2066,9 @@ class LocalBackend(Backend):
                 status += f" Log saved to {log_path}."
 
             self._emit("recording_status", {"phase": "idle", "status": status})
+
+    def is_session_active(self) -> bool:
+        return self._active_session is not None
 
     def _save_session_log(self, session: "_ActiveSession") -> Path | None:
         log_path = session.session_dir / "session_log.json"

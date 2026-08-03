@@ -44,9 +44,10 @@ class StreamDeckEmulator(ttk.Frame):
     Start/Unpause/Stop button flow) so clicking a tile does exactly what
     pressing the real one would."""
 
-    def __init__(self, master: tk.Misc, on_key: Callable[[str], None]) -> None:
+    def __init__(self, master: tk.Misc, on_key: Callable[[str], None], session_capable: bool = True) -> None:
         super().__init__(master)
         self._on_key = on_key
+        self._session_capable = session_capable
         self._phase = "idle"
         self._video_check_phase = "idle"
         self._monitoring_mode = "production"
@@ -71,7 +72,7 @@ class StreamDeckEmulator(ttk.Frame):
         self._buttons[idx].configure(image=photo)
 
     def _redraw(self) -> None:
-        icon, label, color = recording_toggle_visual(self._phase, self._video_check_phase)
+        icon, label, color = recording_toggle_visual(self._phase, self._video_check_phase, self._session_capable)
         self._set_face(0, icon, label, color)
         for btn in _ALL_BUTTONS:
             idx = btn[0]

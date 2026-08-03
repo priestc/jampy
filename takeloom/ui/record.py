@@ -271,7 +271,9 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
-        self.streamdeck_emulator = StreamDeckEmulator(left, on_key=self._on_emulator_key)
+        self.streamdeck_emulator = StreamDeckEmulator(
+            left, on_key=self._on_emulator_key, session_capable=not self.app_state.backend.is_remote(),
+        )
         self.streamdeck_emulator.grid(row=row, column=0, columnspan=2, pady=(8, 0))
         self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
         self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
@@ -943,8 +945,15 @@ class RecordFrame(ttk.Frame):
         self.streamdeck_emulator.set_key_enabled(0, False)
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
-        backend = self.app_state.backend
-        self._run_backend(lambda: backend.start_recording(req), lambda _result, error: self._on_start_result(error))
+        # Routed through the shared driver (rather than calling
+        # backend.start_recording(req) directly) so a mouse click on the
+        # on-screen emulator's key 0 opens/owns a session exactly like a
+        # physical Stream Deck press does — see RecordingDeckDriver.
+        # start_recording_with_session().
+        driver = self._streamdeck_driver
+        self._run_backend(
+            lambda: driver.start_recording_with_session(req), lambda _result, error: self._on_start_result(error)
+        )
 
     def _on_start_result(self, error: str | None) -> None:
         # On success, the "recording_status" event the backend emits before

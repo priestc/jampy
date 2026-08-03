@@ -282,15 +282,25 @@ def render_button_image(icon: str | None, label: str | None, color: tuple, size:
     return img
 
 
-def recording_toggle_visual(phase: str, video_check_phase: str) -> tuple[str, str, tuple]:
+def recording_toggle_visual(phase: str, video_check_phase: str, session_capable: bool = True) -> tuple[str, str, tuple]:
     """(icon, label, color) for the Record/Unpause/Stop toggle (key 0) —
     shared by the physical deck (update_recording_page) and the Tk UI's
-    on-screen emulator so the two always render identically."""
-    icon, label, color = {
-        "idle":      ("record", "Start Recording", (0,   200, 0)),
-        "waiting":   ("play",   "Unpause",         (230, 160, 0)),
-        "recording": ("stop",   "Stop Recording",  (230, 60,  60)),
-    }[phase]
+    on-screen emulator so the two always render identically.
+
+    `session_capable` (False only over a Remote connection, where
+    begin_session()/end_session() aren't available — see RecordingDeckDriver.
+    start_recording_with_session()) picks which wording this key uses: with
+    a session, pressing it while idle also opens one for the take about to
+    start and pressing it while recording also closes that back down, so it
+    reads "Start Session"/"Stop Session" rather than the plain "Start
+    Recording"/"Stop Recording" wording used when sessions aren't available."""
+    icons = {"idle": "record", "waiting": "play", "recording": "stop"}
+    colors = {"idle": (0, 200, 0), "waiting": (230, 160, 0), "recording": (230, 60, 60)}
+    if session_capable:
+        labels = {"idle": "Start Session", "waiting": "Start Recording", "recording": "Stop Session"}
+    else:
+        labels = {"idle": "Start Recording", "waiting": "Unpause", "recording": "Stop Recording"}
+    icon, label, color = icons[phase], labels[phase], colors[phase]
     if video_check_phase == "recording":
         color = (40, 40, 40)
     return icon, label, color
@@ -450,21 +460,23 @@ class StreamDeckController:
             if self._has_dials:
                 self._update_touchscreen()
 
-    def update_recording_page(self, phase: str, video_check_phase: str = "idle") -> None:
+    def update_recording_page(self, phase: str, video_check_phase: str = "idle", session_capable: bool = True) -> None:
         """Refresh the Record/Unpause/Stop toggle and dim/light Next/
         Restart/volume for the current phase. The Record toggle is dimmed
         while a Video Check — triggered from the Tk UI or a Remote client;
         there's no Stream Deck button for it — holds the audio/camera
         hardware, since the two are mutually exclusive at the backend
         level. `phase` is one of "idle"/"waiting"/"recording";
-        `video_check_phase` is "idle"/"recording". Shared verbatim by the
-        Tk UI, headless server, and CLI drivers (and mirrored on-screen by
-        the Tk UI's emulator via the same recording_toggle_visual()/
-        button_visual() helpers). The monitor-mode toggle key (index 3) is
-        refreshed separately — see update_monitoring_mode()."""
+        `video_check_phase` is "idle"/"recording"; `session_capable` picks
+        the toggle's wording — see recording_toggle_visual(). Shared
+        verbatim by the Tk UI, headless server, and CLI drivers (and
+        mirrored on-screen by the Tk UI's emulator via the same
+        recording_toggle_visual()/button_visual() helpers). The monitor-mode
+        toggle key (index 3) is refreshed separately — see
+        update_monitoring_mode()."""
         if not self.connected:
             return
-        record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
+        record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase, session_capable)
         with self._lock:
             self._deck.set_key_image(0, self._make_key_image(record_icon, record_label, record_color))
             for btn in self._buttons:
