@@ -23,30 +23,44 @@ from ..youtube import is_youtube_url
 from .new_project_dialog import URLPromptDialog
 
 
-class _AutocompleteCombobox(ttk.Frame):
-    """A Combobox that debounces keystrokes, fetches suggestions on a
+class _AutocompleteEntry(ttk.Frame):
+    """An Entry that debounces keystrokes, fetches suggestions on a
     background thread via `fetch(text) -> list[str]` (a Backend call —
     see docs/inspiration-server-autocomplete-api.md — so this works the
-    same over Remote as it does locally), and pops its own dropdown open
-    with the results. A plain Combobox only offers a fixed `values` list;
-    querying the network on every single keystroke with no debouncing
-    would both flood the server and, done synchronously, stall the UI."""
+    same over Remote as it does locally), and shows them in a small popup
+    below itself.
+
+    Deliberately not a ttk.Combobox: posting a Combobox's built-in
+    dropdown (via event_generate("<Down>") or the Tcl Post proc) moves
+    keyboard focus into its internal listbox, so a stray letter keystroke
+    typed right after suggestions appear lands in the listbox's own
+    type-ahead handling instead of the entry — text stops updating
+    mid-word. The popup here is a plain, separate Toplevel that never
+    takes focus on its own, only when explicitly navigated into (Down
+    arrow) or clicked."""
 
     _DEBOUNCE_MS = 200
-    _NAV_KEYS = ("Up", "Down", "Return", "Escape", "Tab")
+    _MAX_VISIBLE = 8
 
     def __init__(self, master: tk.Misc, fetch: Callable[[str], list[str]], width: int = 30) -> None:
         super().__init__(master)
         self._fetch = fetch
         self._pending_after_id: str | None = None
+        self._popup: tk.Toplevel | None = None
+        self._listbox: tk.Listbox | None = None
+        self._matches: list[str] = []
+
         self.var = tk.StringVar()
-        self.combo = ttk.Combobox(self, textvariable=self.var, width=width)
-        self.combo.pack(fill="x")
-        self.combo.bind("<KeyRelease>", self._on_key_release)
+        self.entry = ttk.Entry(self, textvariable=self.var, width=width)
+        self.entry.pack(fill="x")
+        self.entry.bind("<KeyRelease>", self._on_key_release)
+        self.entry.bind("<Down>", self._on_down_from_entry)
+        self.entry.bind("<Escape>", lambda _e: self._close_popup())
+        self.entry.bind("<FocusOut>", self._on_focus_out)
         self.bind("<Destroy>", self._on_destroy)
 
     def _on_key_release(self, event: object) -> None:
-        if event.keysym in self._NAV_KEYS:  # type: ignore[attr-defined]
+        if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):  # type: ignore[attr-defined]
             return
         if self._pending_after_id is not None:
             self.after_cancel(self._pending_after_id)
@@ -56,8 +70,7 @@ class _AutocompleteCombobox(ttk.Frame):
         self._pending_after_id = None
         text = self.var.get().strip()
         if not text:
-            self.combo.configure(values=[])
-            self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            self._close_popup()
             return
 
         def worker() -> None:
@@ -69,25 +82,100 @@ class _AutocompleteCombobox(ttk.Frame):
     def _apply_results(self, text: str, matches: list[str]) -> None:
         if not self.winfo_exists() or self.var.get().strip() != text:
             return  # stale response for text the user has since changed — discard it
-        self.combo.configure(values=matches)
         if matches:
-            self.combo.event_generate("<Down>")  # ttk's own trick for posting the dropdown programmatically
+            self._show_popup(matches)
         else:
-            self.combo.tk.call("ttk::combobox::Unpost", self.combo)
+            self._close_popup()
+
+    # --- popup ---
+
+    def _show_popup(self, matches: list[str]) -> None:
+        self._matches = matches
+        visible = min(len(matches), self._MAX_VISIBLE)
+        if self._popup is None:
+            self._popup = tk.Toplevel(self)
+            self._popup.wm_overrideredirect(True)
+            self._popup.wm_attributes("-topmost", True)
+            self._listbox = tk.Listbox(
+                self._popup, background="#1a1a1a", foreground="white",
+                selectbackground="#2a6db0", highlightthickness=1,
+                highlightbackground="#444444", activestyle="none", exportselection=False,
+            )
+            self._listbox.pack(fill="both", expand=True)
+            self._listbox.bind("<ButtonRelease-1>", self._on_listbox_commit)
+            self._listbox.bind("<Return>", self._on_listbox_commit)
+            self._listbox.bind("<Escape>", lambda _e: self._cancel_popup_navigation())
+
+        self._listbox.configure(height=visible)
+        self._listbox.delete(0, tk.END)
+        for m in matches:
+            self._listbox.insert(tk.END, m)
+
+        x = self.entry.winfo_rootx()
+        y = self.entry.winfo_rooty() + self.entry.winfo_height()
+        width = self.entry.winfo_width()
+        self._popup.update_idletasks()
+        height = self._listbox.winfo_reqheight()
+        self._popup.wm_geometry(f"{width}x{height}+{x}+{y}")
+        self._popup.deiconify()
+
+    def _on_down_from_entry(self, _event: object) -> str | None:
+        if self._popup is None or self._listbox is None:
+            return None
+        self._listbox.focus_set()
+        self._listbox.selection_clear(0, tk.END)
+        self._listbox.selection_set(0)
+        self._listbox.activate(0)
+        return "break"  # swallow the keystroke — don't let it also move the entry's cursor
+
+    def _on_listbox_commit(self, _event: object) -> None:
+        if self._listbox is None:
+            return
+        sel = self._listbox.curselection()
+        if sel:
+            self.var.set(self._matches[sel[0]])
+        self._close_popup()
+        self.entry.focus_set()
+        self.entry.icursor(tk.END)
+
+    def _cancel_popup_navigation(self) -> None:
+        self._close_popup()
+        self.entry.focus_set()
+
+    def _on_focus_out(self, _event: object) -> None:
+        # Moving focus into the popup's own listbox (via the Down-arrow
+        # handler above) also fires the entry's FocusOut — give that a
+        # moment to land before deciding the popup should actually close,
+        # otherwise it vanishes the instant Down is pressed.
+        self.after(150, self._close_popup_if_focus_elsewhere)
+
+    def _close_popup_if_focus_elsewhere(self) -> None:
+        if not self.winfo_exists():
+            return
+        focused = self.focus_get()
+        if focused not in (self.entry, self._listbox):
+            self._close_popup()
+
+    def _close_popup(self) -> None:
+        if self._popup is not None:
+            self._popup.destroy()
+            self._popup = None
+            self._listbox = None
 
     def _on_destroy(self, _event: object) -> None:
         if self._pending_after_id is not None:
             self.after_cancel(self._pending_after_id)
             self._pending_after_id = None
+        self._close_popup()
 
     def get(self) -> str:
         return self.var.get()
 
     def focus_set(self) -> None:
-        self.combo.focus_set()
+        self.entry.focus_set()
 
     def bind_return(self, callback: Callable[[object], None]) -> None:
-        self.combo.bind("<Return>", callback)
+        self.entry.bind("<Return>", callback)
 
 
 class InspirationSearchDialog(tk.Toplevel):
@@ -108,11 +196,11 @@ class InspirationSearchDialog(tk.Toplevel):
         frame.pack(fill="both", expand=True)
 
         ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.artist_field = _AutocompleteCombobox(frame, fetch=backend.search_inspiration_artists)
+        self.artist_field = _AutocompleteEntry(frame, fetch=backend.search_inspiration_artists)
         self.artist_field.grid(row=0, column=1, sticky="ew")
 
         ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.title_field = _AutocompleteCombobox(
+        self.title_field = _AutocompleteEntry(
             frame,
             fetch=lambda text: backend.search_inspiration_titles(text, artist=self.artist_field.get().strip()),
         )
