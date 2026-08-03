@@ -53,7 +53,7 @@ class _AutocompleteCombobox(ttk.Frame):
         if matches:
             self.combo.event_generate("<Down>")  # ttk's own trick for posting the dropdown programmatically
         else:
-            self.combo.tk.call("ttk::combobox::Unpost")
+            self.combo.tk.call("ttk::combobox::Unpost", self.combo)
 
     def get(self) -> str:
         return self.var.get()
