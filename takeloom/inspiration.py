@@ -15,20 +15,14 @@ class InspirationError(Exception):
     """Raised when inspiration tracks can't be queried or downloaded."""
 
 
-def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dict]:
-    """Query tracks from radioserver matching the project's inspiration filters."""
-    if not project.setlist.inspiration:
-        raise InspirationError(
-            'No inspiration filters in setlist.json. Add an "inspiration" key with '
-            'filter sets, e.g.: "inspiration": [{"genre": "Rock"}, {"artist": "Miles Davis"}]'
-        )
+def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
     if not config.inspiration_server or not config.inspiration_api_key:
         raise InspirationError(
             "inspiration_server and inspiration_api_key must be set (takeloom setup-studio)."
         )
 
     server = config.inspiration_server.rstrip("/")
-    payload = json.dumps({"filters": project.setlist.inspiration}).encode()
+    payload = json.dumps({"filters": filters}).encode()
     req = urllib.request.Request(
         f"{server}/library/api/tracks/",
         data=payload,
@@ -40,11 +34,40 @@ def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dic
             data = json.loads(resp.read())
     except urllib.error.URLError as e:
         raise InspirationError(f"Error contacting server: {e}") from e
+    return data.get("tracks", [])
 
-    tracks = data.get("tracks", [])
+
+def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dict]:
+    """Query tracks from radioserver matching the project's inspiration filters."""
+    if not project.setlist.inspiration:
+        raise InspirationError(
+            'No inspiration filters in setlist.json. Add an "inspiration" key with '
+            'filter sets, e.g.: "inspiration": [{"genre": "Rock"}, {"artist": "Miles Davis"}]'
+        )
+    tracks = _post_track_query(config, project.setlist.inspiration)
     if not tracks:
         raise InspirationError("No tracks matched the inspiration filters.")
     return tracks
+
+
+def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
+    """Query radioserver directly by artist and/or title, independent of a
+    project's own configured inspiration filters — backs the Add to
+    Playlist dialog's "Add from Inspiration" search, as opposed to
+    query_inspiration_tracks()'s per-project filtered browsing."""
+    filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
+    if not filters:
+        raise InspirationError("Enter an artist and/or title to search.")
+    tracks = _post_track_query(config, [filters])
+    if not tracks:
+        raise InspirationError(f"No match found for {_describe(artist, title)}.")
+    return tracks
+
+
+def _describe(artist: str, title: str) -> str:
+    if artist and title:
+        return f'"{artist} - {title}"'
+    return f'"{artist or title}"'
 
 
 def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:

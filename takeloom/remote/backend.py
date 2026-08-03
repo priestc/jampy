@@ -100,6 +100,13 @@ class RemoteBackend(Backend):
             "add_youtube_backing_track", {"project_name": project_name, "url": url}, timeout=DOWNLOAD_TIMEOUT,
         )
 
+    def add_inspiration_backing_track(self, project_name: str, artist: str, title: str) -> dict:
+        return self._client.call(
+            "add_inspiration_backing_track",
+            {"project_name": project_name, "artist": artist, "title": title},
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+
     # --- inspiration ---
 
     def query_inspiration_tracks(self, project_name: str) -> list[dict]:

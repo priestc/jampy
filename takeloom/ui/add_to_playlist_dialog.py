@@ -23,6 +23,90 @@ from ..youtube import is_youtube_url
 from .new_project_dialog import URLPromptDialog
 
 
+def _no_suggestions(_text: str) -> list[str]:
+    """Placeholder autocomplete source: the inspiration server has no
+    search-as-you-type endpoint yet. Swap this out for a real query in
+    InspirationSearchDialog once one exists — _AutocompleteCombobox itself
+    doesn't need to change."""
+    return []
+
+
+class _AutocompleteCombobox(ttk.Frame):
+    """A Combobox that re-queries `suggest(text) -> list[str]` on every
+    keystroke and pops its own dropdown open with the results, instead of
+    a plain Combobox's fixed `values` list."""
+
+    def __init__(self, master: tk.Misc, suggest: Callable[[str], list[str]], width: int = 30) -> None:
+        super().__init__(master)
+        self._suggest = suggest
+        self.var = tk.StringVar()
+        self.combo = ttk.Combobox(self, textvariable=self.var, width=width)
+        self.combo.pack(fill="x")
+        self.combo.bind("<KeyRelease>", self._on_key_release)
+
+    def _on_key_release(self, event: object) -> None:
+        if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):  # type: ignore[attr-defined]
+            return
+        text = self.var.get().strip()
+        matches = self._suggest(text) if text else []
+        self.combo.configure(values=matches)
+        if matches:
+            self.combo.event_generate("<Down>")  # ttk's own trick for posting the dropdown programmatically
+        else:
+            self.combo.tk.call("ttk::combobox::Unpost")
+
+    def get(self) -> str:
+        return self.var.get()
+
+    def focus_set(self) -> None:
+        self.combo.focus_set()
+
+    def bind_return(self, callback: Callable[[object], None]) -> None:
+        self.combo.bind("<Return>", callback)
+
+
+class InspirationSearchDialog(tk.Toplevel):
+    """Prompt for an artist and/or title to add from the inspiration
+    server. Both fields autocomplete via _AutocompleteCombobox, currently
+    wired to _no_suggestions until the server grows a search endpoint."""
+
+    def __init__(self, master: tk.Misc) -> None:
+        super().__init__(master)
+        self.title("Add from Inspiration")
+        self.resizable(False, False)
+        self.transient(master)
+        self.result: tuple[str, str] | None = None
+
+        frame = ttk.Frame(self, padding=16)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.artist_field = _AutocompleteCombobox(frame, suggest=_no_suggestions)
+        self.artist_field.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.title_field = _AutocompleteCombobox(frame, suggest=_no_suggestions)
+        self.title_field.grid(row=1, column=1, sticky="ew")
+
+        frame.columnconfigure(1, weight=1)
+        self.artist_field.focus_set()
+        self.artist_field.bind_return(lambda _e: self._submit())
+        self.title_field.bind_return(lambda _e: self._submit())
+
+        button_row = ttk.Frame(frame)
+        button_row.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
+        ttk.Button(button_row, text="Add", command=self._submit).pack(side="left")
+
+    def _submit(self) -> None:
+        artist = self.artist_field.get().strip()
+        title = self.title_field.get().strip()
+        if not artist and not title:
+            return
+        self.result = (artist, title)
+        self.destroy()
+
+
 class AddToPlaylistDialog(tk.Toplevel):
     """Popup for adding local files / YouTube URLs as backing tracks to an
     existing project. `on_track_added` fires after every successful add
@@ -65,6 +149,9 @@ class AddToPlaylistDialog(tk.Toplevel):
         button_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
         ttk.Button(button_row, text="Add Files...", command=self._on_browse_files).pack(side="left")
         ttk.Button(button_row, text="Add YouTube URL...", command=self._on_add_url).pack(side="left", padx=(8, 0))
+        ttk.Button(button_row, text="Add from Inspiration...", command=self._on_add_inspiration).pack(
+            side="left", padx=(8, 0)
+        )
         ttk.Button(button_row, text="Remove Selected", command=self._on_remove_selected).pack(side="left", padx=(8, 0))
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
@@ -84,11 +171,11 @@ class AddToPlaylistDialog(tk.Toplevel):
 
     # --- collecting sources ---
 
-    def _add_item(self, source: str, kind: str) -> None:
+    def _add_item(self, source: str, kind: str, **extra: str) -> None:
         source = source.strip()
         if not source or any(i["source"] == source for i in self._items):
             return
-        self._items.append({"source": source, "kind": kind, "status": "Pending"})
+        self._items.append({"source": source, "kind": kind, "status": "Pending", **extra})
         self._refresh_list()
         self._process_next()
 
@@ -153,6 +240,15 @@ class AddToPlaylistDialog(tk.Toplevel):
             return
         self._add_item(dialog.result, "youtube")
 
+    def _on_add_inspiration(self) -> None:
+        dialog = InspirationSearchDialog(self)
+        self.wait_window(dialog)
+        if not dialog.result:
+            return
+        artist, title = dialog.result
+        label = " - ".join(part for part in (artist, title) if part)
+        self._add_item(label, "inspiration", artist=artist, title=title)
+
     def _on_remove_selected(self) -> None:
         # Only "Pending" (not yet started) items can be pulled back out —
         # one already downloading/copying can't be cancelled mid-flight,
@@ -195,6 +291,8 @@ class AddToPlaylistDialog(tk.Toplevel):
                     def on_progress(percent: float | None, message: str) -> None:
                         self.after(0, lambda: self._update_progress(percent, message))
                     backend.add_youtube_backing_track(project_name, item["source"], on_progress=on_progress)
+                elif item["kind"] == "inspiration":
+                    backend.add_inspiration_backing_track(project_name, item["artist"], item["title"])
                 else:
                     backend.add_local_backing_track(project_name, item["source"])
                 self.after(0, lambda: self._on_item_done(item, None))

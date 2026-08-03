@@ -71,6 +71,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.add_local_backing_track(args["project_name"], args["source_path"], args.get("track_name"))
     if op == "add_youtube_backing_track":
         return backend.add_youtube_backing_track(args["project_name"], args["url"])
+    if op == "add_inspiration_backing_track":
+        return backend.add_inspiration_backing_track(args["project_name"], args["artist"], args["title"])
     if op == "query_inspiration_tracks":
         return {"tracks": backend.query_inspiration_tracks(args["project_name"])}
     if op == "start_recording":

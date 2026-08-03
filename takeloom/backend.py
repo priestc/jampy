@@ -161,6 +161,17 @@ class Backend(ABC):
         placeholder message instead."""
         ...
 
+    @abstractmethod
+    def add_inspiration_backing_track(self, project_name: str, artist: str, title: str) -> dict:
+        """Search the inspiration server by artist and/or title and add the
+        first match as a backing track — the Add to Playlist dialog's
+        "Add from Inspiration" search, as opposed to picking one off the
+        Inspiration tab's per-project filtered browse list. Downloads the
+        audio immediately (unlike selecting an Inspiration-tab track for
+        recording, which defers the download to start_recording()), since
+        this is meant to leave the track fully ready to record."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -784,6 +795,26 @@ class LocalBackend(Backend):
         except YouTubeDownloadError as e:
             raise BackendError(str(e)) from e
         entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration)
+        return entry.to_dict()
+
+    def add_inspiration_backing_track(self, project_name: str, artist: str, title: str) -> dict:
+        from .inspiration import (
+            InspirationError, download_inspiration_track, find_or_add_inspiration_track, search_inspiration_tracks,
+        )
+        project = self._open_project(project_name)
+        config = self.get_config()
+        try:
+            matches = search_inspiration_tracks(config, artist=artist, title=title)
+        except InspirationError as e:
+            raise BackendError(str(e)) from e
+        entry = find_or_add_inspiration_track(project, matches[0])
+        project.save_setlist()
+        backing_path = project.backing_tracks_dir / entry.backing_track
+        if not backing_path.exists():
+            try:
+                download_inspiration_track(entry, backing_path, config)
+            except InspirationError as e:
+                raise BackendError(str(e)) from e
         return entry.to_dict()
 
     # --- inspiration ---
