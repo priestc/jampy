@@ -1,12 +1,7 @@
-"""Add to Playlist dialog: a drop zone for local audio/video files and
-YouTube URLs, used to add backing tracks to a project already selected on
-the Record tab.
-
-Shares its drag-and-drop/queue mechanics with NewProjectDialog, but skips
-the project-creation step (the project already exists) and starts
-processing each item the moment it's queued rather than waiting for a
-single "Create" click, so tracks appear in the Setlist one at a time as
-they finish instead of all at once at the end.
+"""Add to Playlist dialog: add one backing track to a project already
+selected on the Record tab, from a local file, a YouTube URL, or the
+inspiration server — one tab per source, each embedded directly in this
+dialog rather than behind its own popup.
 """
 
 from __future__ import annotations
@@ -20,7 +15,6 @@ from tkinterdnd2 import DND_FILES, DND_TEXT
 
 from ..backend import Backend, BackendError
 from ..youtube import is_youtube_url
-from .new_project_dialog import URLPromptDialog
 
 
 class _AutocompleteEntry(ttk.Frame):
@@ -193,60 +187,14 @@ class _AutocompleteEntry(ttk.Frame):
         self.entry.bind("<Return>", callback)
 
 
-class InspirationSearchDialog(tk.Toplevel):
-    """Prompt for an artist and/or title to add from the inspiration
-    server. Both fields autocomplete live against the inspiration
-    server's autocomplete endpoints via `backend` — the Title field's
-    suggestions narrow to whatever's currently typed in Artist, if
-    anything."""
-
-    def __init__(self, master: tk.Misc, backend: Backend) -> None:
-        super().__init__(master)
-        self.title("Add from Inspiration")
-        self.resizable(False, False)
-        self.transient(master)
-        self.result: tuple[str, str] | None = None
-
-        frame = ttk.Frame(self, padding=16)
-        frame.pack(fill="both", expand=True)
-
-        ttk.Label(frame, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.artist_field = _AutocompleteEntry(frame, fetch=backend.search_inspiration_artists)
-        self.artist_field.grid(row=0, column=1, sticky="ew")
-
-        ttk.Label(frame, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.title_field = _AutocompleteEntry(
-            frame,
-            fetch=lambda text: backend.search_inspiration_titles(text, artist=self.artist_field.get().strip()),
-        )
-        self.title_field.grid(row=1, column=1, sticky="ew")
-
-        frame.columnconfigure(1, weight=1)
-        self.artist_field.focus_set()
-        self.artist_field.bind_return(lambda _e: self._submit())
-        self.title_field.bind_return(lambda _e: self._submit())
-
-        button_row = ttk.Frame(frame)
-        button_row.grid(row=2, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        ttk.Button(button_row, text="Cancel", command=self.destroy).pack(side="left", padx=(0, 8))
-        ttk.Button(button_row, text="Add", command=self._submit).pack(side="left")
-
-    def _submit(self) -> None:
-        artist = self.artist_field.get().strip()
-        title = self.title_field.get().strip()
-        if not artist and not title:
-            return
-        self.result = (artist, title)
-        self.destroy()
-
-
 class AddToPlaylistDialog(tk.Toplevel):
-    """Popup for adding local files / YouTube URLs as backing tracks to an
-    existing project. `on_track_added` fires after every successful add
-    (not just once at the end) so the caller can refresh its track list
-    live as items finish."""
+    """Add a single backing track to `project_name`'s playlist. Three
+    tabs — File, YouTube URL, Inspiration — share one Add button that
+    acts on whichever tab is currently selected; switching tabs doesn't
+    lose anything typed into the others. `on_track_added` fires once, on
+    success, right before the dialog closes itself."""
 
-    _PLACEHOLDER = "Drag audio files or YouTube URLs here, or use the buttons below"
+    _FILE_PLACEHOLDER = "Drag an audio/video file here, or click Browse..."
 
     def __init__(
         self, master: tk.Misc, backend: Backend, project_name: str, on_track_added: Callable[[], None],
@@ -259,72 +207,73 @@ class AddToPlaylistDialog(tk.Toplevel):
         self._backend = backend
         self._project_name = project_name
         self._on_track_added = on_track_added
-        self._items: list[dict] = []  # {"source": str, "kind": "file"|"youtube", "status": str}
-        self._processing = False
+        self._working = False
+        self._file_path = ""
         self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         frame = ttk.Frame(self, padding=16)
         frame.pack(fill="both", expand=True)
 
-        ttk.Label(frame, text=f"Adding to: {project_name}", font=("TkDefaultFont", 11, "bold")).grid(
-            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8)
+        ttk.Label(frame, text=f"Adding to: {project_name}", font=("TkDefaultFont", 11, "bold")).pack(
+            anchor="w", pady=(0, 8)
         )
 
-        self.drop_zone = tk.Listbox(
-            frame, height=8, width=56, background="#1a1a1a", foreground="white",
-            selectbackground="#2a6db0", highlightthickness=1, highlightbackground="#444444",
-        )
-        self.drop_zone.grid(row=1, column=0, columnspan=2, sticky="ew")
-        self.drop_zone.drop_target_register(DND_FILES, DND_TEXT)
-        self.drop_zone.dnd_bind("<<Drop>>", self._on_drop)
-
-        button_row = ttk.Frame(frame)
-        button_row.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
-        ttk.Button(button_row, text="Add Files...", command=self._on_browse_files).pack(side="left")
-        ttk.Button(button_row, text="Add YouTube URL...", command=self._on_add_url).pack(side="left", padx=(8, 0))
-        ttk.Button(button_row, text="Add from Inspiration...", command=self._on_add_inspiration).pack(
-            side="left", padx=(8, 0)
-        )
-        ttk.Button(button_row, text="Remove Selected", command=self._on_remove_selected).pack(side="left", padx=(8, 0))
+        self.notebook = ttk.Notebook(frame)
+        self.notebook.pack(fill="both", expand=True)
+        self._build_file_tab()
+        self._build_youtube_tab()
+        self._build_inspiration_tab()
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
-        self.progress.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.progress.pack(fill="x", pady=(10, 0))
 
         self.status_var = tk.StringVar(value="")
-        ttk.Label(frame, textvariable=self.status_var, foreground="#2a7d2a", wraplength=400).grid(
-            row=4, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        ttk.Label(frame, textvariable=self.status_var, foreground="#2a7d2a", wraplength=400).pack(
+            anchor="w", pady=(4, 0)
         )
 
         footer = ttk.Frame(frame)
-        footer.grid(row=5, column=0, columnspan=2, sticky="e", pady=(12, 0))
-        self.close_button = ttk.Button(footer, text="Done", command=self.destroy)
-        self.close_button.pack(side="left")
+        footer.pack(fill="x", pady=(12, 0))
+        self.cancel_button = ttk.Button(footer, text="Cancel", command=self.destroy)
+        self.cancel_button.pack(side="right")
+        self.add_button = ttk.Button(footer, text="Add", command=self._on_add)
+        self.add_button.pack(side="right", padx=(0, 8))
 
-        self._refresh_list()
+    # --- File tab ---
 
-    # --- collecting sources ---
+    def _build_file_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text="File")
 
-    def _add_item(self, source: str, kind: str, **extra: str) -> None:
-        source = source.strip()
-        if not source or any(i["source"] == source for i in self._items):
+        self.file_display_var = tk.StringVar(value=self._FILE_PLACEHOLDER)
+        self.file_drop = tk.Label(
+            tab, textvariable=self.file_display_var, background="#1a1a1a", foreground="#888888",
+            wraplength=380, justify="center", padx=12, pady=28,
+            highlightthickness=1, highlightbackground="#444444",
+        )
+        self.file_drop.pack(fill="x", pady=(0, 8))
+        self.file_drop.drop_target_register(DND_FILES, DND_TEXT)
+        self.file_drop.dnd_bind("<<Drop>>", self._on_file_drop)
+
+        ttk.Button(tab, text="Browse...", command=self._on_browse_file).pack(anchor="w")
+
+    def _set_file_path(self, path: str) -> None:
+        self._file_path = path
+        self.file_display_var.set(path)
+        self.file_drop.configure(foreground="white")
+
+    def _on_file_drop(self, event: object) -> None:
+        items = self._split_dnd_data(event.data)  # type: ignore[attr-defined]
+        if not items:
             return
-        self._items.append({"source": source, "kind": kind, "status": "Pending", **extra})
-        self._refresh_list()
-        self._process_next()
-
-    def _refresh_list(self) -> None:
-        self.drop_zone.delete(0, tk.END)
-        if not self._items:
-            self.drop_zone.insert(0, self._PLACEHOLDER)
-            self.drop_zone.itemconfig(0, foreground="#888888")
+        first = items[0]
+        if is_youtube_url(first):
+            # Dropped a URL onto the File tab by mistake — route it to
+            # where it actually belongs instead of erroring.
+            self.youtube_url_var.set(first)
+            self.notebook.select(self._youtube_tab)
             return
-        for item in self._items:
-            self.drop_zone.insert(tk.END, f"{item['source']}  —  {item['status']}")
-
-    def _on_drop(self, event: object) -> None:
-        for raw in self._split_dnd_data(event.data):  # type: ignore[attr-defined]
-            kind = "youtube" if is_youtube_url(raw) else "file"
-            self._add_item(raw, kind)
+        self._set_file_path(first)
 
     @staticmethod
     def _split_dnd_data(data: str) -> list[str]:
@@ -350,9 +299,9 @@ class AddToPlaylistDialog(tk.Toplevel):
             items.append(buf)
         return items
 
-    def _on_browse_files(self) -> None:
-        paths = filedialog.askopenfilenames(
-            title="Add Backing Tracks",
+    def _on_browse_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Add Backing Track",
             filetypes=[
                 ("Audio/video files", "*.flac *.wav *.mp3 *.m4a *.aac *.ogg *.opus "
                                        "*.mp4 *.m4v *.mov *.mkv *.webm *.avi"),
@@ -360,77 +309,100 @@ class AddToPlaylistDialog(tk.Toplevel):
             ],
             parent=self,
         )
-        for p in paths:
-            self._add_item(p, "file")
+        if path:
+            self._set_file_path(path)
 
-    def _on_add_url(self) -> None:
-        dialog = URLPromptDialog(self)
-        self.wait_window(dialog)
-        if not dialog.result:
-            return
-        if not is_youtube_url(dialog.result):
-            messagebox.showerror("Not a YouTube URL", "Only YouTube URLs are supported here.", parent=self)
-            return
-        self._add_item(dialog.result, "youtube")
+    # --- YouTube tab ---
 
-    def _on_add_inspiration(self) -> None:
-        dialog = InspirationSearchDialog(self, self._backend)
-        self.wait_window(dialog)
-        if not dialog.result:
-            return
-        artist, title = dialog.result
-        label = " - ".join(part for part in (artist, title) if part)
-        self._add_item(label, "inspiration", artist=artist, title=title)
+    def _build_youtube_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self._youtube_tab = tab
+        self.notebook.add(tab, text="YouTube URL")
 
-    def _on_remove_selected(self) -> None:
-        # Only "Pending" (not yet started) items can be pulled back out —
-        # one already downloading/copying can't be cancelled mid-flight,
-        # and a finished one is either already on disk or worth keeping
-        # visible as a record of the failure.
-        sel = list(self.drop_zone.curselection())
-        if not sel or not self._items:
-            return
-        for index in sorted(sel, reverse=True):
-            if index < len(self._items) and self._items[index]["status"] == "Pending":
-                del self._items[index]
-        self._refresh_list()
+        ttk.Label(tab, text="YouTube URL").pack(anchor="w", pady=(0, 4))
+        self.youtube_url_var = tk.StringVar()
+        entry = ttk.Entry(tab, textvariable=self.youtube_url_var, width=50)
+        entry.pack(fill="x")
+        entry.bind("<Return>", lambda _e: self._on_add())
+
+    # --- Inspiration tab ---
+
+    def _build_inspiration_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text="Inspiration")
+
+        ttk.Label(tab, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.artist_field = _AutocompleteEntry(tab, fetch=self._backend.search_inspiration_artists)
+        self.artist_field.grid(row=0, column=1, sticky="ew")
+
+        ttk.Label(tab, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.title_field = _AutocompleteEntry(
+            tab,
+            fetch=lambda text: self._backend.search_inspiration_titles(
+                text, artist=self.artist_field.get().strip()
+            ),
+        )
+        self.title_field.grid(row=1, column=1, sticky="ew")
+        tab.columnconfigure(1, weight=1)
+
+        self.artist_field.bind_return(lambda _e: self._on_add())
+        self.title_field.bind_return(lambda _e: self._on_add())
+
+    # --- add ---
 
     def _on_window_close(self) -> None:
-        if self._processing:
-            return  # a download in flight would just be orphaned, not stopped — see NewProjectDialog
+        if self._working:
+            return  # a download/copy in flight would just be orphaned, not stopped
         self.destroy()
 
-    # --- sequential processing (one at a time, so the progress bar means something) ---
-
-    def _process_next(self) -> None:
-        if self._processing:
+    def _on_add(self) -> None:
+        if self._working:
             return
-        item = next((i for i in self._items if i["status"] == "Pending"), None)
-        if item is None:
-            return
-        self._processing = True
-        item["status"] = "Working..."
-        if self.winfo_exists():
-            self.close_button.state(["disabled"])
-            self.progress["value"] = 0
-            self._refresh_list()
+        current = self.notebook.tab(self.notebook.select(), "text")
+        if current == "File":
+            if not self._file_path:
+                messagebox.showerror("Cannot add", "Choose a file first.", parent=self)
+                return
+            file_path = self._file_path
+            self._start_add(lambda backend, project: backend.add_local_backing_track(project, file_path))
+        elif current == "YouTube URL":
+            url = self.youtube_url_var.get().strip()
+            if not url:
+                messagebox.showerror("Cannot add", "Enter a YouTube URL.", parent=self)
+                return
+            if not is_youtube_url(url):
+                messagebox.showerror("Not a YouTube URL", "Enter a valid YouTube URL.", parent=self)
+                return
 
+            def do_youtube(backend: Backend, project: str) -> dict:
+                def on_progress(percent: float | None, message: str) -> None:
+                    self.after(0, lambda: self._update_progress(percent, message))
+                return backend.add_youtube_backing_track(project, url, on_progress=on_progress)
+
+            self._start_add(do_youtube)
+        else:
+            artist = self.artist_field.get().strip()
+            title = self.title_field.get().strip()
+            if not artist and not title:
+                messagebox.showerror("Cannot add", "Enter an artist and/or title.", parent=self)
+                return
+            self._start_add(lambda backend, project: backend.add_inspiration_backing_track(project, artist, title))
+
+    def _start_add(self, call: Callable[[Backend, str], dict]) -> None:
+        self._working = True
+        self.add_button.state(["disabled"])
+        self.cancel_button.state(["disabled"])
+        self.status_var.set("Working...")
+        self.progress["value"] = 0
         backend = self._backend
         project_name = self._project_name
 
         def worker() -> None:
             try:
-                if item["kind"] == "youtube":
-                    def on_progress(percent: float | None, message: str) -> None:
-                        self.after(0, lambda: self._update_progress(percent, message))
-                    backend.add_youtube_backing_track(project_name, item["source"], on_progress=on_progress)
-                elif item["kind"] == "inspiration":
-                    backend.add_inspiration_backing_track(project_name, item["artist"], item["title"])
-                else:
-                    backend.add_local_backing_track(project_name, item["source"])
-                self.after(0, lambda: self._on_item_done(item, None))
+                call(backend, project_name)
+                self.after(0, lambda: self._on_add_done(None))
             except BackendError as e:
-                self.after(0, lambda err=str(e): self._on_item_done(item, err))
+                self.after(0, lambda err=str(e): self._on_add_done(err))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -441,14 +413,18 @@ class AddToPlaylistDialog(tk.Toplevel):
             self.progress["value"] = percent
         self.status_var.set(message)
 
-    def _on_item_done(self, item: dict, error: str | None) -> None:
-        item["status"] = f"Failed: {error}" if error else "Done"
-        self._processing = False
-        if not error:
-            self._on_track_added()
-        if self.winfo_exists():
+    def _on_add_done(self, error: str | None) -> None:
+        self._working = False
+        if not self.winfo_exists():
+            if not error:
+                self._on_track_added()
+            return
+        if error:
             self.progress["value"] = 0
             self.status_var.set("")
-            self._refresh_list()
-            self.close_button.state(["!disabled"])
-        self._process_next()
+            self.add_button.state(["!disabled"])
+            self.cancel_button.state(["!disabled"])
+            messagebox.showerror("Cannot add track", error, parent=self)
+            return
+        self._on_track_added()
+        self.destroy()
