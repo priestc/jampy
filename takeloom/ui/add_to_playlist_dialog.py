@@ -95,7 +95,12 @@ class _AutocompleteEntry(ttk.Frame):
         if self._popup is None:
             self._popup = tk.Toplevel(self)
             self._popup.wm_overrideredirect(True)
-            self._popup.wm_attributes("-topmost", True)
+            # transient (rather than "-topmost") ties this window to the
+            # dialog in the window manager's own bookkeeping, so closing it
+            # hands focus back cleanly — an override-redirect "-topmost"
+            # window destroyed while it still holds key-window status can
+            # otherwise leave the whole parent dialog unresponsive on macOS.
+            self._popup.transient(self.winfo_toplevel())
             self._listbox = tk.Listbox(
                 self._popup, background="#1a1a1a", foreground="white",
                 selectbackground="#2a6db0", highlightthickness=1,
@@ -134,13 +139,23 @@ class _AutocompleteEntry(ttk.Frame):
         sel = self._listbox.curselection()
         if sel:
             self.var.set(self._matches[sel[0]])
-        self._close_popup()
-        self.entry.focus_set()
-        self.entry.icursor(tk.END)
+        self._dismiss_popup_and_refocus()
 
     def _cancel_popup_navigation(self) -> None:
-        self._close_popup()
+        self._dismiss_popup_and_refocus()
+
+    def _dismiss_popup_and_refocus(self) -> None:
+        # Claim focus back for the entry (and its owning dialog window)
+        # BEFORE tearing down the popup, not after — destroying an
+        # override-redirect Toplevel while it still holds the OS-level
+        # key-window status, with nothing yet claiming it, is what leaves
+        # the whole parent dialog dead to clicks/keyboard on macOS. The
+        # actual destroy is deferred a tick so this click's own event on
+        # the (about to be destroyed) listbox finishes running first.
+        self.winfo_toplevel().focus_force()
         self.entry.focus_set()
+        self.entry.icursor(tk.END)
+        self.after_idle(self._close_popup)
 
     def _on_focus_out(self, _event: object) -> None:
         # Moving focus into the popup's own listbox (via the Down-arrow
