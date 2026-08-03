@@ -162,14 +162,23 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def add_inspiration_backing_track(self, project_name: str, artist: str, title: str) -> dict:
+    def add_inspiration_backing_track(
+        self, project_name: str, artist: str, title: str,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
         """Search the inspiration server by artist and/or title and add the
-        first match as a backing track — the Add to Playlist dialog's
+        exact match as a backing track — the Add to Playlist dialog's
         "Add from Inspiration" search, as opposed to picking one off the
         Inspiration tab's per-project filtered browse list. Downloads the
         audio immediately (unlike selecting an Inspiration-tab track for
         recording, which defers the download to start_recording()), since
-        this is meant to leave the track fully ready to record."""
+        this is meant to leave the track fully ready to record.
+
+        If given, on_progress(percent, message) reports live download
+        progress — inspiration files are full-quality and can take a
+        while. RemoteBackend can't stream this live over its simple
+        request/response RPC, so it calls on_progress once with a
+        placeholder message instead, same as add_youtube_backing_track."""
         ...
 
     # --- inspiration ---
@@ -813,22 +822,29 @@ class LocalBackend(Backend):
         entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration)
         return entry.to_dict()
 
-    def add_inspiration_backing_track(self, project_name: str, artist: str, title: str) -> dict:
+    def add_inspiration_backing_track(
+        self, project_name: str, artist: str, title: str,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
         from .inspiration import (
-            InspirationError, download_inspiration_track, find_or_add_inspiration_track, search_inspiration_tracks,
+            InspirationError, download_inspiration_track, find_or_add_inspiration_track,
+            search_inspiration_tracks, select_best_match,
         )
         project = self._open_project(project_name)
         config = self.get_config()
+        if on_progress:
+            on_progress(None, f"Searching for {artist or title}...")
         try:
             matches = search_inspiration_tracks(config, artist=artist, title=title)
+            track_info = select_best_match(matches, artist, title)
         except InspirationError as e:
             raise BackendError(str(e)) from e
-        entry = find_or_add_inspiration_track(project, matches[0])
+        entry = find_or_add_inspiration_track(project, track_info)
         project.save_setlist()
         backing_path = project.backing_tracks_dir / entry.backing_track
         if not backing_path.exists():
             try:
-                download_inspiration_track(entry, backing_path, config)
+                download_inspiration_track(entry, backing_path, config, on_progress=on_progress)
             except InspirationError as e:
                 raise BackendError(str(e)) from e
         return entry.to_dict()

@@ -386,7 +386,13 @@ class AddToPlaylistDialog(tk.Toplevel):
             if not artist and not title:
                 messagebox.showerror("Cannot add", "Enter an artist and/or title.", parent=self)
                 return
-            self._start_add(lambda backend, project: backend.add_inspiration_backing_track(project, artist, title))
+
+            def do_inspiration(backend: Backend, project: str) -> dict:
+                def on_progress(percent: float | None, message: str) -> None:
+                    self.after(0, lambda: self._update_progress(percent, message))
+                return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
+
+            self._start_add(do_inspiration)
 
     def _start_add(self, call: Callable[[Backend, str], dict]) -> None:
         self._working = True

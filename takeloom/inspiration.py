@@ -7,9 +7,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 from .config import StudioConfig
 from .project import Project, TrackEntry
+
+ProgressCallback = Callable[[float | None, str], None]
 
 
 class InspirationError(Exception):
@@ -69,6 +72,37 @@ def _describe(artist: str, title: str) -> str:
     if artist and title:
         return f'"{artist} - {title}"'
     return f'"{artist or title}"'
+
+
+def select_best_match(tracks: list[dict], artist: str, title: str) -> dict:
+    """Pick the track that actually matches what was searched for, out of
+    whatever /library/api/tracks/'s filter search returned. That endpoint
+    is built for broad library-browsing filters (see
+    query_inspiration_tracks) rather than a precise "find this one song"
+    lookup, so it can return loosely-related tracks alongside — or
+    instead of — an exact hit (e.g. matching just the artist and
+    ignoring an unmatched title). Requiring an exact, case-insensitive
+    match on whichever of artist/title was actually given — and raising
+    rather than guessing when there isn't one — is what stops a search
+    like "Bob Dylan" / "Are You Ready" from silently adding some other
+    Bob Dylan track instead."""
+    artist_norm = artist.strip().lower()
+    title_norm = title.strip().lower()
+
+    def is_exact(t: dict) -> bool:
+        if artist_norm and t.get("artist", "").strip().lower() != artist_norm:
+            return False
+        if title_norm and t.get("title", "").strip().lower() != title_norm:
+            return False
+        return True
+
+    exact = [t for t in tracks if is_exact(t)]
+    if exact:
+        return exact[0]
+    raise InspirationError(
+        f"No exact match for {_describe(artist, title)} — the server returned "
+        f"{len(tracks)} similar track(s) instead. Try adjusting the artist/title."
+    )
 
 
 def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list[str]:
@@ -132,8 +166,17 @@ def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEn
     return entry
 
 
-def download_inspiration_track(track: TrackEntry, backing_path: Path, config: StudioConfig) -> None:
-    """Download an inspiration track's audio to backing_path."""
+_DOWNLOAD_CHUNK_SIZE = 65536
+
+
+def download_inspiration_track(
+    track: TrackEntry, backing_path: Path, config: StudioConfig, on_progress: ProgressCallback | None = None,
+) -> None:
+    """Download an inspiration track's audio to backing_path. Inspiration
+    files are full-quality (often FLAC) and can take a while, so this
+    streams in chunks and reports live progress the same way
+    youtube.download_youtube_video does, rather than blocking silently
+    on a single resp.read()."""
     server = config.inspiration_server.rstrip("/")
     url = f"{server}/library/api/tracks/{track.inspiration_track_id}/download/"
     req = urllib.request.Request(
@@ -141,6 +184,34 @@ def download_inspiration_track(track: TrackEntry, backing_path: Path, config: St
     )
     try:
         with urllib.request.urlopen(req) as resp:
-            backing_path.write_bytes(resp.read())
+            total = resp.headers.get("Content-Length")
+            total = int(total) if total else None
+            read = 0
+            with open(backing_path, "wb") as f:
+                while True:
+                    chunk = resp.read(_DOWNLOAD_CHUNK_SIZE)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    read += len(chunk)
+                    if on_progress:
+                        if total:
+                            on_progress(read / total * 100, f"Downloading {track.name}... ({read // 1024} / {total // 1024} KB)")
+                        else:
+                            on_progress(None, f"Downloading {track.name}... ({read // 1024} KB)")
+            if total is not None and read != total:
+                # The server said how big the file was but the connection
+                # dropped (or otherwise stopped) before all of it arrived —
+                # resp.read() just returns b"" at that point rather than
+                # raising, so without this check a truncated download would
+                # silently look like a completed one.
+                raise InspirationError(f"Download incomplete: got {read} of {total} bytes.")
     except urllib.error.URLError as e:
+        # A partial file left behind here would look "already downloaded"
+        # to add_inspiration_backing_track's exists() check next time,
+        # permanently leaving a truncated/corrupt backing track in place.
+        backing_path.unlink(missing_ok=True)
         raise InspirationError(f"Download failed: {e}") from e
+    except Exception:
+        backing_path.unlink(missing_ok=True)
+        raise
