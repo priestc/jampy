@@ -112,6 +112,18 @@ class RemoteBackend(Backend):
             timeout=DOWNLOAD_TIMEOUT,
         )
 
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        if on_progress:
+            on_progress(None, "Downloading on the remote studio (live progress isn't available over Remote yet)...")
+        return self._client.call(
+            "add_inspiration_track_by_id",
+            {"project_name": project_name, "track_info": track_info},
+            timeout=DOWNLOAD_TIMEOUT,
+        )
+
     # --- inspiration ---
 
     def query_inspiration_tracks(self, project_name: str) -> list[dict]:

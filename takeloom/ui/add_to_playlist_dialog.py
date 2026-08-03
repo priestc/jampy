@@ -19,10 +19,15 @@ from ..youtube import is_youtube_url
 
 class _AutocompleteEntry(ttk.Frame):
     """An Entry that debounces keystrokes, fetches suggestions on a
-    background thread via `fetch(text) -> list[str]` (a Backend call —
-    see docs/inspiration-server-autocomplete-api.md — so this works the
-    same over Remote as it does locally), and shows them in a small popup
-    below itself.
+    background thread via `fetch(text) -> list[(display_text, payload)]`
+    (a Backend call — see docs/inspiration-server-autocomplete-api.md —
+    so this works the same over Remote as it does locally), and shows
+    them in a small popup below itself. `payload` is opaque to this
+    widget — e.g. a full track dict for the Inspiration Title field, so
+    picking a suggestion can hand back the exact record the user chose
+    instead of just its display string (see `selected_payload`). Pass
+    `None` as the payload wherever there's nothing more specific than the
+    text itself (e.g. the Artist field).
 
     Deliberately not a ttk.Combobox: posting a Combobox's built-in
     dropdown (via event_generate("<Down>") or the Tcl Post proc) moves
@@ -36,13 +41,14 @@ class _AutocompleteEntry(ttk.Frame):
     _DEBOUNCE_MS = 200
     _MAX_VISIBLE = 8
 
-    def __init__(self, master: tk.Misc, fetch: Callable[[str], list[str]], width: int = 30) -> None:
+    def __init__(self, master: tk.Misc, fetch: Callable[[str], list[tuple[str, object]]], width: int = 30) -> None:
         super().__init__(master)
         self._fetch = fetch
         self._pending_after_id: str | None = None
         self._popup: tk.Toplevel | None = None
         self._listbox: tk.Listbox | None = None
-        self._matches: list[str] = []
+        self._matches: list[tuple[str, object]] = []
+        self.selected_payload: object | None = None
 
         self.var = tk.StringVar()
         self.entry = ttk.Entry(self, textvariable=self.var, width=width)
@@ -56,6 +62,7 @@ class _AutocompleteEntry(ttk.Frame):
     def _on_key_release(self, event: object) -> None:
         if event.keysym in ("Up", "Down", "Return", "Escape", "Tab"):  # type: ignore[attr-defined]
             return
+        self.selected_payload = None  # any manual edit invalidates a prior exact selection
         if self._pending_after_id is not None:
             self.after_cancel(self._pending_after_id)
         self._pending_after_id = self.after(self._DEBOUNCE_MS, self._kick_off_fetch)
@@ -73,7 +80,7 @@ class _AutocompleteEntry(ttk.Frame):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_results(self, text: str, matches: list[str]) -> None:
+    def _apply_results(self, text: str, matches: list[tuple[str, object]]) -> None:
         if not self.winfo_exists() or self.var.get().strip() != text:
             return  # stale response for text the user has since changed — discard it
         if matches:
@@ -83,7 +90,7 @@ class _AutocompleteEntry(ttk.Frame):
 
     # --- popup ---
 
-    def _show_popup(self, matches: list[str]) -> None:
+    def _show_popup(self, matches: list[tuple[str, object]]) -> None:
         self._matches = matches
         visible = min(len(matches), self._MAX_VISIBLE)
         if self._popup is None:
@@ -107,8 +114,8 @@ class _AutocompleteEntry(ttk.Frame):
 
         self._listbox.configure(height=visible)
         self._listbox.delete(0, tk.END)
-        for m in matches:
-            self._listbox.insert(tk.END, m)
+        for display_text, _payload in matches:
+            self._listbox.insert(tk.END, display_text)
 
         x = self.entry.winfo_rootx()
         y = self.entry.winfo_rooty() + self.entry.winfo_height()
@@ -132,7 +139,9 @@ class _AutocompleteEntry(ttk.Frame):
             return
         sel = self._listbox.curselection()
         if sel:
-            self.var.set(self._matches[sel[0]])
+            display_text, payload = self._matches[sel[0]]
+            self.var.set(display_text)
+            self.selected_payload = payload
         self._dismiss_popup_and_refocus()
 
     def _cancel_popup_navigation(self) -> None:
@@ -331,22 +340,34 @@ class AddToPlaylistDialog(tk.Toplevel):
         tab = ttk.Frame(self.notebook, padding=12)
         self.notebook.add(tab, text="Inspiration")
 
+        def fetch_artists(text: str) -> list[tuple[str, None]]:
+            return [(name, None) for name in self._backend.search_inspiration_artists(text)]
+
+        def fetch_titles(text: str) -> list[tuple[str, dict | None]]:
+            tracks = self._backend.search_inspiration_titles(text, artist=self.artist_field.get().strip())
+            # A track dict only has an "id" once the inspiration server's
+            # Titles endpoint returns full records rather than bare title
+            # strings (see docs/inspiration-server-autocomplete-api.md) —
+            # until then, payload stays None and _on_add falls back to
+            # the by-name search path for that selection.
+            return [(self._format_title_suggestion(t), t if "id" in t else None) for t in tracks]
+
         ttk.Label(tab, text="Artist").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.artist_field = _AutocompleteEntry(tab, fetch=self._backend.search_inspiration_artists)
+        self.artist_field = _AutocompleteEntry(tab, fetch=fetch_artists)
         self.artist_field.grid(row=0, column=1, sticky="ew")
 
         ttk.Label(tab, text="Title").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.title_field = _AutocompleteEntry(
-            tab,
-            fetch=lambda text: self._backend.search_inspiration_titles(
-                text, artist=self.artist_field.get().strip()
-            ),
-        )
+        self.title_field = _AutocompleteEntry(tab, fetch=fetch_titles)
         self.title_field.grid(row=1, column=1, sticky="ew")
         tab.columnconfigure(1, weight=1)
 
         self.artist_field.bind_return(lambda _e: self._on_add())
         self.title_field.bind_return(lambda _e: self._on_add())
+
+    @staticmethod
+    def _format_title_suggestion(track: dict) -> str:
+        year = track.get("year")
+        return f"{track.get('title', '')} ({year})" if year else track.get("title", "")
 
     # --- add ---
 
@@ -387,9 +408,17 @@ class AddToPlaylistDialog(tk.Toplevel):
                 messagebox.showerror("Cannot add", "Enter an artist and/or title.", parent=self)
                 return
 
+            selected_track = self.title_field.selected_payload
+
             def do_inspiration(backend: Backend, project: str) -> dict:
                 def on_progress(percent: float | None, message: str) -> None:
                     self.after(0, lambda: self._update_progress(percent, message))
+                if selected_track is not None:
+                    # Picked straight off the Title autocomplete, which
+                    # already told us exactly which track this is — no
+                    # need for add_inspiration_backing_track's fuzzier
+                    # search-by-name (and its "guess wrong" failure mode).
+                    return backend.add_inspiration_track_by_id(project, selected_track, on_progress=on_progress)
                 return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
 
             self._start_add(do_inspiration)

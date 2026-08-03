@@ -105,7 +105,7 @@ def select_best_match(tracks: list[dict], artist: str, title: str) -> dict:
     )
 
 
-def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list[str]:
+def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
     """GET one of the inspiration server's autocomplete endpoints (see
     docs/inspiration-server-autocomplete-api.md). Autocomplete fires on
     every keystroke and isn't a user-triggered action the way search/
@@ -134,13 +134,20 @@ def search_artist_suggestions(config: StudioConfig, partial: str, limit: int = 1
     return _get_suggestions(config, "artists", {"q": partial.strip(), "limit": limit})
 
 
-def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[str]:
+def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[dict]:
     """Autocomplete suggestions for the Add to Playlist dialog's Title
-    field, optionally narrowed to a specific artist."""
+    field, optionally narrowed to a specific artist. Each result is a
+    track dict (id/artist/title/year/format/duration) — see
+    docs/inspiration-server-autocomplete-api.md — so selecting one can
+    add that exact track directly, with no secondary by-name search
+    needed. Tolerates an older server still returning bare title strings
+    (normalized here to a dict with no "id"), which just means the
+    caller falls back to the by-name search path for that selection."""
     params = {"q": partial.strip(), "limit": limit}
     if artist.strip():
         params["artist"] = artist.strip()
-    return _get_suggestions(config, "titles", params)
+    raw = _get_suggestions(config, "titles", params)
+    return [item if isinstance(item, dict) else {"title": item} for item in raw]
 
 
 def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:

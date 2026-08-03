@@ -181,6 +181,22 @@ class Backend(ABC):
         placeholder message instead, same as add_youtube_backing_track."""
         ...
 
+    @abstractmethod
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        """Add a specific, already-known inspiration track directly, with
+        no by-name search step — used when `track_info` came straight off
+        the Add to Playlist dialog's Title autocomplete (which returns
+        full track records, not just title strings — see
+        docs/inspiration-server-autocomplete-api.md), so the exact track
+        the user picked in the dropdown is the exact track that gets
+        added, instead of add_inspiration_backing_track's fuzzier
+        search-then-guess. `track_info` is one of those track dicts
+        (id/artist/title/year/format/duration)."""
+        ...
+
     # --- inspiration ---
 
     @abstractmethod
@@ -826,10 +842,7 @@ class LocalBackend(Backend):
         self, project_name: str, artist: str, title: str,
         on_progress: Callable[[float | None, str], None] | None = None,
     ) -> dict:
-        from .inspiration import (
-            InspirationError, download_inspiration_track, find_or_add_inspiration_track,
-            search_inspiration_tracks, select_best_match,
-        )
+        from .inspiration import InspirationError, search_inspiration_tracks, select_best_match
         project = self._open_project(project_name)
         config = self.get_config()
         if on_progress:
@@ -839,6 +852,22 @@ class LocalBackend(Backend):
             track_info = select_best_match(matches, artist, title)
         except InspirationError as e:
             raise BackendError(str(e)) from e
+        return self._add_inspiration_entry(project, config, track_info, on_progress)
+
+    def add_inspiration_track_by_id(
+        self, project_name: str, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        project = self._open_project(project_name)
+        config = self.get_config()
+        return self._add_inspiration_entry(project, config, track_info, on_progress)
+
+    @staticmethod
+    def _add_inspiration_entry(
+        project: Project, config: StudioConfig, track_info: dict,
+        on_progress: Callable[[float | None, str], None] | None = None,
+    ) -> dict:
+        from .inspiration import InspirationError, download_inspiration_track, find_or_add_inspiration_track
         entry = find_or_add_inspiration_track(project, track_info)
         project.save_setlist()
         backing_path = project.backing_tracks_dir / entry.backing_track

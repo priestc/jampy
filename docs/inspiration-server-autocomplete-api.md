@@ -7,6 +7,15 @@ tracks. It is written for whoever implements those endpoints in the
 inspiration server's own codebase; it assumes no prior familiarity with
 Takeloom.
 
+> **Revision note**: the Titles endpoint's response shape below changed
+> after the first version of this doc was already implemented — see
+> "REVISED" under `GET /library/api/autocomplete/titles/`. The Artists
+> endpoint is unchanged; if you already built that one, leave it as-is.
+> Takeloom's client already handles both the old and new title response
+> shapes, so this can land whenever convenient — it just won't get the
+> benefit described below (skipping the by-name search entirely) until
+> the new shape ships.
+
 ## Background: what's calling this, and why
 
 Takeloom is a desktop app for recording multi-instrument backing-track
@@ -102,9 +111,9 @@ Authorization: Bearer <api_key>
 {"suggestions": ["Miles Davis", "Miles Davis Quintet", "Milestones"]}
 ```
 
-### 2. `GET /library/api/autocomplete/titles/`
+### 2. `GET /library/api/autocomplete/titles/` — REVISED
 
-Suggests track titles matching partial text typed into the dialog's Title
+Suggests tracks matching partial title text typed into the dialog's Title
 field.
 
 **Query params**
@@ -113,12 +122,37 @@ field.
 |----------|----------|-------------|
 | `q`      | yes      | Partial, case-insensitive title text. Same empty/error handling as above. |
 | `limit`  | no       | Same as above: default `10`, cap `25`. |
-| `artist` | no       | If present, narrow results to tracks by this artist only (exact match against the artist field, case-insensitive). See "Optional enhancement" note below — the client doesn't send this yet, but design the endpoint to accept it now so it's a no-op addition on the client side later rather than a breaking API change. |
+| `artist` | no       | If present, narrow results to tracks by this artist only (exact match against the artist field, case-insensitive). |
 
-**Response** — same shape as artists:
+**Response** — `200 OK`. Unlike Artists, this returns full track objects
+(same shape as `/library/api/tracks/`'s track dicts), not bare strings:
 ```json
-{"suggestions": ["So What", "Solar"]}
+{"suggestions": [
+  {"id": 4821, "artist": "Miles Davis", "title": "So What", "year": 1959, "format": "flac", "duration": 545.2},
+  {"id": 4903, "artist": "Miles Davis", "title": "Solar", "year": 1954, "format": "flac", "duration": 224.8}
+]}
 ```
+
+**Why the change**: the first version of this endpoint returned bare
+title strings, matching Artists. That worked for display, but left
+Takeloom no way to know *which* track the user actually picked when they
+selected a suggestion — it had to fall back to a second, separate
+by-name search against `/library/api/tracks/` to resolve the title back
+into a track record. That search endpoint is built for broad
+library-browsing filters, not a precise single-song lookup, so it could
+(and did) return an unrelated track sharing the same artist when the
+title match wasn't exact enough for its filter logic — the user picks
+"Bob Dylan" / "Are You Ready" from your own autocomplete and a different
+Bob Dylan song gets added instead. Returning the full track record (with
+`id`) from *this* endpoint means the record the user actually selected
+in the dropdown is the exact same record Takeloom adds — no second
+lookup, no ambiguity, no guessing.
+
+If the same title string legitimately belongs to more than one track
+(e.g. a studio and a live version both literally titled "So What") and
+your dedup logic collapses them to one row, returning either one is
+fine — that ambiguity already exists in the library itself and isn't
+something this endpoint needs to solve.
 
 **Example**:
 ```
@@ -126,7 +160,9 @@ GET /library/api/autocomplete/titles/?q=so&artist=Miles%20Davis
 Authorization: Bearer <api_key>
 
 200 OK
-{"suggestions": ["So What", "Someday My Prince Will Come"]}
+{"suggestions": [
+  {"id": 4821, "artist": "Miles Davis", "title": "So What", "year": 1959, "format": "flac", "duration": 545.2}
+]}
 ```
 
 ---
@@ -134,7 +170,9 @@ Authorization: Bearer <api_key>
 ## Matching & ranking behavior
 
 - Match **substring**, not just prefix — a musician typing "davis" for
-  "Miles Davis" should still get a hit. Case-insensitive throughout.
+  "Miles Davis" should still get a hit. Case-insensitive throughout. This
+  applies to the `title` field on Titles' track objects the same as it
+  applies to Artists' bare strings.
 - **Rank prefix matches above substring-only matches** (e.g. querying
   "mile" should put "Miles Davis" ahead of "Two Miles From Nowhere"),
   then alphabetically within each group. This is the single biggest
@@ -194,13 +232,12 @@ Match the existing `/library/api/tracks/` endpoint's conventions:
 
 ## Client-side integration point (context only — no action needed here)
 
-Once these endpoints exist, the Takeloom-side wiring is a small, separate
-change: a new `search_artists(config, partial)` / `search_titles(config,
-partial, artist=None)` pair in `takeloom/inspiration.py` (following the
-existing `_post_track_query`/`search_inspiration_tracks` pattern in that
-file), plugged into the `suggest` callback in
-`takeloom/ui/add_to_playlist_dialog.py` in place of the current
-`_no_suggestions` stub. That work is out of scope for this document and
-will happen in the Takeloom repo once these endpoints are live — it's
-mentioned here only so it's clear nothing else is blocking on this API
-shape being exactly right up front, but changing it later is cheap.
+This side is already done and live in the Takeloom repo:
+`search_artist_suggestions`/`search_title_suggestions` in
+`takeloom/inspiration.py` call these two endpoints, feeding the Add to
+Playlist dialog's Artist/Title autocomplete fields
+(`takeloom/ui/add_to_playlist_dialog.py`). The client accepts both the
+old (bare string) and new (full track object) shapes from Titles — it
+only gets to skip the secondary by-name search once a given response
+actually includes an `id`. There's nothing further to do on the Takeloom
+side once Titles is updated to the new shape; it'll just start working.
