@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
@@ -201,6 +202,10 @@ def run(remote_ip: str | None = None) -> None:
     root = TkinterDnD.Tk()  # a plain tk.Tk() can't accept drag-and-drop (used by New Project)
     normalize_platform_style(root)
     root.title("Takeloom")
+
+    icon = tk.PhotoImage(file=str(Path(__file__).resolve().parent.parent / "data" / "icon.png"))
+    root.iconphoto(True, icon)
+    root._takeloom_icon = icon  # keep a reference or Tk drops the image
 
     app_state = AppState()
     config = app_state.local_backend.get_config()
