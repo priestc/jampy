@@ -1976,6 +1976,7 @@ class LocalBackend(Backend):
                             rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
                             audio_fifo=stream_feeder.fifo_path,
                             sample_rate=config.sample_rate, channels=engine.output_channels,
+                            width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
                         )
                     else:
                         stream_feeder = None

@@ -59,17 +59,22 @@ def _build_capture_cmd(
     if stream_preview:
         filter_parts.append("[prev]fps=10,scale=320:-2[prevout]")
     if stream_target is not None:
-        filter_parts.append(f"[streamv]scale={stream_target.width}:-2[streamout]")
+        # width <= 0 means "stream at the source resolution" — `null` is
+        # ffmpeg's video passthrough filter (there's no scaling filter for
+        # "don't scale"), just relabeling the branch for the -map below.
+        stream_filter = f"scale={stream_target.width}:-2" if stream_target.width > 0 else "null"
+        filter_parts.append(f"[streamv]{stream_filter}[streamout]")
 
     cmd += ["-filter_complex", ";".join(filter_parts)]
     cmd += ["-map", "[rec]", "-pix_fmt", "yuv420p", str(output_path)]
     if stream_preview:
         cmd += ["-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1"]
     if stream_target is not None:
+        bitrate = f"{stream_target.bitrate_kbps}k"
         cmd += [
             "-map", "[streamout]", "-map", "1:a",
             "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-            "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
+            "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{stream_target.bitrate_kbps * 2}k",
             "-g", str(framerate * 2), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
             "-f", "flv", stream_target.rtmp_url,

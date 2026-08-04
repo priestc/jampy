@@ -41,6 +41,23 @@ def fifo_supported() -> bool:
     return hasattr(os, "mkfifo")
 
 
+# (label, video width in pixels — 0 means "don't scale, use the source
+# resolution", target video bitrate in kbps). Bitrates follow YouTube's own
+# recommended live-streaming ranges (https://support.google.com/youtube
+# "Recommended upload encoding settings") for each resolution at up to 30fps.
+# The UI's Streaming tab presents these labels directly; StudioConfig just
+# stores the resolved width/bitrate, not the label, so re-ordering or
+# retuning this list later never invalidates a saved config.
+STREAM_QUALITY_PRESETS: list[tuple[str, int, int]] = [
+    ("720p (3000 kbps)", 1280, 3000),
+    ("1080p (4500 kbps)", 1920, 4500),
+    ("1080p, high bitrate (6000 kbps)", 1920, 6000),
+    ("Source resolution (8000 kbps)", 0, 8000),
+]
+DEFAULT_STREAM_WIDTH = STREAM_QUALITY_PRESETS[0][1]
+DEFAULT_STREAM_BITRATE_KBPS = STREAM_QUALITY_PRESETS[0][2]
+
+
 @dataclass
 class StreamTarget:
     """Everything VideoRecorder needs to add a live RTMP branch onto its
@@ -49,7 +66,8 @@ class StreamTarget:
     audio_fifo: Path
     sample_rate: int
     channels: int
-    width: int = 1280  # streamed video is downscaled to this; the local recording is untouched
+    width: int = DEFAULT_STREAM_WIDTH  # streamed video is scaled to this; 0 = use the source resolution unscaled
+    bitrate_kbps: int = DEFAULT_STREAM_BITRATE_KBPS
 
 
 class LiveAudioFeeder:

@@ -14,6 +14,7 @@ from tkinter import messagebox, ttk
 
 from ..backend import BackendError
 from ..config import StudioConfig
+from ..streaming import STREAM_QUALITY_PRESETS
 from .app_state import AppState
 
 
@@ -81,21 +82,49 @@ class StreamingFrame(ttk.Frame):
             foreground="#666666",
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
+        ttk.Label(self, text="Stream quality").grid(row=5, column=0, sticky="w", padx=(0, 8), pady=4)
+        self._quality_labels = [label for label, _width, _bitrate in STREAM_QUALITY_PRESETS]
+        self.quality_var = tk.StringVar(value=self._current_quality_label())
+        ttk.Combobox(
+            self, textvariable=self.quality_var, values=self._quality_labels, state="readonly", width=32,
+        ).grid(row=5, column=1, sticky="w", pady=4)
+
+        ttk.Label(
+            self, text="A higher bitrate looks better but needs more upload bandwidth — YouTube's own "
+                 "recommended ranges are used here.",
+            foreground="#666666",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 16))
+
         self.status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status_var, foreground="#2a7d2a").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(4, 0)
+            row=7, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
 
         button_row = ttk.Frame(self)
-        button_row.grid(row=6, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        button_row.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
         self.save_button.pack(side="right")
+
+    def _current_quality_label(self) -> str:
+        """The preset label matching the config's saved width/bitrate, or
+        the first preset if the config predates this dropdown (its
+        defaults match STREAM_QUALITY_PRESETS[0] exactly) or was hand-edited
+        to a combination that isn't one of the presets."""
+        for label, width, bitrate in STREAM_QUALITY_PRESETS:
+            if width == self.config_obj.streaming_video_width and bitrate == self.config_obj.streaming_bitrate_kbps:
+                return label
+        return STREAM_QUALITY_PRESETS[0][0]
 
     # --- save ---
 
     def _on_save(self) -> None:
         self.config_obj.streaming_enabled = self.enabled_var.get()
         self.config_obj.youtube_stream_key = self.key_var.get().strip()
+        for label, width, bitrate in STREAM_QUALITY_PRESETS:
+            if label == self.quality_var.get():
+                self.config_obj.streaming_video_width = width
+                self.config_obj.streaming_bitrate_kbps = bitrate
+                break
 
         errors = self.config_obj.validate()
         if errors:

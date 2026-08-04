@@ -109,6 +109,10 @@ class StudioConfig:
     compressor_makeup_db: float = 0.0
     streaming_enabled: bool = False  # stream every session live while it records; see takeloom/streaming.py
     youtube_stream_key: str = ""  # from YouTube Studio's "Go Live" stream settings
+    # Matches STREAM_QUALITY_PRESETS[0] in takeloom/streaming.py — the
+    # Streaming tab's quality dropdown writes both together as one unit.
+    streaming_video_width: int = 1280  # 0 means "stream at the source resolution, unscaled"
+    streaming_bitrate_kbps: int = 3000
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
