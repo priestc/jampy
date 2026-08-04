@@ -17,9 +17,11 @@ be invoked from a non-UI thread for the same reason.
 from __future__ import annotations
 
 import json
+import shutil
 import socket
 import tempfile
 import threading
+import time
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -28,19 +30,18 @@ from typing import Callable
 from .audio.filters import CompressorSettings
 from .audio.scarlett2_direct_monitor import FOCUSRITE_DEVICE_NAME, set_channel_gain
 from .config import DEFAULT_CONFIG_PATH, StudioConfig
-from .project import Project, Setlist, TakeInfo, TrackEntry
-from .utils import ensure_dir, next_take_number, take_filename, timestamp_now, wall_timestamp
+from .project import Project, Setlist, TrackEntry
+from .utils import ensure_dir, timestamp_now, wall_timestamp
 
 
 class BackendError(Exception):
     """Raised by any Backend method on failure. Message is safe to show to the user."""
 
 
-# A take that's recorded past this length is always kept, even if the user
-# stops or restarts before the backing track's natural end — losing that
-# much performance to a slip of the finger is worse than an extra unwanted
-# take sitting in the list.
-MIN_KEPT_TAKE_SECONDS = 10 * 60
+# The breather between a song ending naturally and the auto-advanced next
+# one starting to play — long enough to reset hands, short enough that the
+# session keeps its momentum. The session capture rolls straight through it.
+AUTO_ADVANCE_GAP_SECONDS = 2.0
 
 
 @dataclass
@@ -219,15 +220,52 @@ class Backend(ABC):
         ...
 
     # --- recording ---
+    #
+    # All recording happens inside a session: one continuous audio stream
+    # (and, with a camera, one continuous video) runs from the moment
+    # recording starts until it's explicitly stopped. The controls below
+    # only steer backing-track playback and append events to the session
+    # log while that stream runs; actual takes are clipped out of the
+    # continuous recording afterward by replaying the log — see
+    # processing/splicer.py. Nothing heavy (file finalizing, muxing,
+    # setlist writes) happens while the session is live.
 
     @abstractmethod
-    def start_recording(self, req: StartRecordingRequest) -> None: ...
+    def start_recording(self, req: StartRecordingRequest) -> None:
+        """Load req's track, cued at 0:00 ("waiting" phase) — beginning a
+        session for req's project/instrument first if none is active yet.
+        Playback (and thus the take segment) starts on unpause_recording()."""
+        ...
 
     @abstractmethod
-    def unpause_recording(self) -> None: ...
+    def unpause_recording(self) -> None:
+        """Start the cued track's backing playback — logs record_start and
+        enters the "recording" phase."""
+        ...
 
     @abstractmethod
-    def stop_recording(self) -> None: ...
+    def stop_recording(self) -> None:
+        """Stop recording = end the session (see end_session()). A song cut
+        off mid-play never becomes a take unless it already ran long enough
+        to keep (see processing/splicer.py). No-op when no session is
+        active."""
+        ...
+
+    @abstractmethod
+    def restart_take(self) -> None:
+        """Send the playing backing track back to 0:00 — logs back_to_start.
+        The take still completes if this play-through reaches the natural
+        end."""
+        ...
+
+    @abstractmethod
+    def next_track(self) -> None:
+        """Skip to the next setlist track that still needs a take for the
+        session's instrument, and start playing it immediately. The
+        in-progress song, if any, is logged as skipped (no take). Also what
+        the backend itself does automatically when a song plays to its
+        natural end."""
+        ...
 
     @abstractmethod
     def is_recording(self) -> bool: ...
@@ -339,28 +377,29 @@ class Backend(ABC):
     @abstractmethod
     def stop_video_check(self) -> None: ...
 
-    # --- continuous multi-track session recording (local-only; RemoteBackend refuses) ---
+    # --- session lifecycle ---
 
     @abstractmethod
     def begin_session(self, project_name: str, instrument_name: str) -> None:
-        """Start a continuous whole-session audio+video recording spanning
-        every track subsequently recorded via start_recording() for this
-        project/instrument, plus a JSON event log — on top of, not instead
-        of, each track's normal per-take recording. Used by the CLI's
-        `start-session` command. end_session() finalizes it."""
+        """Open the session explicitly, with no track loaded yet — the
+        continuous audio (and video) capture plus the event log start here.
+        start_recording() calls this itself when no session is active, so
+        most contexts never need it directly; the CLI's `start-session`
+        command still uses it."""
         ...
 
     @abstractmethod
-    def end_session(self) -> None: ...
+    def end_session(self) -> None:
+        """Close the session: finalize the continuous recording, save the
+        session log, then (in the background) replay the log to clip
+        completed takes — and their videos — out of it. stop_recording()
+        is the usual way here."""
+        ...
 
     def is_session_active(self) -> bool:
-        """Whether a begin_session() recording is currently open. Concrete
-        default (not abstract) — always False for a backend that doesn't
-        support sessions at all (RemoteBackend inherits this unchanged),
-        same reasoning as list_streamdecks(). Used by RecordingDeckDriver's
-        record-toggle key to decide whether pressing it should open a
-        session of its own (see start_recording_with_session()) or leave
-        an already-active one (opened elsewhere) alone."""
+        """Whether a session is currently open. Concrete default (not
+        abstract) — always False for a backend that can't know (RemoteBackend
+        inherits this unchanged), same reasoning as list_streamdecks()."""
         return False
 
 
@@ -526,48 +565,41 @@ class _ManagerSubscription(PreviewSubscription):
 
 
 @dataclass
-class _ActiveRecording:
-    engine: object
-    project: Project
-    track: TrackEntry
-    inst: object
-    phase: str  # "waiting" (loaded, not yet playing/recording) | "recording"
-    is_new_inspiration_track: bool = False
-    video_recorder: object | None = None
-    take_num: int | None = None
-    rec_path: Path | None = None
-    video_raw: Path | None = None
-    mix_flac: Path | None = None
-    final_video: Path | None = None
-    record_start_wall_time: str | None = None
-    # True if this take is running inside an active session (begin_session())
-    # — its engine is shared/owned by that session, so per-take teardown must
-    # not stop the stream or touch the camera preview; end_session() owns both.
-    in_session: bool = False
-
-
-@dataclass
 class _SessionEvent:
-    """One entry in a session's session_log.json — see _ActiveSession."""
+    """One entry in a session's session_log.json — see _ActiveSession.
+    `frame` (a position on the session recording's timeline, in samples) and
+    the track fields are what post-session take splicing runs on — see
+    processing/splicer.py for the event vocabulary and completion rules."""
     timestamp: float  # seconds since session start
     wall_time: str
-    event_type: str  # session_start | record_start | restart | take_finished | session_end
+    event_type: str  # session_start | track_loaded | record_start | back_to_start | song_end | track_skipped | song_stopped | session_end
     details: str = ""
+    frame: int | None = None
+    track_index: int | None = None
+    track_name: str = ""
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "timestamp": self.timestamp, "wall_time": self.wall_time,
             "event_type": self.event_type, "details": self.details,
         }
+        if self.frame is not None:
+            d["frame"] = self.frame
+        if self.track_index is not None:
+            d["track_index"] = self.track_index
+        if self.track_name:
+            d["track_name"] = self.track_name
+        return d
 
 
 @dataclass
 class _ActiveSession:
-    """A continuous whole-session audio+video recording spanning every take
-    subsequently recorded via start_recording() for the same project/
-    instrument, plus a JSON event log — the CLI's `start-session` behavior,
-    layered on top of (not instead of) LocalBackend's normal per-take
-    recording. See begin_session()/end_session()."""
+    """The recording: one continuous audio stream (session.flac) and, with a
+    camera, one continuous video, running from begin_session() until
+    end_session(), plus the JSON event log that post-session take splicing
+    replays. Tracks are loaded into / played through this one engine; nothing
+    is finalized until the session ends. See the Backend recording-section
+    comment."""
     engine: object
     project: Project
     inst: object
@@ -585,6 +617,23 @@ class _ActiveSession:
     session_mix_flac: Path | None = None
     video_start_wall_time: str | None = None
     video_start_track_name: str = ""
+    # Position on the session-audio timeline when the mix/video recording
+    # started — the offset splicing needs to map take frames onto the
+    # session video's timeline.
+    mix_start_frame: int = 0
+    # The track currently loaded in the mixer (None between "no more
+    # tracks" and session end) and whether its backing is playing — the
+    # session's phase is "recording" while playing, else "waiting".
+    current_track: TrackEntry | None = None
+    current_track_index: int | None = None
+    playing: bool = False
+    # Setlist indices that completed a take *during this session* — the
+    # setlist itself isn't updated until post-processing, so auto-advance
+    # has to remember these itself to not offer the same song twice.
+    completed_track_indices: set = field(default_factory=set)
+    # Inspiration-track ids added to the setlist by this session's track
+    # loads — post-processing removes any that ended up with no take at all.
+    added_inspiration_ids: set = field(default_factory=set)
 
 
 @dataclass
@@ -630,11 +679,11 @@ class LocalBackend(Backend):
         self._config_path = config_path
         self._event_callbacks: list[EventCallback] = []
         self._record_lock = threading.Lock()
-        self._active_recording: _ActiveRecording | None = None
         self._active_latency_test: _ActiveLatencyTest | None = None
         self._active_video_check: _ActiveVideoCheck | None = None
         self._active_session: _ActiveSession | None = None
         self._active_monitor: _ActiveMonitor | None = None
+        self._processing_thread: threading.Thread | None = None
         # Manual live-monitoring toggle for the Record page (see
         # get_monitoring_mode/set_monitoring_mode) — not persisted, always
         # starts each launch in "production" (hear the full produced mix).
@@ -682,8 +731,6 @@ class LocalBackend(Backend):
         """Whichever AudioEngine is currently live, if any — used to apply a
         settings change (e.g. the compressor) immediately rather than only on
         the next recording/video-check/session start."""
-        if self._active_recording is not None:
-            return self._active_recording.engine
         if self._active_session is not None:
             return self._active_session.engine
         if self._active_video_check is not None:
@@ -701,8 +748,6 @@ class LocalBackend(Backend):
         (hardware direct monitor, live monitoring mode). Checked in the same
         priority order: an actual take always wins over the ambient
         monitor-only stream."""
-        if self._active_recording is not None:
-            return self._active_recording.engine, self._active_recording.inst
         if self._active_session is not None:
             return self._active_session.engine, self._active_session.inst
         if self._active_monitor is not None:
@@ -926,13 +971,14 @@ class LocalBackend(Backend):
     # --- recording ---
 
     def is_recording(self) -> bool:
-        return self._active_recording is not None
+        # A session *is* the recording — the continuous stream is being
+        # captured for its whole duration, playing or not.
+        return self._active_session is not None
 
     def get_levels(self) -> tuple[float, float]:
-        # Was self._active_recording-only, so the VU meters read as dead
-        # silence during a plain monitoring session (before Record is
-        # pressed) — _get_active_engine() covers that state too, same as
-        # set_compressor_settings already relies on it for.
+        # _get_active_engine() rather than session-only, so the VU meters
+        # also work during a plain monitoring stream (before Record is
+        # pressed) — same as set_compressor_settings already relies on.
         engine = self._get_active_engine()
         if engine is None:
             return (0.0, 0.0)
@@ -940,30 +986,32 @@ class LocalBackend(Backend):
 
     def adjust_backing_volume(self, delta: int) -> None:
         with self._record_lock:
-            active = self._active_recording
-            if active is None:
+            session = self._active_session
+            if session is None or session.current_track is None:
                 return
-            track = active.track
+            track = session.current_track
             self._backing_volume = max(0, self._backing_volume + delta)
             track.volume = self._backing_volume
-            active.engine.mixer.set_volume("backing", track.volume / 100.0)
+            session.engine.mixer.set_volume("backing", track.volume / 100.0)
+            self._log_session_event("backing_volume", f"volume={track.volume}")
             self._save_last_volumes()
             self._emit("recording_status", {"status": f"Backing volume: {track.volume}%"})
 
     def adjust_takes_volume(self, delta: int) -> None:
         with self._record_lock:
-            active = self._active_recording
-            if active is None:
+            session = self._active_session
+            if session is None or session.current_track is None:
                 return
-            track = active.track
+            track = session.current_track
             self._takes_volume = max(0, self._takes_volume + delta)
             track.takes_volume = self._takes_volume
-            for src in active.engine.mixer.sources:
+            for src in session.engine.mixer.sources:
                 if src.name.startswith("take:"):
                     inst_name = src.name[5:]
                     take_info = track.preferred_takes.get(inst_name)
                     base_vol = take_info.volume if take_info else 1.0
-                    active.engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
+                    session.engine.mixer.set_volume(src.name, base_vol * (track.takes_volume / 100.0))
+            self._log_session_event("takes_volume", f"volume={track.takes_volume}")
             self._save_last_volumes()
             self._emit("recording_status", {"status": f"Takes volume: {track.takes_volume}%"})
 
@@ -1076,8 +1124,7 @@ class LocalBackend(Backend):
         self._record_lock (the teardown of any other engine, so ambient
         monitoring resumes right after)."""
         if (
-            self._active_recording is not None
-            or self._active_latency_test is not None
+            self._active_latency_test is not None
             or self._active_video_check is not None
             or self._active_session is not None
             or self._active_monitor is not None
@@ -1142,170 +1189,191 @@ class LocalBackend(Backend):
 
     def start_recording(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
-            if (
-                self._active_recording is not None
-                or self._active_latency_test is not None
-                or self._active_video_check is not None
-            ):
+            if self._active_latency_test is not None or self._active_video_check is not None:
                 raise BackendError("Another recording is already in progress.")
 
             config = self.get_config()
-            project = self._open_project(req.project_name)
-
             inst = config.get_instrument(req.instrument_name)
             if inst is None:
                 raise BackendError(f"Instrument '{req.instrument_name}' not found.")
 
             session = self._active_session
             if session is not None and (
-                session.project.name != project.name or session.inst.name.lower() != inst.name.lower()
+                session.project.name != req.project_name or session.inst.name.lower() != inst.name.lower()
             ):
                 raise BackendError(
                     f"A session is active for '{session.inst.name}' in '{session.project.name}' — "
                     "end it before recording a different project/instrument."
                 )
 
-            # start_monitoring()'s ambient stream, if any, gets reused below
-            # when it's already open for this exact instrument (no audible
-            # glitch right as recording begins) — otherwise it has to be
-            # released now so this take can open the hardware for itself.
-            reuse_monitor_engine = (
-                self._active_monitor is not None and self._active_monitor.inst.name.lower() == inst.name.lower()
-            )
-            if self._active_monitor is not None and not reuse_monitor_engine:
-                self._close_active_monitor()
-
-            is_new_inspiration_track = False
-            if req.track_source == "setlist":
-                if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
-                    raise BackendError("Invalid track selection.")
-                track = project.setlist.tracks[req.track_index]
-            elif req.track_source == "inspiration":
-                if not req.inspiration_info:
-                    raise BackendError("No inspiration track selected.")
-                from .inspiration import find_or_add_inspiration_track
-                existing_ids = {t.inspiration_track_id for t in project.setlist.tracks if t.inspiration_track_id}
-                track = find_or_add_inspiration_track(project, req.inspiration_info)
-                # Only added to the setlist on disk once a take actually completes
-                # (see _finish_recording/stop_recording) — a discarded or cancelled
-                # take shouldn't leave an orphaned entry behind.
-                is_new_inspiration_track = track.inspiration_track_id not in existing_ids
-            else:
-                raise BackendError("Select a track from the Setlist or Inspiration list first.")
-
-            input_info = config.resolve_input(inst.input_label)
-            if input_info is None:
-                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
-
-            backing_path = project.backing_tracks_dir / track.backing_track
-            if track.inspiration_track_id and not backing_path.exists():
-                from .inspiration import InspirationError, download_inspiration_track
-                self._emit("recording_status", {"status": f"Downloading '{track.name}'..."})
-                try:
-                    download_inspiration_track(track, backing_path, config)
-                except InspirationError as e:
-                    raise BackendError(str(e)) from e
-
-            if session is not None:
-                # Session already has its own open stream targeting this exact
-                # project/instrument (checked above) — reuse it rather than
-                # opening a second one on the same hardware.
-                engine = session.engine
-            elif reuse_monitor_engine:
-                # Likewise reuse start_monitoring()'s already-open stream for
-                # this exact instrument instead of opening a second one.
-                engine = self._active_monitor.engine
-                self._active_monitor = None
-            else:
-                try:
-                    import sounddevice as sd
-                except Exception as e:
-                    raise BackendError(f"sounddevice unavailable: {e}") from e
-
-                from .audio.devices import resolve_device
-                out_dev = resolve_device(sd, config.output_device, "output")
-                in_dev = resolve_device(sd, input_info.device, "input")
-                if in_dev is None:
-                    raise BackendError(f"Input device '{input_info.device}' not found.")
-                # config.output_device is optional (empty means "just use the
-                # system default"), so only treat a miss as an error when a
-                # specific device *was* configured — otherwise a device that was
-                # explicitly chosen but has since disconnected (e.g. a USB audio
-                # interface dropping out) would silently fall back to whatever
-                # the system default output happens to be instead of raising,
-                # playing audio to the wrong place with no indication why.
-                if config.output_device and out_dev is None:
-                    raise BackendError(f"Output device '{config.output_device}' not found.")
-
-                in_info = sd.query_devices(in_dev, "input")
-                out_info = sd.query_devices(out_dev, "output")
-                max_in = in_info["max_input_channels"]
-                if input_info.channel > max_in:
-                    raise BackendError(
-                        f"Instrument '{inst.name}' needs input channel {input_info.channel} "
-                        f"but device only has {max_in} channels."
-                    )
-                output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-                from .audio.engine import AudioEngine
-                engine = AudioEngine(
-                    sample_rate=config.sample_rate,
-                    buffer_size=config.buffer_size,
-                    input_device=in_dev,
-                    output_device=out_dev,
-                    input_channels=max(input_info.channel, 1),
-                    output_channels=max(1, output_channels),
-                    monitor_channel=input_info.channel - 1,
-                    compressor_settings=self._compressor_settings,
-                    monitor_instrument=self._monitoring_mode == "production",
-                    instrument_volume=self._instrument_volume / 100.0,
-                )
-                self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
-
-            # The remembered mixer level (this run's, or carried over from the
-            # last time anything was recorded) always wins over the track's own
-            # saved default — otherwise an untouched track loads at whatever
-            # volume it last happened to be saved at, which can be jarringly loud.
-            track.volume = self._backing_volume
-            track.takes_volume = self._takes_volume
-
-            if backing_path.exists():
-                engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
-
-            trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
-            for other_inst, take_info in track.preferred_takes.items():
-                if other_inst.lower() == inst.name.lower():
-                    continue
-                take_path = project.completed_takes_dir / take_info.filename
-                if take_path.exists():
-                    effective_vol = take_info.volume * (track.takes_volume / 100.0)
-                    engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
-
-            # Audio stream running (so input monitoring works right away), backing
-            # track loaded but silent — actual recording starts on unpause_recording().
-            # (Already running if a session owns this engine.)
+            opened_here = False
             if session is None:
-                engine.start()
-            engine.mixer.reset()
-            engine.mixer.set_playing(False)
+                self._begin_session_locked(req.project_name, req.instrument_name)
+                session = self._active_session
+                opened_here = True
 
-            self._active_recording = _ActiveRecording(
-                engine=engine, project=project, track=track, inst=inst, phase="waiting",
-                is_new_inspiration_track=is_new_inspiration_track, in_session=session is not None,
-            )
+            try:
+                project = session.project
+                if req.track_source == "setlist":
+                    if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
+                        raise BackendError("Invalid track selection.")
+                    index = req.track_index
+                    track = project.setlist.tracks[index]
+                elif req.track_source == "inspiration":
+                    if not req.inspiration_info:
+                        raise BackendError("No inspiration track selected.")
+                    from .inspiration import find_or_add_inspiration_track
+                    existing_ids = {
+                        t.inspiration_track_id for t in project.setlist.tracks if t.inspiration_track_id
+                    }
+                    track = find_or_add_inspiration_track(project, req.inspiration_info)
+                    if track.inspiration_track_id not in existing_ids:
+                        # Persisted right away (not deferred to take completion,
+                        # which now only happens at session end) — post-
+                        # processing removes it again if it never gets a take.
+                        session.added_inspiration_ids.add(track.inspiration_track_id)
+                        project.save_setlist()
+                    index = project.setlist.tracks.index(track)
+                else:
+                    raise BackendError("Select a track from the Setlist or Inspiration list first.")
+
+                if session.playing and session.current_track is not None:
+                    # Loading a different track over a playing one abandons
+                    # that play-through — same as Next, minus the auto-pick.
+                    self._log_session_event(
+                        "track_skipped", frame=session.engine.session_frames,
+                        track_index=session.current_track_index, track_name=session.current_track.name,
+                    )
+                self._load_track_locked(session, track, index, config)
+            except BackendError:
+                if opened_here:
+                    self._abort_empty_session_locked(session)
+                raise
+
             self._emit("recording_status", {
                 "phase": "waiting",
-                "status": f"Loaded '{track.name}' — press Unpause to begin",
+                "status": f"Loaded '{track.name}' — press Record to start",
                 "track_name": track.name,
             })
+
+    def _load_track_locked(
+        self, session: "_ActiveSession", track: TrackEntry, index: int, config: StudioConfig,
+    ) -> None:
+        """Swap `track` into the session engine's mixer, cued at 0:00 and
+        not playing — downloading its backing first if needed. Called with
+        self._record_lock held; emits no phase event (callers word their
+        own)."""
+        project = session.project
+        backing_path = project.backing_tracks_dir / track.backing_track
+        if track.inspiration_track_id and not backing_path.exists():
+            from .inspiration import InspirationError, download_inspiration_track
+            self._emit("recording_status", {"status": f"Downloading '{track.name}'..."})
+            try:
+                download_inspiration_track(track, backing_path, config)
+            except InspirationError as e:
+                raise BackendError(str(e)) from e
+
+        engine = session.engine
+        engine.mixer.set_playing(False)
+        session.playing = False
+        engine.mixer.clear()
+
+        # The remembered mixer level (this run's, or carried over from the
+        # last time anything was recorded) always wins over the track's own
+        # saved default — otherwise an untouched track loads at whatever
+        # volume it last happened to be saved at, which can be jarringly loud.
+        track.volume = self._backing_volume
+        track.takes_volume = self._takes_volume
+
+        if backing_path.exists():
+            engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
+
+        trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
+        for other_inst, take_info in track.preferred_takes.items():
+            if other_inst.lower() == session.inst.name.lower():
+                continue
+            take_path = project.completed_takes_dir / take_info.filename
+            if take_path.exists():
+                effective_vol = take_info.volume * (track.takes_volume / 100.0)
+                engine.mixer.add_source(f"take:{other_inst}", take_path, volume=effective_vol, trim_frames=trim)
+
+        engine.mixer.reset()
+        session.current_track = track
+        session.current_track_index = index
+        self._log_session_event(
+            "track_loaded", frame=engine.session_frames, track_index=index, track_name=track.name,
+        )
+
+    def _start_playback_locked(self, session: "_ActiveSession") -> None:
+        """Start the loaded track's backing from 0:00 — the moment a take
+        segment begins on the session timeline. Called with
+        self._record_lock held."""
+        track = session.current_track
+        engine = session.engine
+        if not session.video_start_track_name:
+            session.video_start_track_name = track.name
+        self._log_session_event(
+            "record_start", frame=engine.session_frames,
+            track_index=session.current_track_index, track_name=track.name,
+        )
+        engine.mixer.reset()
+        engine.mixer.set_playing(True)
+        session.playing = True
+        self._emit("recording_status", {
+            "phase": "recording",
+            "status": f"Recording '{track.name}'",
+            "track_name": track.name,
+        })
+
+    def _advance_locked(self, session: "_ActiveSession", status_prefix: str = "") -> TrackEntry | None:
+        """Find and load the next setlist track after the current one that
+        still needs a take for the session's instrument — skipping both
+        tracks with takes already on disk and ones completed earlier in
+        this same session (the setlist doesn't learn about those until
+        post-processing). Returns the loaded track, or None (emitting a
+        "waiting" status) when nothing's left. Called with
+        self._record_lock held; playback must already be stopped."""
+        tracks = session.project.setlist.tracks
+        start = (session.current_track_index + 1) if session.current_track_index is not None else 0
+        index = None
+        for i in range(start, len(tracks)):
+            if i in session.completed_track_indices:
+                continue
+            if tracks[i].get_take_for_instrument(session.inst.name) is None:
+                index = i
+                break
+        if index is None:
+            session.current_track = None
+            session.current_track_index = None
+            session.engine.mixer.clear()
+            self._emit("recording_status", {
+                "phase": "waiting",
+                "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
+            })
+            return None
+        self._load_track_locked(session, tracks[index], index, self.get_config())
+        return tracks[index]
+
+    def _abort_empty_session_locked(self, session: "_ActiveSession") -> None:
+        """Roll back a session start_recording() itself just opened when its
+        track load then failed — tear the capture down and delete the
+        milliseconds-old session dir, so a failed start never leaves an
+        orphaned, take-less session behind. Called with self._record_lock
+        held."""
+        self._active_session = None
+        session.engine.set_on_song_end(None)
+        session.engine.stop()
+        if session.video_recorder:
+            session.video_recorder.stop()
+            self._preview.resume()
+            self._emit("preview_resumed", {})
+        shutil.rmtree(session.session_dir, ignore_errors=True)
+        self._start_monitoring_locked()
 
     def _open_video_recorder(self, device: str, output_path: Path) -> "VideoRecorder | None":
         """Pause the live-preview capture loop (ffmpeg needs exclusive access
         to the camera device) and start recording `device` to `output_path` —
-        the one path both a real take (_begin_take()) and a video check
-        (start_video_check()) go through, so a video check's video is
-        captured exactly the way a real take's is, not some separate
-        approximation. The VideoRecorder it returns tees a low-res copy of
+        used by a video check (start_video_check()) and the latency test. The VideoRecorder it returns tees a low-res copy of
         every frame back through _CameraPreviewManager.push_external_frame()
         while it runs, so the Record tab's live feed keeps showing real
         camera frames for the duration instead of freezing.
@@ -1325,236 +1393,109 @@ class LocalBackend(Backend):
         self._preview.resume()
         return None
 
+
     def unpause_recording(self) -> None:
         with self._record_lock:
-            active = self._active_recording
-            if active is None or active.phase != "waiting":
+            session = self._active_session
+            if session is None or session.current_track is None or session.playing:
                 raise BackendError("Not ready to unpause.")
-
-            take_num = self._begin_take(active, self.get_config())
-            self._emit("recording_status", {
-                "phase": "recording",
-                "status": f"Recording '{active.track.name}' — take {take_num}",
-                "track_name": active.track.name,
-                "take_number": take_num,
-            })
+            self._start_playback_locked(session)
 
     def restart_take(self) -> None:
-        """Discard the take in progress and start it over from 0:00 — same
-        track/instrument/session, a fresh take number. Only valid while
-        actually recording (unlike stop_recording(), the active session
-        itself survives this — it's a redo, not a cancel). A take that's
-        already run past MIN_KEPT_TAKE_SECONDS is kept rather than discarded,
-        same as stop_recording()."""
+        """Send the playing backing back to 0:00 — logged as back_to_start,
+        so the abandoned play-through never becomes a take (unless it was
+        already long enough to keep — see processing/splicer.py) and the
+        one now starting still can. Nothing is discarded or re-created:
+        the continuous session capture just keeps rolling."""
         with self._record_lock:
-            active = self._active_recording
-            if active is None or active.phase != "recording":
+            session = self._active_session
+            if session is None or not session.playing or session.current_track is None:
                 raise BackendError("Not currently recording.")
-
-            keep = active.engine.recording_elapsed >= MIN_KEPT_TAKE_SECONDS
-            kept_take_num = active.take_num
-
-            active.engine.set_on_song_end(None)
-            active.engine.stop_recording()
-            active.engine.mixer.set_playing(False)
-
-            if keep:
-                self._persist_take(active)
-                active.project.save_setlist()
-                self._log_session_event("take_finished", f"track={active.track.name} take={kept_take_num} kept=True")
-            else:
-                active.rec_path.unlink(missing_ok=True)
-
-            video_status = ""
-            if active.video_recorder:
-                active.video_recorder.stop()
-                if keep:
-                    video_status = self._mux_take_video(active)
-                else:
-                    if active.video_raw:
-                        active.video_raw.unlink(missing_ok=True)
-                    if active.mix_flac:
-                        active.mix_flac.unlink(missing_ok=True)
-
-            take_num = self._begin_take(active, self.get_config(), event_type="restart")
-            kept_note = f" (take {kept_take_num} kept{video_status})" if keep else ""
+            track = session.current_track
+            self._log_session_event(
+                "back_to_start", frame=session.engine.session_frames,
+                track_index=session.current_track_index, track_name=track.name,
+            )
+            session.engine.mixer.reset()
             self._emit("recording_status", {
                 "phase": "recording",
-                "status": f"Restarted '{active.track.name}' from the beginning — take {take_num}{kept_note}",
-                "track_name": active.track.name,
-                "take_number": take_num,
+                "status": f"Back to the beginning of '{track.name}'",
+                "track_name": track.name,
             })
 
-    def _begin_take(self, active: "_ActiveRecording", config: StudioConfig, event_type: str = "record_start") -> int:
-        """Allocate a fresh take file and (re)start the per-take audio/video
-        recorders against the given active session, from mixer position 0.
-        Shared by unpause_recording() (first time) and restart_take()
-        (discard and redo) — called with self._record_lock held."""
-        take_num = next_take_number(active.project.completed_takes_dir, active.track.name, active.inst.name)
-        fname = take_filename(active.track.name, active.inst.name, take_num, "flac")
-        rec_path = active.project.completed_takes_dir / fname
-
-        record_start_wall_time = wall_timestamp()
-        active.engine.mixer.reset()
-        active.engine.mixer.set_playing(True)
-        active.engine.start_recording(rec_path)
-        active.engine.set_on_song_end(self._on_song_naturally_ended)
-
-        video_recorder = None
-        video_raw = mix_flac = final_video = None
-        # A session already owns the camera continuously for its own
-        # whole-session video — a second, per-take VideoRecorder on the same
-        # device would conflict with it, so per-take video is skipped for
-        # the duration of a session (matches the legacy start-session CLI,
-        # which only ever produced one video for the whole session).
-        if config.camera_device and not active.in_session:
-            video_raw = rec_path.with_name(rec_path.stem + "_video_raw.mp4")
-            mix_flac = rec_path.with_name(rec_path.stem + "_mix.flac")
-            final_video = rec_path.with_suffix(".mp4")
-            video_recorder = self._open_video_recorder(config.camera_device, video_raw)
-            if video_recorder is not None:
-                active.engine.start_mix_recording(mix_flac)
-            else:
-                video_raw = mix_flac = final_video = None
-
-        active.phase = "recording"
-        active.take_num = take_num
-        active.rec_path = rec_path
-        active.video_recorder = video_recorder
-        active.video_raw = video_raw
-        active.mix_flac = mix_flac
-        active.final_video = final_video
-        active.record_start_wall_time = record_start_wall_time
-        if self._active_session is not None and not self._active_session.video_start_track_name:
-            self._active_session.video_start_track_name = active.track.name
-        self._log_session_event(event_type, f"track={active.track.name} take={take_num}")
-        return take_num
+    def next_track(self) -> None:
+        with self._record_lock:
+            session = self._active_session
+            if session is None:
+                raise BackendError("No session in progress.")
+            prefix = ""
+            if session.playing and session.current_track is not None:
+                self._log_session_event(
+                    "track_skipped", frame=session.engine.session_frames,
+                    track_index=session.current_track_index, track_name=session.current_track.name,
+                )
+                session.engine.mixer.set_playing(False)
+                session.playing = False
+                prefix = f"Skipped '{session.current_track.name}'. "
+            if self._advance_locked(session, status_prefix=prefix) is not None:
+                self._start_playback_locked(session)
 
     def get_active_recording_target(self) -> tuple[str, str, int] | None:
-        """Returns (project_name, instrument_name, track_index) for the take
-        currently loaded/recording, or None if idle. Lets a driver with no
-        track-selection UI of its own (the headless server's StreamDeck)
-        figure out "what's next" regardless of whether the current take was
-        started by it or by a connected remote client."""
+        """Returns (project_name, instrument_name, track_index) for the
+        track currently loaded in the session, or None. Lets a driver with
+        no track-selection UI of its own figure out where the session is,
+        regardless of which client loaded the track."""
         with self._record_lock:
-            active = self._active_recording
-            if active is None:
+            session = self._active_session
+            if session is None or session.current_track_index is None:
                 return None
-            if active.track not in active.project.setlist.tracks:
-                return None  # defensive; shouldn't happen
-            index = active.project.setlist.tracks.index(active.track)
-            return active.project.name, active.inst.name, index
+            return session.project.name, session.inst.name, session.current_track_index
 
     def _on_song_naturally_ended(self) -> None:
         """Called (off the audio thread) when the backing track plays to its
-        end while recording — the only case where the take is kept."""
+        end — the moment a take completes. Logs song_end (post-processing
+        turns that into the actual take file later; nothing is finalized
+        here) and auto-advances: the next track that needs a take starts
+        playing by itself after a short breather, no key press needed."""
         with self._record_lock:
-            active = self._active_recording
-            if active is None or active.phase != "recording":
+            session = self._active_session
+            if session is None or not session.playing or session.current_track is None:
                 return
-            self._active_recording = None
-            self._finish_recording(active, keep=True)
+            finished = session.current_track
+            self._log_session_event(
+                "song_end", frame=session.engine.session_frames,
+                track_index=session.current_track_index, track_name=finished.name,
+            )
+            session.completed_track_indices.add(session.current_track_index)
+            session.engine.mixer.set_playing(False)
+            session.playing = False
+            loaded = self._advance_locked(
+                session, status_prefix=f"Completed take for '{finished.name}'. ",
+            )
+            if loaded is not None:
+                self._emit("recording_status", {
+                    "phase": "waiting",
+                    "status": f"Completed take for '{finished.name}' — '{loaded.name}' starts "
+                              f"in {AUTO_ADVANCE_GAP_SECONDS:g}s",
+                    "track_name": loaded.name,
+                })
+
+        if loaded is None:
+            return
+        # The breather happens outside the lock so keys stay live; whoever
+        # pressed one meanwhile (Next, Stop, a manual track load) wins —
+        # the re-check below just stands down if the world changed.
+        time.sleep(AUTO_ADVANCE_GAP_SECONDS)
+        with self._record_lock:
+            current = self._active_session
+            if current is session and not session.playing and session.current_track is loaded:
+                self._start_playback_locked(session)
 
     def stop_recording(self) -> None:
-        """User-initiated stop. Before the backing track finishes on its own
-        this discards the take as incomplete — unless it's already run past
-        MIN_KEPT_TAKE_SECONDS, in which case it's kept regardless. During the
-        pre-recording 'waiting' phase it just cancels the load."""
-        with self._record_lock:
-            active = self._active_recording
-            if active is None:
-                return
-            self._active_recording = None
+        """Stop recording = end the session. No-op when nothing is active,
+        so a stray stop press never errors."""
+        self._end_session(missing_ok=True)
 
-            if active.phase == "waiting":
-                if not active.in_session:
-                    active.engine.stop()
-                    self._start_monitoring_locked()
-                self._discard_new_inspiration_track(active)
-                active.project.save_setlist()  # keep any volume tweaks made before unpausing
-                self._emit("recording_status", {"phase": "idle", "status": "Recording cancelled."})
-                return
-
-            keep = active.engine.recording_elapsed >= MIN_KEPT_TAKE_SECONDS
-            self._finish_recording(active, keep=keep)
-
-    def _discard_new_inspiration_track(self, active: "_ActiveRecording") -> None:
-        """Undo find_or_add_inspiration_track's addition when a take never
-        completes — an inspiration track should only land in the setlist
-        once it actually has a finished take."""
-        if not active.is_new_inspiration_track:
-            return
-        tracks = active.project.setlist.tracks
-        for i, t in enumerate(tracks):
-            if t is active.track:
-                tracks.pop(i)
-                break
-
-    def _finish_recording(self, active: "_ActiveRecording", keep: bool) -> None:
-        """Tear down an in-progress (phase='recording') take. Called with
-        self._record_lock held and self._active_recording already cleared.
-
-        Volume tweaks made during the take are saved either way — the take
-        itself only survives if `keep` is True (i.e. the song played to its
-        natural end rather than being stopped early)."""
-        engine = active.engine
-        engine.set_on_song_end(None)
-        engine.stop_recording()
-        engine.mixer.set_playing(False)
-
-        if keep:
-            status = self._persist_take(active)
-        else:
-            active.rec_path.unlink(missing_ok=True)
-            self._discard_new_inspiration_track(active)
-            status = f"Discarded incomplete take for '{active.track.name}'"
-        active.project.save_setlist()
-        self._log_session_event("take_finished", f"track={active.track.name} take={active.take_num} kept={keep}")
-
-        if not active.in_session:
-            engine.stop()
-            self._start_monitoring_locked()
-
-        if active.video_recorder:
-            active.video_recorder.stop()
-            if keep:
-                status += self._mux_take_video(active)
-            else:
-                active.video_raw.unlink(missing_ok=True)
-                active.mix_flac.unlink(missing_ok=True)
-
-        if not active.in_session:
-            self._preview.resume()
-        self._emit("recording_status", {"phase": "idle", "status": status})
-
-    def _persist_take(self, active: "_ActiveRecording") -> str:
-        """Record active's current take as its track's preferred take.
-        Called with self._record_lock held, after the take's audio file is
-        finalized on disk (engine.stop_recording() already called)."""
-        take_info = TakeInfo(
-            instrument=active.inst.name, take_number=active.take_num, filename=active.rec_path.name,
-        )
-        active.track.set_preferred_take(active.inst.name, take_info)
-        return f"Saved take {active.take_num} for '{active.track.name}'"
-
-    def _mux_take_video(self, active: "_ActiveRecording") -> str:
-        """Mux active's raw video + monitor-mix audio into its final
-        produced video. Called after active.video_recorder.stop(); returns a
-        status suffix describing the outcome."""
-        from .video.capture import format_watermark_text, mux_video_audio
-        config = self.get_config()
-        musician = active.inst.musician or config.studio_musician
-        watermark_text = format_watermark_text(
-            musician, active.inst.name, active.record_start_wall_time, active.track.name,
-        )
-        if mux_video_audio(
-            active.video_raw, active.mix_flac, active.rec_path, active.final_video,
-            watermark_text=watermark_text, video_offset_ms=config.video_latency_compensation_ms,
-        ):
-            active.video_raw.unlink(missing_ok=True)
-            active.mix_flac.unlink(missing_ok=True)
-            return " + video"
-        return "; video mux failed"
 
     # --- camera preview ---
 
@@ -1566,8 +1507,7 @@ class LocalBackend(Backend):
     def start_latency_test(self, instrument_name: str, camera_device: str, play_metronome: bool = True) -> None:
         with self._record_lock:
             if (
-                self._active_recording is not None
-                or self._active_latency_test is not None
+                self._active_latency_test is not None
                 or self._active_video_check is not None
                 or self._active_session is not None
             ):
@@ -1726,8 +1666,7 @@ class LocalBackend(Backend):
     def start_video_check(self, req: StartRecordingRequest) -> None:
         with self._record_lock:
             if (
-                self._active_recording is not None
-                or self._active_latency_test is not None
+                self._active_latency_test is not None
                 or self._active_video_check is not None
                 or self._active_session is not None
             ):
@@ -1913,7 +1852,10 @@ class LocalBackend(Backend):
 
     # --- continuous multi-track session recording (local-only; RemoteBackend refuses) ---
 
-    def _log_session_event(self, event_type: str, details: str = "") -> None:
+    def _log_session_event(
+        self, event_type: str, details: str = "",
+        frame: int | None = None, track_index: int | None = None, track_name: str = "",
+    ) -> None:
         session = self._active_session
         if session is None:
             return
@@ -1922,150 +1864,205 @@ class LocalBackend(Backend):
             wall_time=wall_timestamp(),
             event_type=event_type,
             details=details,
+            frame=frame,
+            track_index=track_index,
+            track_name=track_name,
         ))
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:
         with self._record_lock:
-            if (
-                self._active_recording is not None
-                or self._active_latency_test is not None
-                or self._active_video_check is not None
-                or self._active_session is not None
-            ):
-                raise BackendError("Another recording is already in progress.")
-            self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
-
-            config = self.get_config()
-            project = self._open_project(project_name)
-            inst = config.get_instrument(instrument_name)
-            if inst is None:
-                raise BackendError(f"Instrument '{instrument_name}' not found.")
-            input_info = config.resolve_input(inst.input_label)
-            if input_info is None:
-                raise BackendError(f"Input label '{inst.input_label}' not found in config.")
-
-            try:
-                import sounddevice as sd
-            except Exception as e:
-                raise BackendError(f"sounddevice unavailable: {e}") from e
-
-            from .audio.devices import resolve_device
-            out_dev = resolve_device(sd, config.output_device, "output")
-            in_dev = resolve_device(sd, input_info.device, "input")
-            if in_dev is None:
-                raise BackendError(f"Input device '{input_info.device}' not found.")
-            if config.output_device and out_dev is None:
-                raise BackendError(f"Output device '{config.output_device}' not found.")
-
-            in_info = sd.query_devices(in_dev, "input")
-            out_info = sd.query_devices(out_dev, "output")
-            max_in = in_info["max_input_channels"]
-            if input_info.channel > max_in:
-                raise BackendError(
-                    f"Instrument '{inst.name}' needs input channel {input_info.channel} "
-                    f"but device only has {max_in} channels."
-                )
-            output_channels = min(config.output_channels, out_info["max_output_channels"])
-
-            from .audio.engine import AudioEngine
-            engine = AudioEngine(
-                sample_rate=config.sample_rate,
-                buffer_size=config.buffer_size,
-                input_device=in_dev,
-                output_device=out_dev,
-                input_channels=max(input_info.channel, 1),
-                output_channels=max(1, output_channels),
-                monitor_channel=input_info.channel - 1,
-                compressor_settings=self._compressor_settings,
-                monitor_instrument=self._monitoring_mode == "production",
-                instrument_volume=self._instrument_volume / 100.0,
-            )
-            self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
-            engine.start()
-
-            session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
-            session_dir = ensure_dir(project.sessions_dir / f"{session_name}_{inst.name}")
-            session_flac = session_dir / "session.flac"
-            engine.start_session_recording(session_flac)
-
-            video_recorder = None
-            session_video_raw = session_mix_flac = None
-            video_start_wall_time = None
-            if config.camera_device:
-                from .video.capture import VideoRecorder, ffmpeg_available
-                if ffmpeg_available():
-                    self._preview.pause()
-                    self._emit("preview_paused", {})
-                    session_video_raw = session_dir / "session_video_raw.mp4"
-                    session_mix_flac = session_dir / "session_mix.flac"
-                    video_recorder = VideoRecorder(config.camera_device, session_video_raw)
-                    if video_recorder.start():
-                        engine.start_mix_recording(session_mix_flac)
-                        video_start_wall_time = wall_timestamp()
-                    else:
-                        video_recorder = None
-                        self._preview.resume()
-                        self._emit("preview_resumed", {})
-
-            self._active_session = _ActiveSession(
-                engine=engine, project=project, inst=inst, session_dir=session_dir,
-                session_start=timestamp_now(),
-                musician=inst.musician or config.studio_musician,
-                instrument_full_name=inst.full_name,
-                studio_name=config.studio_name, studio_location=config.studio_location,
-                session_flac=session_flac, session_video=session_dir / "session_video.mp4",
-                video_recorder=video_recorder, session_video_raw=session_video_raw,
-                session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
-            )
-            self._log_session_event("session_start", f"instrument={inst.name}")
+            self._begin_session_locked(project_name, instrument_name)
+            session = self._active_session
             self._emit("recording_status", {
-                "status": f"Session started for '{inst.name}' in '{project.name}'.",
+                "phase": "waiting",
+                "status": f"Session started for '{session.inst.name}' in '{session.project.name}'.",
             })
 
+    def _begin_session_locked(self, project_name: str, instrument_name: str) -> None:
+        """begin_session()'s body, for start_recording()'s auto-open (which
+        already holds self._record_lock and words its own status). Opens the
+        continuous session capture: audio stream + session recorder, the
+        session video if a camera's configured, and the event log."""
+        if (
+            self._active_latency_test is not None
+            or self._active_video_check is not None
+            or self._active_session is not None
+        ):
+            raise BackendError("Another recording is already in progress.")
+        self._close_active_monitor()  # always opens its own engine, never reuses the ambient one
+
+        config = self.get_config()
+        project = self._open_project(project_name)
+        inst = config.get_instrument(instrument_name)
+        if inst is None:
+            raise BackendError(f"Instrument '{instrument_name}' not found.")
+        input_info = config.resolve_input(inst.input_label)
+        if input_info is None:
+            raise BackendError(f"Input label '{inst.input_label}' not found in config.")
+
+        try:
+            import sounddevice as sd
+        except Exception as e:
+            raise BackendError(f"sounddevice unavailable: {e}") from e
+
+        from .audio.devices import resolve_device
+        out_dev = resolve_device(sd, config.output_device, "output")
+        in_dev = resolve_device(sd, input_info.device, "input")
+        if in_dev is None:
+            raise BackendError(f"Input device '{input_info.device}' not found.")
+        if config.output_device and out_dev is None:
+            raise BackendError(f"Output device '{config.output_device}' not found.")
+
+        in_info = sd.query_devices(in_dev, "input")
+        out_info = sd.query_devices(out_dev, "output")
+        max_in = in_info["max_input_channels"]
+        if input_info.channel > max_in:
+            raise BackendError(
+                f"Instrument '{inst.name}' needs input channel {input_info.channel} "
+                f"but device only has {max_in} channels."
+            )
+        output_channels = min(config.output_channels, out_info["max_output_channels"])
+
+        from .audio.engine import AudioEngine
+        engine = AudioEngine(
+            sample_rate=config.sample_rate,
+            buffer_size=config.buffer_size,
+            input_device=in_dev,
+            output_device=out_dev,
+            input_channels=max(input_info.channel, 1),
+            output_channels=max(1, output_channels),
+            monitor_channel=input_info.channel - 1,
+            compressor_settings=self._compressor_settings,
+            monitor_instrument=self._monitoring_mode == "production",
+            instrument_volume=self._instrument_volume / 100.0,
+        )
+        self._apply_hardware_direct_monitor(input_info, self._monitoring_mode == "recording")
+        engine.start()
+
+        session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
+        session_dir = ensure_dir(project.sessions_dir / f"{session_name}_{inst.name}")
+        session_flac = session_dir / "session.flac"
+        engine.start_session_recording(session_flac)
+
+        video_recorder = None
+        session_video_raw = session_mix_flac = None
+        video_start_wall_time = None
+        mix_start_frame = 0
+        if config.camera_device:
+            from .video.capture import VideoRecorder, ffmpeg_available
+            if ffmpeg_available():
+                self._preview.pause()
+                self._emit("preview_paused", {})
+                session_video_raw = session_dir / "session_video_raw.mp4"
+                session_mix_flac = session_dir / "session_mix.flac"
+                video_recorder = VideoRecorder(config.camera_device, session_video_raw)
+                if video_recorder.start():
+                    # Where the mix/video timeline begins on the session-audio
+                    # timeline — splicing maps take frames onto the video with
+                    # this (see _save_session_log / processing/splicer.py).
+                    mix_start_frame = engine.session_frames
+                    engine.start_mix_recording(session_mix_flac)
+                    video_start_wall_time = wall_timestamp()
+                else:
+                    video_recorder = None
+                    self._preview.resume()
+                    self._emit("preview_resumed", {})
+
+        engine.set_on_song_end(self._on_song_naturally_ended)
+        self._active_session = _ActiveSession(
+            engine=engine, project=project, inst=inst, session_dir=session_dir,
+            session_start=timestamp_now(),
+            musician=inst.musician or config.studio_musician,
+            instrument_full_name=inst.full_name,
+            studio_name=config.studio_name, studio_location=config.studio_location,
+            session_flac=session_flac, session_video=session_dir / "session_video.mp4",
+            video_recorder=video_recorder, session_video_raw=session_video_raw,
+            session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
+            mix_start_frame=mix_start_frame,
+        )
+        self._log_session_event("session_start", f"instrument={inst.name}")
+
     def end_session(self) -> None:
+        self._end_session(missing_ok=False)
+
+    def _end_session(self, missing_ok: bool) -> None:
+        """Close the session: log the final events, finalize the continuous
+        audio/video capture, save the log — all quick — then hand the heavy
+        lifting (finding completed takes in the log and clipping them + their
+        videos out of the recording) to a background thread, so the app is
+        back to idle the moment recording stops. See _process_session()."""
         with self._record_lock:
             session = self._active_session
             if session is None:
+                if missing_ok:
+                    return
                 raise BackendError("No session in progress.")
-            if self._active_recording is not None:
-                raise BackendError("Stop or finish the current take before ending the session.")
 
-            self._log_session_event("session_end")
+            if session.playing and session.current_track is not None:
+                # Cut off mid-song: logged so post-processing can still keep
+                # it if it ran long enough (see processing/splicer.py) —
+                # otherwise it just never becomes a take.
+                self._log_session_event(
+                    "song_stopped", frame=session.engine.session_frames,
+                    track_index=session.current_track_index, track_name=session.current_track.name,
+                )
+                session.engine.mixer.set_playing(False)
+                session.playing = False
+            self._log_session_event("session_end", frame=session.engine.session_frames)
             self._active_session = None
 
-            session.engine.stop()  # closes the stream and every recorder on it (per-take/session/mix)
+            session.engine.set_on_song_end(None)
+            session.engine.stop()  # closes the stream and every recorder on it (session/mix)
             self._start_monitoring_locked()
 
             if session.video_recorder:
                 session.video_recorder.stop()
-
-            if session.video_recorder and session.session_video_raw and session.session_mix_flac:
-                from .video.capture import format_watermark_text, mux_video_audio
-                watermark_text = format_watermark_text(
-                    session.musician, session.inst.name,
-                    session.video_start_wall_time or "", session.video_start_track_name,
-                )
-                ok = mux_video_audio(
-                    session.session_video_raw, session.session_mix_flac, session.session_flac,
-                    session.session_video, watermark_text=watermark_text,
-                    video_offset_ms=self.get_config().video_latency_compensation_ms,
-                )
-                if ok:
-                    session.session_video_raw.unlink(missing_ok=True)
-                    session.session_mix_flac.unlink(missing_ok=True)
-                    status = f"Session ended — video saved to {session.session_video}"
-                else:
-                    status = f"Session ended; video mux failed, raw files kept in {session.session_dir}"
                 self._preview.resume()
                 self._emit("preview_resumed", {})
-            else:
-                status = "Session ended."
 
-            log_path = self._save_session_log(session)
-            if log_path:
-                status += f" Log saved to {log_path}."
+            self._save_session_log(session)
+            self._emit("recording_status", {
+                "phase": "idle",
+                "status": "Session ended — processing takes...",
+            })
 
-            self._emit("recording_status", {"phase": "idle", "status": status})
+        # Non-daemon deliberately: if the app quits right after stopping, the
+        # process lingers (headless) until the takes are safely spliced
+        # rather than losing them. CLI/server exits join it explicitly — see
+        # join_session_processing().
+        self._processing_thread = threading.Thread(target=self._process_session, args=(session,))
+        self._processing_thread.start()
+
+    def join_session_processing(self, timeout: float | None = None) -> None:
+        """Block until the most recent session's post-processing (take
+        splicing/video clipping) finishes — for exits that want to report
+        completion rather than silently linger (CLI `start-session`,
+        `takeloom server` shutdown). No-op if nothing is processing."""
+        thread = self._processing_thread
+        if thread is not None:
+            thread.join(timeout)
+
+    def _process_session(self, session: "_ActiveSession") -> None:
+        """Replay the just-ended session's log and clip every completed take
+        (and, with a camera, its video) out of the continuous recording,
+        updating the setlist — the deferred work the live session never did.
+        Runs on a background thread; a fresh session can already be recording
+        while this grinds along on the old one's files."""
+        from .processing.splicer import process_session
+        config = self.get_config()
+        try:
+            summary = process_session(
+                session_dir=session.session_dir,
+                projects_dir=Path(config.projects_dir),
+                video_offset_ms=config.video_latency_compensation_ms,
+            )
+        except Exception as e:
+            self._emit("recording_status", {
+                "phase": "idle",
+                "status": f"Session take processing failed: {e} — raw files kept in {session.session_dir}",
+            })
+            return
+        self._emit("recording_status", {"phase": "idle", "status": summary})
 
     def is_session_active(self) -> bool:
         return self._active_session is not None
@@ -2079,6 +2076,10 @@ class LocalBackend(Backend):
             "project": session.project.name,
             "studio_name": session.studio_name,
             "studio_location": session.studio_location,
+            "sample_rate": session.engine.sample_rate,
+            "mix_start_frame": session.mix_start_frame,
+            "has_video": session.session_video_raw is not None,
+            "added_inspiration_ids": sorted(session.added_inspiration_ids),
             "events": [e.to_dict() for e in session.events],
         }
         log_path.write_text(json.dumps(data, indent=2))

@@ -97,6 +97,12 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "stop_recording":
         backend.stop_recording()
         return {}
+    if op == "restart_take":
+        backend.restart_take()
+        return {}
+    if op == "next_track":
+        backend.next_track()
+        return {}
     if op == "is_recording":
         return {"recording": backend.is_recording()}
     if op == "adjust_backing_volume":

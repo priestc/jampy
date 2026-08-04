@@ -389,6 +389,13 @@ def server_command(disable_color: bool) -> None:
         log("\nStopping server...")
         server.stop()
         driver.disconnect()
+        try:
+            if backend.is_session_active():
+                log("Ending active session...")
+                backend.stop_recording()
+        except BackendError as e:
+            log(f"Error ending session: {e}", err=True)
+        backend.join_session_processing()
 
 
 @main.command()
@@ -804,16 +811,16 @@ def start_session(instrument: str) -> None:
 
     driver.disconnect()
     try:
-        if backend.is_recording():
-            backend.stop_recording()
-        backend.end_session()
+        backend.stop_recording()  # ends the session; no-op if "r" already did
     except BackendError as e:
         click.echo(f"Error ending session: {e}", err=True)
+    click.echo("Processing session takes...")
+    backend.join_session_processing()
 
-    # Re-opened fresh: LocalBackend's own internal Project instances (used by
-    # begin_session/start_recording/_finish_recording) already saved every
-    # completed/discarded take to disk — this cleanup step just needs the
-    # current on-disk state, not the stale copy opened before the session.
+    # Re-opened fresh: post-session processing (see processing/splicer.py)
+    # just wrote every completed take and the setlist to disk — this cleanup
+    # step needs that current on-disk state, not the stale copy opened
+    # before the session.
     fresh_project = Project.open(cwd)
     for track in fresh_project.setlist.tracks:
         if track.inspiration_track_id:

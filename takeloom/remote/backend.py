@@ -167,6 +167,13 @@ class RemoteBackend(Backend):
     def stop_recording(self) -> None:
         self._client.call("stop_recording", {}, timeout=LONG_TIMEOUT)
 
+    def restart_take(self) -> None:
+        self._client.call("restart_take", {}, timeout=LONG_TIMEOUT)
+
+    def next_track(self) -> None:
+        # Can involve a backing-track download on the server side.
+        self._client.call("next_track", {}, timeout=LONG_TIMEOUT)
+
     def is_recording(self) -> bool:
         return self._client.call("is_recording", {})["recording"]
 
@@ -234,13 +241,16 @@ class RemoteBackend(Backend):
     def stop_video_check(self) -> None:
         raise BackendError("Video check isn't available over Remote connections yet.")
 
-    # --- continuous session recording (not supported over Remote; CLI-only) ---
+    # --- session lifecycle ---
+    # A remote client never needs these directly: start_recording() on the
+    # server opens the session itself, and stop_recording() closes it —
+    # both already exposed above. Explicit open/close stays local-only.
 
     def begin_session(self, project_name: str, instrument_name: str) -> None:
-        raise BackendError("Continuous session recording isn't available over Remote connections.")
+        raise BackendError("Explicit session control isn't available over Remote — just start recording.")
 
     def end_session(self) -> None:
-        raise BackendError("Continuous session recording isn't available over Remote connections.")
+        raise BackendError("Explicit session control isn't available over Remote — just stop recording.")
 
     def _unsubscribe_preview(self, on_frame: FrameCallback) -> None:
         with self._preview_lock:

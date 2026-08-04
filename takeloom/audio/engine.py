@@ -58,6 +58,12 @@ class AudioEngine:
         self.recorder: Recorder | None = None
         self.session_recorder: Recorder | None = None
         self.mix_recorder: Recorder | None = None
+        # Frames captured into the session recording so far — the timeline
+        # every session-log event position refers to. Counted here in the
+        # callback (single writer) rather than read from the Recorder, whose
+        # frames_written lags behind by whatever its writer thread hasn't
+        # drained yet.
+        self._session_frames: int = 0
         self.mixer = Mixer(sample_rate)
         self.compressor = Compressor(sample_rate, compressor_settings)
         self._stream: sd.Stream | None = None
@@ -100,6 +106,7 @@ class AudioEngine:
 
     def start_session_recording(self, output_path: Path) -> None:
         """Start the continuous session-level recorder."""
+        self._session_frames = 0
         self.session_recorder = Recorder(output_path, self.sample_rate, 1)
         self.session_recorder.start()
 
@@ -150,6 +157,7 @@ class AudioEngine:
         # Record input to disk
         if self.session_recorder:
             self.session_recorder.write(mono)
+            self._session_frames += len(mono)
         if self.recorder:
             self.recorder.write(mono)
 
@@ -228,3 +236,9 @@ class AudioEngine:
         if self.recorder:
             return self.recorder.elapsed_seconds
         return 0.0
+
+    @property
+    def session_frames(self) -> int:
+        """Current position (in captured frames) on the session recording's
+        timeline — what session-log events are stamped with."""
+        return self._session_frames

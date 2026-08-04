@@ -54,14 +54,12 @@ class RecordFrame(ttk.Frame):
         # happens once _on_inspiration_loaded() gets a result.
         self._auto_select_inspiration_pending = False
 
-        self._phase = "idle"  # "idle" | "waiting" (loaded, not yet unpaused) | "recording"
+        # "idle" (no session) | "waiting" (session open, track cued or
+        # between songs) | "recording" (backing playing). Non-idle means a
+        # session — the one continuous recording — is running, which locks
+        # the instrument/project/track controls for its whole duration.
+        self._phase = "idle"
         self._video_check_phase = "idle"  # "idle" | "recording"
-        # Continuous whole-session audio+video recording (begin_session()/
-        # end_session()) spanning every take recorded while it's on — the
-        # CLI's `start-session` behavior, layered on top of normal per-take
-        # recording. Locked to whatever instrument/project was selected when
-        # it started; see _set_controls_enabled.
-        self._session_active = False
         self._monitoring_mode = "production"  # "production" | "recording" — refreshed in _on_loaded
         self._preview_sub = None
         self._preview_imgtk = None
@@ -271,25 +269,11 @@ class RecordFrame(ttk.Frame):
         )
         row += 1
 
-        self.streamdeck_emulator = StreamDeckEmulator(
-            left, on_key=self._on_emulator_key, session_capable=not self.app_state.backend.is_remote(),
-        )
+        self.streamdeck_emulator = StreamDeckEmulator(left, on_key=self._on_emulator_key)
         self.streamdeck_emulator.grid(row=row, column=0, columnspan=2, pady=(8, 0))
         self.streamdeck_emulator.update_recording_page(self._phase, self._video_check_phase)
         self.streamdeck_emulator.update_monitoring_mode(self._monitoring_mode)
         row += 1
-
-        self.session_button = ttk.Button(
-            left, text="End Session" if self._session_active else "Start Session",
-            command=self._on_toggle_session,
-        )
-        self.session_button.grid(row=row, column=0, columnspan=2, pady=(4, 0))
-        row += 1
-        if self.app_state.backend.is_remote():
-            self.session_button.state(["disabled"])
-            self.session_button.grid_remove()
-        elif not self._session_active and (not instrument_names or not self._project_names):
-            self.session_button.state(["disabled"])
 
         self.video_check_button = ttk.Button(
             left, text="Video Check", command=self._on_toggle_video_check,
@@ -298,7 +282,7 @@ class RecordFrame(ttk.Frame):
         if self.app_state.backend.is_remote():
             self.video_check_button.state(["disabled"])
             self.video_check_button.grid_remove()
-        elif not instrument_names or not self._project_names or self._session_active:
+        elif not instrument_names or not self._project_names:
             self.video_check_button.state(["disabled"])
 
     # --- audio filters (compressor now, more later) ---
@@ -768,29 +752,11 @@ class RecordFrame(ttk.Frame):
         if self._video_check_phase != "idle":
             self.video_check_button.state(["!disabled"])
         else:
-            can_check = ready and self._phase == "idle" and not self._session_active
+            can_check = ready and self._phase == "idle"
             self.video_check_button.state(["!disabled"] if can_check else ["disabled"])
-        self._update_session_button_state()
-
-    def _update_session_button_state(self) -> None:
-        if not hasattr(self, "session_button"):
-            return
-        if self._session_active:
-            self.session_button.configure(text="End Session")
-            self.session_button.state(["!disabled"] if self._phase == "idle" else ["disabled"])
-        else:
-            self.session_button.configure(text="Start Session")
-            ready = bool(self.instrument_var.get()) and self._project_name is not None
-            can_start = ready and self._phase == "idle" and self._video_check_phase == "idle"
-            self.session_button.state(["!disabled"] if can_start else ["disabled"])
 
     def _set_controls_enabled(self, enabled: bool) -> None:
-        # Instrument/project stay locked for as long as a session is active
-        # (begin_session() pins both) even between takes, when everything
-        # else re-enables — switching either out from under the session
-        # would just get rejected by start_recording()'s project/instrument
-        # check anyway.
-        combo_state = "readonly" if (enabled and not self._session_active) else "disabled"
+        combo_state = "readonly" if enabled else "disabled"
         self.instrument_combo.configure(state=combo_state)
         self.project_combo.configure(state=combo_state)
         list_state = "normal" if enabled else "disabled"
@@ -945,14 +911,12 @@ class RecordFrame(ttk.Frame):
         self.streamdeck_emulator.set_key_enabled(0, False)
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
-        # Routed through the shared driver (rather than calling
-        # backend.start_recording(req) directly) so a mouse click on the
-        # on-screen emulator's key 0 opens/owns a session exactly like a
-        # physical Stream Deck press does — see RecordingDeckDriver.
-        # start_recording_with_session().
-        driver = self._streamdeck_driver
+        # start_recording() opens the session itself when none is active —
+        # a mouse click here behaves exactly like a physical Stream Deck
+        # press does (see the recording section of backend.py).
+        backend = self.app_state.backend
         self._run_backend(
-            lambda: driver.start_recording_with_session(req), lambda _result, error: self._on_start_result(error)
+            lambda: backend.start_recording(req), lambda _result, error: self._on_start_result(error)
         )
 
     def _on_start_result(self, error: str | None) -> None:
@@ -1032,60 +996,6 @@ class RecordFrame(ttk.Frame):
         self.video_check_button.state(["!disabled"])
         if error:
             messagebox.showerror("Stop failed", error)
-
-    # --- session (continuous whole-session recording — see begin_session()/
-    # end_session() in backend.py, previously only reachable from the CLI's
-    # `start-session` command) ---
-
-    def _on_toggle_session(self) -> None:
-        if self._session_active:
-            self._end_session()
-        else:
-            self._start_session()
-
-    def _start_session(self) -> None:
-        instrument_name = self.instrument_var.get()
-        if not instrument_name or not self._project_name:
-            messagebox.showerror("Cannot start session", "Select an instrument and a project first.")
-            return
-
-        self.session_button.state(["disabled"])
-        self.status_var.set("Starting session...")
-        backend = self.app_state.backend
-        project_name = self._project_name
-        self._run_backend(
-            lambda: backend.begin_session(project_name, instrument_name),
-            lambda _result, error: self._on_start_session_result(error),
-        )
-
-    def _on_start_session_result(self, error: str | None) -> None:
-        if error:
-            messagebox.showerror("Cannot start session", error)
-            self.status_var.set("")
-            self._update_start_button_state()
-            return
-        # The "recording_status" event begin_session() emits before returning
-        # already set status_var — nothing left to show here.
-        self._session_active = True
-        self._set_controls_enabled(self._phase == "idle")
-        self._update_start_button_state()
-
-    def _end_session(self) -> None:
-        self.session_button.state(["disabled"])
-        backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.end_session(),
-            lambda _result, error: self._on_end_session_result(error),
-        )
-
-    def _on_end_session_result(self, error: str | None) -> None:
-        if error:
-            messagebox.showerror("Cannot end session", error)
-            self._update_start_button_state()
-            return
-        self._session_active = False
-        self._set_controls_enabled(self._phase == "idle")
-        self._update_start_button_state()
 
     # --- backend events (recording_status / preview_paused / preview_resumed) ---
 

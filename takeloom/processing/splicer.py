@@ -1,4 +1,34 @@
-"""Post-session processing: parse log, splice completed takes, update setlist."""
+"""Post-session processing: replay a session's event log to find completed
+takes, clip them (and their videos) out of the continuous session recording,
+and update the setlist.
+
+This is the deferred half of the session-centric recording model (see the
+recording section of backend.py): while a session is live, nothing is
+finalized — the backend just captures one continuous audio stream (and,
+with a camera, one continuous video) and appends events to the log. Once
+the session ends, process_session() does all the heavy lifting here, off
+the hot path.
+
+Event vocabulary (each event carries `frame`, a position on the session
+audio's timeline, plus `track_index`/`track_name`):
+
+- record_start   — a track's backing started playing from 0:00
+- back_to_start  — playing backing sent back to 0:00; the play-through in
+                   progress is abandoned, a new one begins at this frame
+- song_end       — backing reached its natural end: the play-through in
+                   progress IS a completed take
+- track_skipped  — playing backing abandoned (Next, or loading another
+                   track over it): not a take, unless already long enough
+- song_stopped   — playing backing cut off by the session ending: same
+                   keep rule as track_skipped
+- track_loaded / session_start / session_end / volume events — bookkeeping
+
+Any play-through that reaches song_end is a completed take, no matter how
+many back_to_starts came before it. An abandoned play-through is normally
+discarded, except when it already ran past MIN_KEPT_TAKE_SECONDS — losing
+that much performance to a slip of the finger is worse than an extra
+unwanted take in the list.
+"""
 
 from __future__ import annotations
 
@@ -6,139 +36,185 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-import numpy as np
 import soundfile as sf
 
 from ..project import Project, TakeInfo
-from ..utils import (
-    take_filename,
-    next_take_number,
-    seconds_to_frames,
-    ensure_dir,
-)
-from ..audio.formats import write_flac
+from ..utils import take_filename, next_take_number, ensure_dir
+
+# An abandoned (skipped/stopped) play-through this long is kept as a take
+# anyway — see module docstring.
+MIN_KEPT_TAKE_SECONDS = 10 * 60
 
 
 @dataclass
 class CompletedTake:
-    """A completed take identified from the session log."""
+    """A take segment identified from the session log, in session-audio frames."""
     track_index: int
     track_name: str
     start_frame: int
     end_frame: int
+    start_wall_time: str  # wall_time of the segment's record_start/back_to_start
 
 
-def parse_session_log(log_path: Path) -> tuple[str, list[CompletedTake]]:
-    """Parse a session log and identify completed takes.
-
-    A completed take is a sequence: record_start → song_end
-    with NO back_to_start events in between.
-
-    Returns (instrument, list of completed takes).
-    """
-    data = json.loads(log_path.read_text())
-    instrument = data["instrument"]
-    events = data["events"]
-
+def parse_session_log(data: dict) -> list[CompletedTake]:
+    """Identify completed takes from a session log's events — see the
+    module docstring for the rules."""
+    sample_rate = data.get("sample_rate") or 48000
     completed: list[CompletedTake] = []
-    current_start_frame: int | None = None
-    current_track_index: int = 0
-    current_track_name: str = ""
-    had_restart = False
 
-    for event in events:
-        etype = event["event_type"]
-        track_idx = event.get("track_index", 0)
-        track_name = event.get("track_name", "")
-        details = event.get("details", "")
+    start_frame: int | None = None
+    track_index = 0
+    track_name = ""
+    start_wall = ""
 
-        if etype == "record_start":
-            # Parse frame from details
-            frame = _parse_frame(details)
-            current_start_frame = frame
-            current_track_index = track_idx
-            current_track_name = track_name
-            had_restart = False
+    def close_segment(end_frame: int | None, natural_end: bool) -> None:
+        nonlocal start_frame
+        if start_frame is None or end_frame is None:
+            start_frame = None
+            return
+        long_enough = (end_frame - start_frame) / sample_rate >= MIN_KEPT_TAKE_SECONDS
+        if natural_end or long_enough:
+            completed.append(CompletedTake(
+                track_index=track_index, track_name=track_name,
+                start_frame=start_frame, end_frame=end_frame,
+                start_wall_time=start_wall,
+            ))
+        start_frame = None
 
-        elif etype == "back_to_start":
-            had_restart = True
-            # Update start frame to the new recording position
-            frame = _parse_frame(details)
-            current_start_frame = frame
+    for event in data.get("events", []):
+        etype = event.get("event_type")
+        frame = event.get("frame")
 
+        if etype in ("record_start", "back_to_start"):
+            # back_to_start both abandons the play-through in progress
+            # (kept only if it ran long enough) and starts a new one.
+            close_segment(frame, natural_end=False)
+            start_frame = frame
+            track_index = event.get("track_index", 0)
+            track_name = event.get("track_name", "")
+            start_wall = event.get("wall_time", "")
         elif etype == "song_end":
-            frame = _parse_frame(details)
-            if current_start_frame is not None and not had_restart:
-                completed.append(CompletedTake(
-                    track_index=current_track_index,
-                    track_name=current_track_name,
-                    start_frame=current_start_frame,
-                    end_frame=frame,
-                ))
-            current_start_frame = None
-            had_restart = False
+            close_segment(frame, natural_end=True)
+        elif etype in ("track_skipped", "song_stopped", "track_loaded", "session_end"):
+            close_segment(frame, natural_end=False)
 
-    return instrument, completed
+    return completed
 
 
-def _parse_frame(details: str) -> int:
-    """Extract frame number from event details string."""
-    for part in details.split(","):
-        part = part.strip()
-        if part.startswith("frame="):
-            return int(part.split("=")[1])
-    return 0
+def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) -> None:
+    """Write src's [start, end) frame range to out_path, block-wise — a
+    session recording can be hours long, so it's never loaded whole."""
+    with sf.SoundFile(
+        str(out_path), mode="w", samplerate=src.samplerate,
+        channels=src.channels, format="FLAC", subtype="PCM_16",
+    ) as out:
+        src.seek(start)
+        remaining = end - start
+        while remaining > 0:
+            block = src.read(min(remaining, 1 << 20), dtype="float32", always_2d=True)
+            if len(block) == 0:
+                break
+            out.write(block)
+            remaining -= len(block)
 
 
-def splice_takes(
-    project: Project,
-    session_dir: Path,
-    raw_recording_path: Path,
-) -> list[Path]:
-    """Splice completed takes from the raw recording and save them.
+def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: float = 0.0) -> str:
+    """Turn a finished session directory (session.flac + session_log.json,
+    plus the raw video/mix pair when a camera ran) into completed take files
+    and setlist updates. Returns a one-line human-readable summary.
 
-    Returns list of paths to saved take files.
-    """
+    Also finalizes the whole-session video (session_video.mp4) and removes
+    any inspiration tracks this session added to the setlist that ended up
+    with no take at all."""
     log_path = session_dir / "session_log.json"
-    if not log_path.exists():
-        return []
+    data = json.loads(log_path.read_text())
 
-    instrument, completed = parse_session_log(log_path)
-    if not completed:
-        return []
+    project = Project.open(projects_dir / data["project"])
+    instrument = data["instrument"]
+    musician = data.get("musician", "")
+    sample_rate = data.get("sample_rate") or 48000
+    mix_start_frame = data.get("mix_start_frame", 0)
 
-    # Read the raw recording
-    raw_data, sr = sf.read(str(raw_recording_path), dtype="float32", always_2d=True)
-    total_frames = len(raw_data)
+    session_flac = session_dir / "session.flac"
+    session_video_raw = session_dir / "session_video_raw.mp4"
+    session_mix_flac = session_dir / "session_mix.flac"
+    have_video = session_video_raw.exists() and session_mix_flac.exists()
 
-    saved_paths: list[Path] = []
+    completed = parse_session_log(data)
+
+    saved = 0
+    videos = 0
     completed_dir = ensure_dir(project.completed_takes_dir)
+    if completed:
+        with sf.SoundFile(str(session_flac)) as src:
+            total = len(src)
+            for take in completed:
+                start = max(0, take.start_frame)
+                end = min(take.end_frame, total)
+                if end <= start:
+                    continue
+                if not (0 <= take.track_index < len(project.setlist.tracks)):
+                    continue
+                track = project.setlist.tracks[take.track_index]
 
-    for take in completed:
-        start = max(0, take.start_frame)
-        end = min(take.end_frame, total_frames)
-        if end <= start:
-            continue
+                take_num = next_take_number(completed_dir, track.name, instrument)
+                flac_name = take_filename(track.name, instrument, take_num, "flac")
+                _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
-        segment = raw_data[start:end]
+                has_video = False
+                if have_video:
+                    from ..video.capture import clip_session_video, format_watermark_text
+                    watermark = format_watermark_text(
+                        musician, instrument, take.start_wall_time, track.name,
+                    )
+                    has_video = clip_session_video(
+                        session_video_raw, session_mix_flac, completed_dir / flac_name,
+                        completed_dir / take_filename(track.name, instrument, take_num, "mp4"),
+                        mix_start_s=(start - mix_start_frame) / sample_rate,
+                        duration_s=(end - start) / sample_rate,
+                        watermark_text=watermark, video_offset_ms=video_offset_ms,
+                    )
+                    videos += has_video
 
-        # Determine take number
-        take_num = next_take_number(completed_dir, take.track_name, instrument)
-        filename = take_filename(take.track_name, instrument, take_num)
-        out_path = completed_dir / filename
+                track.set_preferred_take(instrument, TakeInfo(
+                    instrument=instrument, take_number=take_num,
+                    filename=flac_name, has_video=has_video,
+                ))
+                saved += 1
 
-        write_flac(out_path, segment, sr)
-        saved_paths.append(out_path)
-
-        # Update setlist with new preferred take
-        if 0 <= take.track_index < len(project.setlist.tracks):
-            track_entry = project.setlist.tracks[take.track_index]
-            take_info = TakeInfo(
-                instrument=instrument,
-                take_number=take_num,
-                filename=filename,
-            )
-            track_entry.set_preferred_take(instrument, take_info)
+    # Inspiration tracks this session added that never earned any take (for
+    # any instrument) shouldn't linger in the setlist.
+    added_ids = set(data.get("added_inspiration_ids", []))
+    if added_ids:
+        project.setlist.tracks = [
+            t for t in project.setlist.tracks
+            if not (t.inspiration_track_id in added_ids and not t.preferred_takes)
+        ]
 
     project.save_setlist()
-    return saved_paths
+
+    # The whole-session archive video, watermarked once for the session.
+    session_video_ok = False
+    if have_video:
+        from ..video.capture import format_watermark_text, mux_video_audio
+        first_track = next((e.get("track_name", "") for e in data.get("events", [])
+                            if e.get("event_type") == "record_start"), "")
+        start_wall = next((e.get("wall_time", "") for e in data.get("events", [])
+                           if e.get("event_type") == "session_start"), "")
+        watermark = format_watermark_text(musician, instrument, start_wall, first_track)
+        session_video_ok = mux_video_audio(
+            session_video_raw, session_mix_flac, session_flac,
+            session_dir / "session_video.mp4",
+            watermark_text=watermark, video_offset_ms=video_offset_ms,
+        )
+        if session_video_ok:
+            session_video_raw.unlink(missing_ok=True)
+            session_mix_flac.unlink(missing_ok=True)
+
+    take_word = "take" if saved == 1 else "takes"
+    summary = f"Session processed: {saved} completed {take_word} saved"
+    if videos:
+        summary += f" ({videos} with video)"
+    if have_video and not session_video_ok:
+        summary += "; session video mux failed, raw files kept"
+    return summary + "."
