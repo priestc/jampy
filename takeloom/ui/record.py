@@ -1052,3 +1052,6 @@ class RecordFrame(ttk.Frame):
             self.preview_label.configure(text="Waiting for camera preview...", image="")
         elif event == "preview_error":
             self.preview_label.configure(text=data.get("message", "Camera preview error."), image="")
+        elif event == "streaming_status":
+            if "status" in data:
+                self.status_var.set(data["status"])

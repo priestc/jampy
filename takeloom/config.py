@@ -107,6 +107,8 @@ class StudioConfig:
     compressor_attack_ms: float = 10.0
     compressor_release_ms: float = 150.0
     compressor_makeup_db: float = 0.0
+    streaming_enabled: bool = False  # stream every session live while it records; see takeloom/streaming.py
+    youtube_stream_key: str = ""  # from YouTube Studio's "Go Live" stream settings
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to
@@ -122,6 +124,8 @@ class StudioConfig:
             errors.append(f"Invalid buffer size: {self.buffer_size}. Must be one of {VALID_BUFFER_SIZES}")
         if self.output_channels < 1:
             errors.append("Output channels must be >= 1")
+        if self.streaming_enabled and not self.youtube_stream_key.strip():
+            errors.append("Streaming is enabled but no YouTube stream key is set.")
         return errors
 
     def get_instrument(self, name: str) -> Instrument | None:

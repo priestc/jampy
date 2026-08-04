@@ -7,7 +7,10 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Callable
+from typing import Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..streaming import StreamTarget
 
 
 def ffmpeg_available() -> bool:
@@ -24,19 +27,54 @@ def _input_args(device: str, framerate: int) -> list[str]:
     raise RuntimeError(f"Camera capture is not supported on platform: {sys.platform}")
 
 
-def _build_capture_cmd(device: str, output_path: Path, framerate: int, stream_preview: bool) -> list[str]:
+def _build_capture_cmd(
+    device: str, output_path: Path, framerate: int, stream_preview: bool,
+    stream_target: "StreamTarget | None" = None,
+) -> list[str]:
     cmd = ["ffmpeg", "-y", *_input_args(device, framerate)]
-    if not stream_preview:
+    if stream_target is not None:
+        # Input 1: the live mix audio arriving over LiveAudioFeeder's FIFO,
+        # as raw interleaved float32 PCM — see takeloom/streaming.py.
+        cmd += [
+            "-thread_queue_size", "1024",
+            "-f", "f32le", "-ar", str(stream_target.sample_rate), "-ac", str(stream_target.channels),
+            "-i", str(stream_target.audio_fifo),
+        ]
+    if not stream_preview and stream_target is None:
         return cmd + ["-pix_fmt", "yuv420p", str(output_path)]
-    # Split the decoded feed in two: one branch is encoded to the output file
-    # exactly as before, the other is scaled down and dropped to ~10fps MJPEG
-    # on stdout, for VideoRecorder to relay to the live preview panel while
-    # this process holds the camera device exclusively (see on_preview_frame).
-    return cmd + [
-        "-filter_complex", "[0:v]split=2[rec][prev];[prev]fps=10,scale=320:-2[prevout]",
-        "-map", "[rec]", "-pix_fmt", "yuv420p", str(output_path),
-        "-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1",
-    ]
+
+    # Split the decoded camera feed into up to three branches: "rec" (always,
+    # encoded to the local output file exactly as before), "prev" (scaled
+    # down to ~10fps MJPEG on stdout, for the live preview panel while this
+    # process holds the camera device exclusively — see on_preview_frame),
+    # and "streamv" (scaled down and encoded live to the RTMP target). RTMP
+    # streaming can't be a separate ffmpeg process sharing the same camera
+    # device, hence tacking it onto this one instead — see streaming.py.
+    branches = ["rec"]
+    if stream_preview:
+        branches.append("prev")
+    if stream_target is not None:
+        branches.append("streamv")
+    filter_parts = [f"[0:v]split={len(branches)}" + "".join(f"[{b}]" for b in branches)]
+    if stream_preview:
+        filter_parts.append("[prev]fps=10,scale=320:-2[prevout]")
+    if stream_target is not None:
+        filter_parts.append(f"[streamv]scale={stream_target.width}:-2[streamout]")
+
+    cmd += ["-filter_complex", ";".join(filter_parts)]
+    cmd += ["-map", "[rec]", "-pix_fmt", "yuv420p", str(output_path)]
+    if stream_preview:
+        cmd += ["-map", "[prevout]", "-f", "mjpeg", "-q:v", "5", "pipe:1"]
+    if stream_target is not None:
+        cmd += [
+            "-map", "[streamout]", "-map", "1:a",
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+            "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
+            "-g", str(framerate * 2), "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
+            "-f", "flv", stream_target.rtmp_url,
+        ]
+    return cmd
 
 
 class VideoRecorder:
@@ -54,6 +92,11 @@ class VideoRecorder:
     holds the device exclusively (ffmpeg's avfoundation/v4l2/dshow capture
     can't share a device with anything else, e.g. a separate cv2 preview
     loop, hence needing to source the preview from here instead).
+
+    If stream_target is given, ffmpeg also encodes a third branch of the
+    same camera feed live to an RTMP target (see takeloom/streaming.py) —
+    for the same camera-exclusivity reason, this rides along on this
+    process rather than a separate one.
     """
 
     def __init__(
@@ -62,11 +105,13 @@ class VideoRecorder:
         output_path: Path,
         framerate: int = 30,
         on_preview_frame: Callable[[bytes], None] | None = None,
+        stream_target: "StreamTarget | None" = None,
     ) -> None:
         self.device = device
         self.output_path = output_path
         self.framerate = framerate
         self._on_preview_frame = on_preview_frame
+        self.stream_target = stream_target
         self._proc: subprocess.Popen | None = None
         self._preview_thread: threading.Thread | None = None
 
@@ -75,7 +120,7 @@ class VideoRecorder:
         if not ffmpeg_available():
             return False
         stream_preview = self._on_preview_frame is not None
-        cmd = _build_capture_cmd(self.device, self.output_path, self.framerate, stream_preview)
+        cmd = _build_capture_cmd(self.device, self.output_path, self.framerate, stream_preview, self.stream_target)
         self._proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,

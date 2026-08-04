@@ -615,6 +615,7 @@ class _ActiveSession:
     video_recorder: object | None = None
     session_video_raw: Path | None = None
     session_mix_flac: Path | None = None
+    stream_feeder: object | None = None  # LiveAudioFeeder, when streaming to YouTube is on for this session
     video_start_wall_time: str | None = None
     video_start_track_name: str = ""
     # Position on the session-audio timeline when the mix/video recording
@@ -1362,7 +1363,12 @@ class LocalBackend(Backend):
         held."""
         self._active_session = None
         session.engine.set_on_song_end(None)
+        session.engine.set_stream_sink(None)
         session.engine.stop()
+        if session.stream_feeder:
+            # Before video_recorder.stop() — see the matching comment in
+            # _end_session for why this order matters.
+            session.stream_feeder.stop()
         if session.video_recorder:
             session.video_recorder.stop()
             self._preview.resume()
@@ -1948,6 +1954,7 @@ class LocalBackend(Backend):
         session_video_raw = session_mix_flac = None
         video_start_wall_time = None
         mix_start_frame = 0
+        stream_feeder = None
         if config.camera_device:
             from .video.capture import VideoRecorder, ffmpeg_available
             if ffmpeg_available():
@@ -1955,6 +1962,27 @@ class LocalBackend(Backend):
                 self._emit("preview_paused", {})
                 session_video_raw = session_dir / "session_video_raw.mp4"
                 session_mix_flac = session_dir / "session_mix.flac"
+
+                stream_target = None
+                if config.streaming_enabled and config.youtube_stream_key:
+                    from .streaming import LiveAudioFeeder, StreamTarget, fifo_supported, youtube_rtmp_url
+                    if fifo_supported():
+                        stream_feeder = LiveAudioFeeder(
+                            session_dir / "stream_audio.fifo",
+                            sample_rate=config.sample_rate, channels=engine.output_channels,
+                        )
+                        stream_feeder.start()
+                        stream_target = StreamTarget(
+                            rtmp_url=youtube_rtmp_url(config.youtube_stream_key),
+                            audio_fifo=stream_feeder.fifo_path,
+                            sample_rate=config.sample_rate, channels=engine.output_channels,
+                        )
+                    else:
+                        stream_feeder = None
+                        self._emit("streaming_status", {
+                            "status": "Live streaming isn't supported on this platform.", "active": False,
+                        })
+
                 # on_preview_frame tees a low-res copy of every frame back
                 # through _CameraPreviewManager (see push_external_frame) —
                 # same as _open_video_recorder's video check/latency-test
@@ -1962,6 +1990,7 @@ class LocalBackend(Backend):
                 # camera frames for the whole session instead of freezing.
                 video_recorder = VideoRecorder(
                     config.camera_device, session_video_raw, on_preview_frame=self._preview.push_external_frame,
+                    stream_target=stream_target,
                 )
                 if video_recorder.start():
                     # Where the mix/video timeline begins on the session-audio
@@ -1970,10 +1999,20 @@ class LocalBackend(Backend):
                     mix_start_frame = engine.session_frames
                     engine.start_mix_recording(session_mix_flac)
                     video_start_wall_time = wall_timestamp()
+                    if stream_feeder is not None:
+                        engine.set_stream_sink(stream_feeder.push)
+                        self._emit("streaming_status", {"status": "Streaming live to YouTube.", "active": True})
                 else:
                     video_recorder = None
+                    if stream_feeder is not None:
+                        stream_feeder.stop()
+                        stream_feeder = None
                     self._preview.resume()
                     self._emit("preview_resumed", {})
+        elif config.streaming_enabled and config.youtube_stream_key:
+            self._emit("streaming_status", {
+                "status": "Streaming needs a camera — set one up on the Recording Devices tab.", "active": False,
+            })
 
         engine.set_on_song_end(self._on_song_naturally_ended)
         self._active_session = _ActiveSession(
@@ -1985,7 +2024,7 @@ class LocalBackend(Backend):
             session_flac=session_flac, session_video=session_dir / "session_video.mp4",
             video_recorder=video_recorder, session_video_raw=session_video_raw,
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
-            mix_start_frame=mix_start_frame,
+            mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
         )
         self._log_session_event("session_start", f"instrument={inst.name}")
 
@@ -2019,10 +2058,25 @@ class LocalBackend(Backend):
             self._active_session = None
 
             session.engine.set_on_song_end(None)
+            session.engine.set_stream_sink(None)
             session.engine.stop()  # closes the stream and every recorder on it (session/mix)
             self._start_monitoring_locked()
 
+            if session.stream_feeder:
+                # Closes the FIFO before video_recorder.stop() sends ffmpeg
+                # its 'q' — ffmpeg's demuxer can be sitting in a blocking
+                # read() on the audio FIFO input waiting for more data (there
+                # won't be any, now that set_stream_sink(None) above stopped
+                # feeding it), and 'q' on stdin only gets noticed once ffmpeg
+                # is back in its main loop; closing this first delivers EOF
+                # on that read() so it returns and 'q' actually lands instead
+                # of ffmpeg hanging indefinitely.
+                session.stream_feeder.stop()
+                self._emit("streaming_status", {"status": "Stream ended.", "active": False})
             if session.video_recorder:
+                # Ends the RTMP connection too, if streaming was on: it's the
+                # same ffmpeg process (see _begin_session_locked), and this
+                # stop() is what finalizes it.
                 session.video_recorder.stop()
                 self._preview.resume()
                 self._emit("preview_resumed", {})

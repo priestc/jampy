@@ -71,6 +71,7 @@ class AudioEngine:
         self._peak_level: float = 0.0
         self._backing_peak_level: float = 0.0
         self._on_song_end: Callable[[], None] | None = None
+        self._stream_sink: Callable[[np.ndarray], None] | None = None
 
     @property
     def peak_level(self) -> float:
@@ -83,6 +84,14 @@ class AudioEngine:
     def set_on_song_end(self, callback: Callable[[], None] | None) -> None:
         """Set callback invoked when mixer reaches end of backing track."""
         self._on_song_end = callback
+
+    def set_stream_sink(self, sink: Callable[[np.ndarray], None] | None) -> None:
+        """Live-safe set/clear of an extra consumer of the full production
+        mix (see _callback's full_mix) — used by live streaming
+        (takeloom/streaming.py's LiveAudioFeeder) to get the same audio
+        mix_recorder writes to disk, just piped live too. sink is called
+        from this callback's own realtime thread, so it must not block."""
+        self._stream_sink = sink
 
     def set_compressor_settings(self, settings: CompressorSettings) -> None:
         """Swap in new compressor settings, live — safe to call from any
@@ -190,6 +199,8 @@ class AudioEngine:
 
         if self.mix_recorder:
             self.mix_recorder.write(full_mix)
+        if self._stream_sink:
+            self._stream_sink(full_mix)
 
         # Check if song ended
         if self.mixer.is_playing and self.mixer.is_finished:
