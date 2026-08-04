@@ -73,7 +73,16 @@ def _build_capture_cmd(
         bitrate = f"{stream_target.bitrate_kbps}k"
         cmd += [
             "-map", "[streamout]", "-map", "1:a",
-            "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
+            # No "-tune zerolatency": it forces x264 into slice-based frame
+            # threading, and combined with the tight -maxrate/-bufsize below
+            # (needed to hit a live-streaming bitrate target at all), a
+            # high-core-count machine + a busy/detailed frame can starve
+            # individual slices of bits, corrupting the frame in visible
+            # horizontal bands — reproduced locally: identical corruption
+            # with the tune on, gone with it off. A live stream's few extra
+            # seconds of encoder latency are irrelevant here anyway (YouTube
+            # itself buffers several seconds on ingest before playback).
+            "-c:v", "libx264", "-preset", "veryfast",
             "-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{stream_target.bitrate_kbps * 2}k",
             "-g", str(framerate * 2), "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k", "-ar", "44100",
