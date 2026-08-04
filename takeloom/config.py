@@ -113,6 +113,13 @@ class StudioConfig:
     # Streaming tab's quality dropdown writes both together as one unit.
     streaming_video_width: int = 1280  # 0 means "stream at the source resolution, unscaled"
     streaming_bitrate_kbps: int = 3000
+    # YouTube Data API OAuth ("Connect YouTube Account" on the Streaming
+    # tab) — lets each session's stream get a real title, since RTMP itself
+    # carries no metadata channel. See takeloom/youtube_api.py.
+    youtube_oauth_client_id: str = ""
+    youtube_oauth_client_secret: str = ""
+    youtube_oauth_refresh_token: str = ""  # "" means not connected
+    youtube_broadcast_visibility: str = "unlisted"  # "public" | "unlisted" | "private"
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650
     known_remotes: list[KnownRemote] = field(default_factory=list)  # remotes this machine can connect to

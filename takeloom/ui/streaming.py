@@ -1,10 +1,20 @@
-"""Streaming tab: turn on live streaming to YouTube and set the stream key.
+"""Streaming tab: turn on live streaming to YouTube, set the stream key and
+quality, and (optionally) connect a YouTube account so each session's
+stream gets a real title.
 
 When enabled, every session automatically streams live for its whole
 duration — starting the moment recording starts and ending the moment it
 stops (see backend.py's _begin_session_locked/_end_session and
 takeloom/streaming.py). Reads/writes whichever machine's config
-app_state.backend currently points at, same as Studio Setup."""
+app_state.backend currently points at, same as Studio Setup.
+
+The "Connect YouTube Account" OAuth flow (takeloom/youtube_api.py) is the
+one exception to that local-or-remote-transparent pattern: it opens a
+browser and waits for a redirect on a local loopback port, so it always
+runs against *this* machine — right here in the UI layer, never proxied
+through Backend/RemoteBackend. The resulting refresh token still gets
+saved into whichever config app_state.backend points at, same as
+everything else on this tab."""
 
 from __future__ import annotations
 
@@ -15,7 +25,10 @@ from tkinter import messagebox, ttk
 from ..backend import BackendError
 from ..config import StudioConfig
 from ..streaming import STREAM_QUALITY_PRESETS
+from ..youtube_api import YouTubeAPIError, revoke, run_oauth_flow
 from .app_state import AppState
+
+_VISIBILITY_LABELS = [("public", "Public"), ("unlisted", "Unlisted"), ("private", "Private")]
 
 
 class StreamingFrame(ttk.Frame):
@@ -95,13 +108,16 @@ class StreamingFrame(ttk.Frame):
             foreground="#666666",
         ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(0, 16))
 
+        row = self._build_oauth_section(7)
+
         self.status_var = tk.StringVar(value="")
         ttk.Label(self, textvariable=self.status_var, foreground="#2a7d2a").grid(
-            row=7, column=0, columnspan=2, sticky="w", pady=(4, 0)
+            row=row, column=0, columnspan=2, sticky="w", pady=(4, 0)
         )
+        row += 1
 
         button_row = ttk.Frame(self)
-        button_row.grid(row=8, column=0, columnspan=2, sticky="e", pady=(12, 0))
+        button_row.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
         self.save_button.pack(side="right")
 
@@ -115,6 +131,154 @@ class StreamingFrame(ttk.Frame):
                 return label
         return STREAM_QUALITY_PRESETS[0][0]
 
+    # --- YouTube account (title automation) ---
+
+    def _build_oauth_section(self, row: int) -> int:
+        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        row += 1
+
+        ttk.Label(self, text="YouTube Account (optional — for automatic titles)", font=("TkDefaultFont", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+        ttk.Label(
+            self,
+            text="Connect a YouTube account to have each session's stream titled automatically with the "
+                 "studio, musician, project, and date. RTMP (the stream key above) can't carry a title on its "
+                 "own, so this needs its own Google sign-in: create an OAuth Client ID (type \"Desktop app\") in "
+                 "the Google Cloud Console for a project with the YouTube Data API v3 enabled, then paste its "
+                 "Client ID and Secret below.",
+            foreground="#666666", wraplength=560, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(2, 10))
+        row += 1
+
+        ttk.Label(self, text="OAuth Client ID").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.client_id_var = tk.StringVar(value=self.config_obj.youtube_oauth_client_id)
+        ttk.Entry(self, textvariable=self.client_id_var, width=48).grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+
+        ttk.Label(self, text="OAuth Client Secret").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.client_secret_var = tk.StringVar(value=self.config_obj.youtube_oauth_client_secret)
+        ttk.Entry(self, textvariable=self.client_secret_var, width=48, show="*").grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+
+        ttk.Label(self, text="Broadcast visibility").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.visibility_var = tk.StringVar(value=self._current_visibility_label())
+        ttk.Combobox(
+            self, textvariable=self.visibility_var, values=[label for _v, label in _VISIBILITY_LABELS],
+            state="readonly", width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+
+        connect_row = ttk.Frame(self)
+        connect_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        self.oauth_status_var = tk.StringVar(value=self._connection_status_text())
+        ttk.Label(connect_row, textvariable=self.oauth_status_var).pack(side="left", padx=(0, 12))
+        self.connect_button = ttk.Button(connect_row, text=self._connect_button_text(), command=self._on_connect_clicked)
+        self.connect_button.pack(side="left")
+        row += 1
+
+        return row
+
+    def _current_visibility_label(self) -> str:
+        for value, label in _VISIBILITY_LABELS:
+            if value == self.config_obj.youtube_broadcast_visibility:
+                return label
+        return _VISIBILITY_LABELS[1][1]  # "Unlisted" — the safe default if config has an unrecognized value
+
+    def _is_connected(self) -> bool:
+        return bool(self.config_obj.youtube_oauth_refresh_token)
+
+    def _connection_status_text(self) -> str:
+        return "Connected to YouTube." if self._is_connected() else "Not connected — streams won't be auto-titled."
+
+    def _connect_button_text(self) -> str:
+        return "Disconnect" if self._is_connected() else "Connect YouTube Account"
+
+    def _on_connect_clicked(self) -> None:
+        if self._is_connected():
+            self._disconnect()
+        else:
+            self._connect()
+
+    def _connect(self) -> None:
+        client_id = self.client_id_var.get().strip()
+        client_secret = self.client_secret_var.get().strip()
+        if not client_id or not client_secret:
+            messagebox.showerror("Missing credentials", "Enter both the OAuth Client ID and Client Secret first.")
+            return
+
+        self.connect_button.state(["disabled"])
+        self.oauth_status_var.set("Waiting for authorization in your browser...")
+
+        def worker() -> None:
+            try:
+                refresh_token = run_oauth_flow(client_id, client_secret)
+                error = None
+            except YouTubeAPIError as e:
+                refresh_token, error = None, str(e)
+            self.after(0, lambda: self._on_connected(client_id, client_secret, refresh_token, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_connected(self, client_id: str, client_secret: str, refresh_token: str | None, error: str | None) -> None:
+        if not self.winfo_exists():
+            return
+        self.connect_button.state(["!disabled"])
+        if error:
+            self.oauth_status_var.set(self._connection_status_text())
+            messagebox.showerror("Could not connect YouTube account", error)
+            return
+
+        # Persisted immediately (not deferred to the main Save button) so a
+        # successful authorization is never lost by navigating away without
+        # remembering to hit Save separately.
+        self.config_obj.youtube_oauth_client_id = client_id
+        self.config_obj.youtube_oauth_client_secret = client_secret
+        self.config_obj.youtube_oauth_refresh_token = refresh_token
+        self._save_silently(on_done=lambda: self._after_connection_state_change())
+
+    def _disconnect(self) -> None:
+        refresh_token = self.config_obj.youtube_oauth_refresh_token
+        self.connect_button.state(["disabled"])
+
+        def worker() -> None:
+            if refresh_token:
+                revoke(refresh_token)  # best-effort; never raises
+            self.after(0, self._on_disconnected)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_disconnected(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.config_obj.youtube_oauth_refresh_token = ""
+        self._save_silently(on_done=lambda: self._after_connection_state_change())
+
+    def _after_connection_state_change(self) -> None:
+        if not self.winfo_exists():
+            return
+        self.connect_button.state(["!disabled"])
+        self.connect_button.configure(text=self._connect_button_text())
+        self.oauth_status_var.set(self._connection_status_text())
+
+    def _save_silently(self, on_done) -> None:
+        """Save self.config_obj as it currently stands, without touching
+        the visible Save button/status line — used by the connect/
+        disconnect flows, which have their own status feedback."""
+        backend = self.app_state.backend
+        config = self.config_obj
+
+        def worker() -> None:
+            try:
+                backend.save_config(config)
+            except BackendError as e:
+                self.after(0, lambda: messagebox.showerror("Save failed", str(e)))
+                return
+            self.after(0, on_done)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # --- save ---
 
     def _on_save(self) -> None:
@@ -124,6 +288,12 @@ class StreamingFrame(ttk.Frame):
             if label == self.quality_var.get():
                 self.config_obj.streaming_video_width = width
                 self.config_obj.streaming_bitrate_kbps = bitrate
+                break
+        self.config_obj.youtube_oauth_client_id = self.client_id_var.get().strip()
+        self.config_obj.youtube_oauth_client_secret = self.client_secret_var.get().strip()
+        for value, label in _VISIBILITY_LABELS:
+            if label == self.visibility_var.get():
+                self.config_obj.youtube_broadcast_visibility = value
                 break
 
         errors = self.config_obj.validate()

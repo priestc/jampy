@@ -616,6 +616,7 @@ class _ActiveSession:
     session_video_raw: Path | None = None
     session_mix_flac: Path | None = None
     stream_feeder: object | None = None  # LiveAudioFeeder, when streaming to YouTube is on for this session
+    youtube_broadcast_id: str | None = None  # set when a titled broadcast was created/bound for this session
     video_start_wall_time: str | None = None
     video_start_track_name: str = ""
     # Position on the session-audio timeline when the mix/video recording
@@ -1373,6 +1374,8 @@ class LocalBackend(Backend):
             session.video_recorder.stop()
             self._preview.resume()
             self._emit("preview_resumed", {})
+        if session.youtube_broadcast_id is not None:
+            self._complete_youtube_broadcast(self.get_config(), session.youtube_broadcast_id)
         shutil.rmtree(session.session_dir, ignore_errors=True)
         self._start_monitoring_locked()
 
@@ -1884,6 +1887,44 @@ class LocalBackend(Backend):
                 "status": f"Session started for '{session.inst.name}' in '{session.project.name}'.",
             })
 
+    def _create_youtube_broadcast(self, config: StudioConfig, project: Project, inst) -> str | None:
+        """Best-effort: title and bind a fresh YouTube broadcast to the
+        configured stream key via the Data API (see youtube_api.py), so the
+        stream shows up on YouTube titled with the studio/musician/project/
+        date instead of whatever title (or none) was left on that stream
+        key from last time. Returns the new broadcast's id (for
+        _complete_youtube_broadcast at session end), or None on any
+        failure — which never blocks the RTMP stream itself, just leaves
+        its title alone."""
+        from .youtube_api import (
+            YouTubeAPIError, build_stream_title, create_and_bind_broadcast, find_stream_id, refresh_access_token,
+        )
+        try:
+            access_token = refresh_access_token(
+                config.youtube_oauth_client_id, config.youtube_oauth_client_secret, config.youtube_oauth_refresh_token,
+            )
+            stream_id = find_stream_id(access_token, config.youtube_stream_key)
+            title = build_stream_title(config.studio_name, inst.musician or config.studio_musician, project.name)
+            broadcast_id = create_and_bind_broadcast(access_token, stream_id, title, config.youtube_broadcast_visibility)
+            self._emit("streaming_status", {"status": f'YouTube broadcast titled "{title}".'})
+            return broadcast_id
+        except YouTubeAPIError as e:
+            self._emit("streaming_status", {"status": f"Streaming live, but couldn't set the YouTube title: {e}"})
+            return None
+
+    def _complete_youtube_broadcast(self, config: StudioConfig, broadcast_id: str) -> None:
+        """Best-effort: end a session's bound broadcast right away instead
+        of leaving it for YouTube's own stream-health timeout to notice the
+        RTMP connection dropped. Never raises."""
+        from .youtube_api import YouTubeAPIError, refresh_access_token, transition_broadcast
+        try:
+            access_token = refresh_access_token(
+                config.youtube_oauth_client_id, config.youtube_oauth_client_secret, config.youtube_oauth_refresh_token,
+            )
+            transition_broadcast(access_token, broadcast_id, "complete")
+        except YouTubeAPIError:
+            pass
+
     def _begin_session_locked(self, project_name: str, instrument_name: str) -> None:
         """begin_session()'s body, for start_recording()'s auto-open (which
         already holds self._record_lock and words its own status). Opens the
@@ -1955,6 +1996,7 @@ class LocalBackend(Backend):
         video_start_wall_time = None
         mix_start_frame = 0
         stream_feeder = None
+        youtube_broadcast_id = None
         if config.camera_device:
             from .video.capture import VideoRecorder, ffmpeg_available
             if ffmpeg_available():
@@ -1978,6 +2020,17 @@ class LocalBackend(Backend):
                             sample_rate=config.sample_rate, channels=engine.output_channels,
                             width=config.streaming_video_width, bitrate_kbps=config.streaming_bitrate_kbps,
                         )
+                        # Bind a freshly titled broadcast before ffmpeg starts
+                        # pushing RTMP, so it's already in place once data
+                        # starts flowing (see _create_youtube_broadcast).
+                        # Best-effort: title automation failing never blocks
+                        # the stream itself.
+                        if (
+                            config.youtube_oauth_client_id
+                            and config.youtube_oauth_client_secret
+                            and config.youtube_oauth_refresh_token
+                        ):
+                            youtube_broadcast_id = self._create_youtube_broadcast(config, project, inst)
                     else:
                         stream_feeder = None
                         self._emit("streaming_status", {
@@ -2008,6 +2061,13 @@ class LocalBackend(Backend):
                     if stream_feeder is not None:
                         stream_feeder.stop()
                         stream_feeder = None
+                    if youtube_broadcast_id is not None:
+                        # ffmpeg never actually started, so RTMP data never
+                        # flows and enableAutoStart never fires — without
+                        # this the broadcast would sit orphaned in YouTube
+                        # Studio forever instead of ending itself.
+                        self._complete_youtube_broadcast(config, youtube_broadcast_id)
+                        youtube_broadcast_id = None
                     self._preview.resume()
                     self._emit("preview_resumed", {})
         elif config.streaming_enabled and config.youtube_stream_key:
@@ -2026,6 +2086,7 @@ class LocalBackend(Backend):
             video_recorder=video_recorder, session_video_raw=session_video_raw,
             session_mix_flac=session_mix_flac, video_start_wall_time=video_start_wall_time,
             mix_start_frame=mix_start_frame, stream_feeder=stream_feeder,
+            youtube_broadcast_id=youtube_broadcast_id,
         )
         self._log_session_event("session_start", f"instrument={inst.name}")
 
@@ -2081,6 +2142,8 @@ class LocalBackend(Backend):
                 session.video_recorder.stop()
                 self._preview.resume()
                 self._emit("preview_resumed", {})
+            if session.youtube_broadcast_id is not None:
+                self._complete_youtube_broadcast(self.get_config(), session.youtube_broadcast_id)
 
             self._save_session_log(session)
             self._emit("recording_status", {
