@@ -1955,7 +1955,14 @@ class LocalBackend(Backend):
                 self._emit("preview_paused", {})
                 session_video_raw = session_dir / "session_video_raw.mp4"
                 session_mix_flac = session_dir / "session_mix.flac"
-                video_recorder = VideoRecorder(config.camera_device, session_video_raw)
+                # on_preview_frame tees a low-res copy of every frame back
+                # through _CameraPreviewManager (see push_external_frame) —
+                # same as _open_video_recorder's video check/latency-test
+                # path — so the Record tab's live feed keeps showing real
+                # camera frames for the whole session instead of freezing.
+                video_recorder = VideoRecorder(
+                    config.camera_device, session_video_raw, on_preview_frame=self._preview.push_external_frame,
+                )
                 if video_recorder.start():
                     # Where the mix/video timeline begins on the session-audio
                     # timeline — splicing maps take frames onto the video with
