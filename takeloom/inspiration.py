@@ -162,12 +162,15 @@ def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "
     return [item if isinstance(item, dict) else {"title": item} for item in raw]
 
 
-def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
-    """Return the setlist entry for an inspiration track, creating it if absent."""
+def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
+    """Construct a TrackEntry from an inspiration track record, without
+    adding it to any project's setlist — used for a session-only,
+    throwaway resolution (a setlist "filter slot"'s random draw — see
+    backend.py's _resolve_filter_slot) that should never persist as a
+    setlist entry itself. Mirrors find_or_add_inspiration_track's entry
+    shape exactly, just without the "find or add to project.setlist.
+    tracks" part."""
     track_id = track_info["id"]
-    for entry in project.setlist.tracks:
-        if entry.inspiration_track_id == track_id:
-            return entry
     artist = track_info.get("artist", "Unknown")
     title = track_info.get("title", "Unknown")
     year = track_info.get("year", "")
@@ -175,12 +178,21 @@ def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEn
     duration = float(track_info.get("duration") or 0)
     year_str = f" ({year})" if year else ""
     name = f"{artist} - {title}{year_str}"
-    entry = TrackEntry(
+    return TrackEntry(
         name=name,
         backing_track=f"inspiration_{track_id}.{fmt}",
         duration_seconds=duration,
         inspiration_track_id=track_id,
     )
+
+
+def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
+    """Return the setlist entry for an inspiration track, creating it if absent."""
+    track_id = track_info["id"]
+    for entry in project.setlist.tracks:
+        if entry.inspiration_track_id == track_id:
+            return entry
+    entry = build_inspiration_track_entry(track_info)
     project.setlist.add_track(entry)
     return entry
 

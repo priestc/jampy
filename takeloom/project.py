@@ -30,12 +30,16 @@ class TrackEntry:
     than a fixed song: backing_track stays "" (there's no file — this
     entry is never itself loaded for playback), and inspiration_filter
     holds the filter criteria (e.g. {"artist": "Miles Davis"} or
-    {"genre": "Rock"}) a session resolves into an actual, concrete track
-    each time this slot comes up — see backend.py's
-    _resolve_filter_slot_for_session. preferred_takes on a filter slot
-    itself is always empty; takes belong to whichever concrete track a
-    given session happened to draw, exactly like an ad-hoc Inspiration-tab
-    pick.
+    {"genre": "Rock"}) a session draws an actual song from fresh each time
+    this slot comes up — see backend.py's _resolve_filter_slot. That drawn
+    song is deliberately never added to the setlist as its own entry (the
+    whole point of a filter slot is that the setlist doesn't change from
+    session to session) — its take still gets archived normally in
+    completed_takes/, just with no setlist entry to attach a preferred
+    take to; which song it actually was lives only in that session's own
+    log. preferred_takes on a filter slot itself is therefore always
+    empty, which is also what makes it come up as "still needs a take"
+    again on every future session.
     """
     name: str
     backing_track: str  # relative path to backing track file

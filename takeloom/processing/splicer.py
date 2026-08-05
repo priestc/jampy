@@ -28,6 +28,17 @@ many back_to_starts came before it. An abandoned play-through is normally
 discarded, except when it already ran past MIN_KEPT_TAKE_SECONDS — losing
 that much performance to a slip of the finger is worse than an extra
 unwanted take in the list.
+
+A setlist "filter slot" (TrackEntry.is_inspiration_filter) complicates
+`track_index` slightly: it still points at the slot's own (permanent)
+position in the setlist, but the take actually belongs to whichever song
+backend.py's _resolve_filter_slot happened to draw for it that session —
+never added to the setlist itself. That's why every take here is named
+from the logged `track_name` (the drawn song's name, for a filter slot)
+rather than looked up from the setlist entry at track_index (the slot's
+own name) — and why a filter slot's take is archived but never attached
+back to the slot via set_preferred_take: the setlist doesn't change
+session to session, only the archive and the session log do.
 """
 
 from __future__ import annotations
@@ -155,31 +166,44 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
                     continue
                 if not (0 <= take.track_index < len(project.setlist.tracks)):
                     continue
-                track = project.setlist.tracks[take.track_index]
+                slot = project.setlist.tracks[take.track_index]
+                # take.track_name (logged on this take's record_start/
+                # back_to_start events) is the slot's own name for an
+                # ordinary track — but for a filter slot, it's whatever
+                # song actually got drawn for it this session, not the
+                # slot's own label ("Random ..."). Always used for the
+                # archived take's filename/watermark; a filter slot's take
+                # never gets attached back to the slot itself (see
+                # TrackEntry's docstring) — the setlist doesn't change,
+                # only the archived file and the session log (which
+                # already has the drawn song's name) reflect what was
+                # actually recorded.
+                track_name = take.track_name or slot.name
 
-                take_num = next_take_number(completed_dir, track.name, instrument)
-                flac_name = take_filename(track.name, instrument, take_num, "flac")
+                take_num = next_take_number(completed_dir, track_name, instrument)
+                flac_name = take_filename(track_name, instrument, take_num, "flac")
                 _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
                 has_video = False
                 if have_video:
                     from ..video.capture import clip_session_video, format_watermark_text
                     watermark = format_watermark_text(
-                        musician, instrument, take.start_wall_time, track.name,
+                        musician, instrument, take.start_wall_time, track_name,
                     )
                     has_video = clip_session_video(
                         session_video_raw, session_mix_flac, completed_dir / flac_name,
-                        completed_dir / take_filename(track.name, instrument, take_num, "mp4"),
+                        completed_dir / take_filename(track_name, instrument, take_num, "mp4"),
                         mix_start_s=(start - mix_start_frame) / sample_rate,
                         duration_s=(end - start) / sample_rate,
                         watermark_text=watermark, video_offset_ms=video_offset_ms,
                     )
                     videos += has_video
 
-                track.set_preferred_take(instrument, TakeInfo(
-                    instrument=instrument, take_number=take_num,
-                    filename=flac_name, has_video=has_video,
-                ))
+                if not slot.is_inspiration_filter:
+                    slot.set_preferred_take(instrument, TakeInfo(
+                        instrument=instrument, take_number=take_num,
+                        filename=flac_name, has_video=has_video,
+                    ))
                 saved += 1
 
     # Inspiration tracks this session added that never earned any take (for
