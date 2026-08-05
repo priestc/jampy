@@ -1906,24 +1906,31 @@ class LocalBackend(Backend):
             stream_id = find_stream_id(access_token, config.youtube_stream_key)
             title = build_stream_title(config.studio_name, inst.musician or config.studio_musician, project.name)
             broadcast_id = create_and_bind_broadcast(access_token, stream_id, title, config.youtube_broadcast_visibility)
-            self._emit("streaming_status", {"status": f'YouTube broadcast titled "{title}".'})
+            # The broadcast id is proof YouTube actually accepted the create
+            # + bind calls (an HTTPError anywhere in that chain would have
+            # been caught below instead), not just that we made the request.
+            self._emit("streaming_status", {
+                "status": f'YouTube accepted the broadcast request — titled "{title}" (id {broadcast_id}).',
+            })
             return broadcast_id
         except YouTubeAPIError as e:
-            self._emit("streaming_status", {"status": f"Streaming live, but couldn't set the YouTube title: {e}"})
+            self._emit("streaming_status", {"status": f"Streaming live, but the YouTube API rejected the title request: {e}"})
             return None
 
     def _complete_youtube_broadcast(self, config: StudioConfig, broadcast_id: str) -> None:
         """Best-effort: end a session's bound broadcast right away instead
         of leaving it for YouTube's own stream-health timeout to notice the
-        RTMP connection dropped. Never raises."""
+        RTMP connection dropped. Never raises — even on failure, YouTube's
+        own timeout still ends it a little later regardless."""
         from .youtube_api import YouTubeAPIError, refresh_access_token, transition_broadcast
         try:
             access_token = refresh_access_token(
                 config.youtube_oauth_client_id, config.youtube_oauth_client_secret, config.youtube_oauth_refresh_token,
             )
             transition_broadcast(access_token, broadcast_id, "complete")
-        except YouTubeAPIError:
-            pass
+            self._emit("streaming_status", {"status": f"YouTube accepted the request to end broadcast {broadcast_id}."})
+        except YouTubeAPIError as e:
+            self._emit("streaming_status", {"status": f"Couldn't tell YouTube to end broadcast {broadcast_id}: {e}"})
 
     def _begin_session_locked(self, project_name: str, instrument_name: str) -> None:
         """begin_session()'s body, for start_recording()'s auto-open (which

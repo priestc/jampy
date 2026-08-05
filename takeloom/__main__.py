@@ -303,6 +303,20 @@ def server_command(disable_color: bool) -> None:
     from . import sleep_guard
     sleep_guard.track_backend(backend)
 
+    def on_streaming_event(event: str, data: dict) -> None:
+        # The only backend event this headless console prints on its own
+        # (everything else is either driven by StreamDeck key presses,
+        # which RecordingDeckDriver already narrates via `log`, or is
+        # display-only state a connected Remote client would show). A
+        # streaming session has no on-screen status anywhere in this
+        # context otherwise, so without this, a stream starting, YouTube
+        # accepting (or rejecting) the title API calls, and the stream
+        # ending would all happen invisibly here.
+        if event == "streaming_status" and "status" in data:
+            log(data["status"])
+
+    backend.on_event(on_streaming_event)
+
     def request_authorization(ip: str, client_name: str) -> bool:
         log(f"\nPairing request from '{client_name}' ({ip})")
         try:
