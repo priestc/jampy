@@ -33,12 +33,16 @@ A setlist "filter slot" (TrackEntry.is_inspiration_filter) complicates
 `track_index` slightly: it still points at the slot's own (permanent)
 position in the setlist, but the take actually belongs to whichever song
 backend.py's _resolve_filter_slot happened to draw for it that session —
-never added to the setlist itself. That's why every take here is named
+never a top-level entry of its own. That's why every take here is named
 from the logged `track_name` (the drawn song's name, for a filter slot)
 rather than looked up from the setlist entry at track_index (the slot's
-own name) — and why a filter slot's take is archived but never attached
-back to the slot via set_preferred_take: the setlist doesn't change
-session to session, only the archive and the session log do.
+own name) — and why a filter slot's take is attached to a *nested* entry
+in the slot's own TrackEntry.filter_takes (keyed by the drawn song's
+inspiration_track_id, from the session log's filter_slot_draws) instead
+of the slot's own preferred_takes: the slot itself must stay "always
+needs a take" so it keeps getting redrawn, while filter_takes is what
+lets a later session recognize and prefer a song other instruments have
+already recorded on this same slot.
 """
 
 from __future__ import annotations
@@ -49,7 +53,7 @@ from pathlib import Path
 
 import soundfile as sf
 
-from ..project import Project, TakeInfo
+from ..project import Project, TakeInfo, TrackEntry
 from ..utils import take_filename, next_take_number, ensure_dir
 
 # An abandoned (skipped/stopped) play-through this long is kept as a take
@@ -152,6 +156,7 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
     have_video = session_video_raw.exists() and session_mix_flac.exists()
 
     completed = parse_session_log(data)
+    filter_slot_draws = data.get("filter_slot_draws", {})
 
     saved = 0
     videos = 0
@@ -172,12 +177,7 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
                 # ordinary track — but for a filter slot, it's whatever
                 # song actually got drawn for it this session, not the
                 # slot's own label ("Random ..."). Always used for the
-                # archived take's filename/watermark; a filter slot's take
-                # never gets attached back to the slot itself (see
-                # TrackEntry's docstring) — the setlist doesn't change,
-                # only the archived file and the session log (which
-                # already has the drawn song's name) reflect what was
-                # actually recorded.
+                # archived take's filename/watermark.
                 track_name = take.track_name or slot.name
 
                 take_num = next_take_number(completed_dir, track_name, instrument)
@@ -199,11 +199,31 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
                     )
                     videos += has_video
 
-                if not slot.is_inspiration_filter:
-                    slot.set_preferred_take(instrument, TakeInfo(
-                        instrument=instrument, take_number=take_num,
-                        filename=flac_name, has_video=has_video,
-                    ))
+                take_info = TakeInfo(instrument=instrument, take_number=take_num, filename=flac_name, has_video=has_video)
+                if slot.is_inspiration_filter:
+                    # Attached to the drawn song's own nested entry (see
+                    # TrackEntry.filter_takes), not the slot's top-level
+                    # preferred_takes — the slot itself must stay "always
+                    # needs a take" so it keeps getting redrawn. draw_info
+                    # (this session's actual draw, from
+                    # backend.py's _save_session_log) is what lets a later
+                    # session recognize and prefer redrawing the same song
+                    # (see backend.py's _resolve_filter_slot) instead of
+                    # this take having nowhere to attach at all.
+                    draw_info = filter_slot_draws.get(str(take.track_index))
+                    if draw_info:
+                        key = str(draw_info["inspiration_track_id"])
+                        nested = slot.filter_takes.get(key)
+                        if nested is None:
+                            nested = TrackEntry(
+                                name=draw_info["name"], backing_track=draw_info["backing_track"],
+                                duration_seconds=draw_info.get("duration_seconds", 0.0),
+                                inspiration_track_id=draw_info["inspiration_track_id"],
+                            )
+                            slot.filter_takes[key] = nested
+                        nested.set_preferred_take(instrument, take_info)
+                else:
+                    slot.set_preferred_take(instrument, take_info)
                 saved += 1
 
     # Inspiration tracks this session added that never earned any take (for

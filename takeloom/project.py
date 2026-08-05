@@ -31,13 +31,19 @@ class TrackEntry:
     entry is never itself loaded for playback), and inspiration_filter
     holds the filter criteria (e.g. {"artist": "Miles Davis"} or
     {"genre": "Rock"}) a session draws an actual song from fresh each time
-    this slot comes up — see backend.py's _resolve_filter_slot. That drawn
-    song is deliberately never added to the setlist as its own entry (the
-    whole point of a filter slot is that the setlist doesn't change from
-    session to session) — its take still gets archived normally in
-    completed_takes/, just with no setlist entry to attach a preferred
-    take to; which song it actually was lives only in that session's own
-    log. preferred_takes on a filter slot itself is therefore always
+    this slot comes up — see backend.py's _resolve_filter_slot. The
+    setlist itself never grows a new top-level entry for a drawn song;
+    instead, filter_takes holds one nested TrackEntry per distinct song
+    this slot has ever drawn that went on to earn a take, keyed by
+    str(inspiration_track_id) — each with its own real preferred_takes,
+    exactly like an ordinary track, just not a row of its own in
+    Setlist.tracks. This is what lets a later session prefer redrawing a
+    song other instruments have already recorded on this slot (see
+    _resolve_filter_slot) instead of always drawing something brand new,
+    and lets the Setlist view show something like "has takes: bass,
+    electric-guitar" for the slot as a whole (see ui/record.py's
+    _track_display) without the setlist growing new rows for every draw.
+    preferred_takes on the filter slot's own top-level entry is always
     empty, which is also what makes it come up as "still needs a take"
     again on every future session.
     """
@@ -49,6 +55,7 @@ class TrackEntry:
     inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
     is_inspiration_filter: bool = False
     inspiration_filter: dict = field(default_factory=dict)
+    filter_takes: dict = field(default_factory=dict)  # str(inspiration_track_id) -> nested TrackEntry
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
 
@@ -67,6 +74,9 @@ class TrackEntry:
         takes = {}
         for inst, take_data in data.get("preferred_takes", {}).items():
             takes[inst] = TakeInfo(**take_data)
+        filter_takes = {
+            key: TrackEntry.from_dict(entry_data) for key, entry_data in data.get("filter_takes", {}).items()
+        }
         return cls(
             name=data["name"],
             backing_track=data["backing_track"],
@@ -76,6 +86,7 @@ class TrackEntry:
             inspiration_track_id=data.get("inspiration_track_id", 0),
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             inspiration_filter=data.get("inspiration_filter", {}),
+            filter_takes=filter_takes,
             preferred_takes=takes,
         )
 

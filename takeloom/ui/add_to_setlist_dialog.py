@@ -383,9 +383,10 @@ class AddToSetlistDialog(tk.Toplevel):
 
         ttk.Label(
             tab, text="Adds a slot to the setlist that draws a random track matching this filter "
-                      "every session, instead of one fixed song. The drawn song itself is never added "
-                      "to the setlist — the setlist stays exactly as it is, so the same slot draws "
-                      "again next session. Its take is still saved to the takes archive as usual.",
+                      "every session, instead of one fixed song — the setlist stays as it is, so the "
+                      "same slot draws again next session. If a previous draw already has a take from "
+                      "a different instrument, it's preferred over a brand new draw, so instruments can "
+                      "layer onto the same song. Every take is still saved to the takes archive as usual.",
             foreground="#666666", wraplength=380, justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 

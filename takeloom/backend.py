@@ -1337,23 +1337,29 @@ class LocalBackend(Backend):
             "track_loaded", frame=engine.session_frames, track_index=index, track_name=track.name,
         )
 
-    def _resolve_filter_slot(self, config: StudioConfig, track: TrackEntry) -> TrackEntry:
-        """Draw one random track matching `track.inspiration_filter` from
-        the inspiration server and return a throwaway TrackEntry built
-        from it — for this call's use only (mixer loading, downloading,
-        take-file naming). Deliberately never touches project.setlist.
-        tracks: the point of a filter slot is that the setlist doesn't
-        change from session to session, only the session log records
-        which song got drawn for that spot (via the track_name on its
-        track_loaded/record_start events) and the resulting take file
-        lands in the takes archive same as any other. A non-filter track
-        passes through unchanged. Always draws fresh — callers that want
-        "the same pick reused for the rest of one session"
-        (start_recording/_advance_locked) use
-        _resolve_filter_slot_for_session instead, which wraps this with
-        that caching."""
+    def _resolve_filter_slot(self, config: StudioConfig, track: TrackEntry, instrument_name: str) -> TrackEntry:
+        """Resolve `track` for `instrument_name` to record. A non-filter
+        track passes through unchanged.
+
+        Prefers a song this slot has already drawn in a past session that
+        has a take from some *other* instrument but not yet from this one
+        — track.filter_takes (see TrackEntry's docstring) — so a later
+        instrument can layer onto the same song instead of the setlist
+        only ever accumulating unrelated one-off takes. Only when no such
+        candidate exists does it draw a genuinely new one from the
+        inspiration server at random. Either way, the setlist itself never
+        gains a new top-level entry here — see TrackEntry's docstring and
+        _resolve_filter_slot_for_session's caching wrapper, which is what
+        actually gets called during a session; this is the pure "pick one"
+        step, split out for testability."""
         if not track.is_inspiration_filter:
             return track
+        reusable = [
+            entry for entry in track.filter_takes.values()
+            if entry.preferred_takes and instrument_name not in entry.preferred_takes
+        ]
+        if reusable:
+            return random.choice(reusable)
         from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
         try:
             matches = search_tracks_by_filter(config, track.inspiration_filter)
@@ -1375,16 +1381,15 @@ class LocalBackend(Backend):
         later succeeds — otherwise _advance_locked would keep re-offering
         the same filter slot indefinitely within one session, since the
         slot's own preferred_takes never actually gets a take (the take
-        belongs to whatever song got drawn, which — unlike an ad-hoc
-        Inspiration-tab pick — is never itself added to the setlist). A
-        non-filter track passes through unchanged (and isn't cached —
+        belongs to whatever song got drawn — see TrackEntry.filter_takes).
+        A non-filter track passes through unchanged (and isn't cached —
         nothing to cache)."""
         if not track.is_inspiration_filter:
             return track
         cached = session.resolved_filter_picks.get(index)
         if cached is not None:
             return cached
-        resolved = self._resolve_filter_slot(config, track)
+        resolved = self._resolve_filter_slot(config, track, session.inst.name)
         session.resolved_filter_picks[index] = resolved
         session.completed_track_indices.add(index)
         return resolved
@@ -1780,7 +1785,7 @@ class LocalBackend(Backend):
                 if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
                     raise BackendError("Invalid track selection.")
                 track = project.setlist.tracks[req.track_index]
-                track = self._resolve_filter_slot(config, track)
+                track = self._resolve_filter_slot(config, track, inst.name)
             elif req.track_source == "inspiration":
                 if not req.inspiration_info:
                     raise BackendError("No inspiration track selected.")
@@ -2307,6 +2312,19 @@ class LocalBackend(Backend):
             "mix_start_frame": session.mix_start_frame,
             "has_video": session.session_video_raw is not None,
             "added_inspiration_ids": sorted(session.added_inspiration_ids),
+            # filter-slot index -> the song actually drawn for it this
+            # session (see _resolve_filter_slot) — the setlist itself
+            # never records this, so post-processing needs it from here
+            # to attach a completed take into the slot's own
+            # TrackEntry.filter_takes rather than the top-level setlist.
+            "filter_slot_draws": {
+                str(index): {
+                    "name": entry.name, "backing_track": entry.backing_track,
+                    "duration_seconds": entry.duration_seconds,
+                    "inspiration_track_id": entry.inspiration_track_id,
+                }
+                for index, entry in session.resolved_filter_picks.items()
+            },
             "events": [e.to_dict() for e in session.events],
         }
         log_path.write_text(json.dumps(data, indent=2))

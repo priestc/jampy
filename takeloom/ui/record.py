@@ -467,9 +467,13 @@ class RecordFrame(ttk.Frame):
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring) —
-            # no duration/checkmark to show, just what it draws from.
+            # instead, roll up which instruments have a take on any song
+            # this slot has drawn (track.filter_takes), across every song
+            # it's ever drawn, not just one.
             criteria = ", ".join(f"{k}: {v}" for k, v in track.inspiration_filter.items())
-            return f"🎲 {track.name}  ({criteria})"
+            instruments = sorted({inst for entry in track.filter_takes.values() for inst in entry.preferred_takes})
+            takes_str = f" — has takes: {', '.join(instruments)}" if instruments else ""
+            return f"🎲 {track.name}  ({criteria}){takes_str}"
         dur = format_duration(track.duration_seconds)
         take = track.get_take_for_instrument(inst_name)
         if take is None:
