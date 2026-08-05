@@ -300,8 +300,11 @@ def server_command(disable_color: bool) -> None:
     backend = LocalBackend()
     listen_port = REMOTE_SERVER_PORT
 
-    from . import sleep_guard
-    sleep_guard.track_backend(backend)
+    # Deliberately no sleep_guard.track_backend(backend) here: a headless
+    # server machine should be free to let its own screensaver/sleep kick
+    # in regardless of recording state — only a UI actually being watched
+    # (local or a Remote client) has a reason to hold it off. See
+    # AppState.recording_active, which does that for the UI side.
 
     def on_streaming_event(event: str, data: dict) -> None:
         # The only backend event this headless console prints on its own
@@ -708,7 +711,6 @@ def start_session(instrument: str) -> None:
     audio+video recording spanning every track (begin_session()/
     end_session()), which the UI/server don't use.
     """
-    from . import sleep_guard
     from .backend import BackendError, LocalBackend, StartRecordingRequest
     from .recording_driver import RecordingDeckDriver
 
@@ -760,7 +762,9 @@ def start_session(instrument: str) -> None:
         raise SystemExit(1)
 
     backend = LocalBackend()
-    sleep_guard.track_backend(backend)
+    # Deliberately no sleep_guard.track_backend(backend) here — see the
+    # matching comment in server_command; a CLI recording session is no
+    # different from a headless server in that regard.
 
     click.echo(f"=== Recording Session: {project.name} / {inst.name} ===")
     click.echo(f"Tracks: {len(project.setlist.tracks)}")
@@ -1199,7 +1203,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     project = None
 
     if is_recording:
-        from . import sleep_guard
         from .audio.engine import AudioEngine
 
         cwd = Path.cwd()
@@ -1394,7 +1397,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                         engine.mixer.reset()
                         if auto_play_next:
                             engine.start_recording(rec_path)
-                            sleep_guard.set_active(True)
                             engine.mixer.set_playing(True)
                             recording_active = True
                             auto_play_next = False
@@ -1419,7 +1421,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 engine.mixer.set_playing(False)
                                 if recording_active:
                                     engine.stop_recording()
-                                    sleep_guard.set_active(False)
                                 if rec_path.exists():
                                     rec_path.unlink()
                                 click.echo("\nQuitting inspiration mode.")
@@ -1435,7 +1436,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 else:
                                     if not recording_active:
                                         engine.start_recording(rec_path)
-                                        sleep_guard.set_active(True)
                                         click.echo(f"  [rec] Recording take {take_num}: {fname}")
                                         recording_active = True
                                     engine.mixer.set_playing(True)
@@ -1446,7 +1446,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 engine.mixer.set_playing(False)
                                 if recording_active:
                                     engine.stop_recording()
-                                    sleep_guard.set_active(False)
                                     if rec_path.exists():
                                         rec_path.unlink()
                                     recording_active = False
@@ -1470,7 +1469,6 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
                                 click.echo(f"  Volume: {int(volume * 100)}%")
                         if recording_active:
                             engine.stop_recording()
-                            sleep_guard.set_active(False)
                         if not skip and recording_active:
                             from .project import TakeInfo
                             take = TakeInfo(instrument=instrument, take_number=take_num, filename=fname)

@@ -1,14 +1,17 @@
-"""Keeps the display awake while a recording (or video check) is in
-progress, so a long take doesn't get cut short by the screen locking or the
-system suspending mid-recording.
+"""Keeps the *UI's own* display awake while a recording (or video check) is
+in progress, so a long take doesn't get cut short by the screen locking or
+the system suspending mid-recording.
 
-The Tk UI drives this via `AppState.recording_active` — see its setter.
-CLI/headless entry points that don't go through AppState (`start-session`,
-`takeloom server`) instead call `track_backend()` directly. Also what keeps
-a Remote client's own display awake while it's just watching a session
-recording on another machine — see AppState.recording_active's docstring
-and record.py's _update_recording_active, which both apply regardless of
-whether app_state.backend is local or remote.
+Driven entirely by the Tk UI's `AppState.recording_active` — see its
+setter. Deliberately not wired up anywhere headless (`takeloom server`,
+the CLI's `start-session`/`inspiration` commands): a machine with nobody
+watching its screen has no reason to hold its own screensaver/sleep off
+just because a recording happens to be running on it — only a UI actually
+being looked at does. That includes a Remote client just watching a
+session recording on another machine, not only a local one — see
+AppState.recording_active's docstring and record.py's
+_update_recording_active, which both apply regardless of whether
+app_state.backend is local or remote.
 
 On Linux, two independent things need holding off, not one:
 systemd-inhibit's idle/sleep/lid locks stop logind from actually
@@ -27,11 +30,6 @@ import ctypes
 import os
 import subprocess
 import sys
-
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .backend import Backend
 
 _ES_CONTINUOUS = 0x80000000
 _ES_SYSTEM_REQUIRED = 0x00000001
@@ -115,26 +113,3 @@ def set_active(active: bool) -> None:
 @atexit.register
 def _cleanup() -> None:
     set_active(False)
-
-
-def track_backend(backend: "Backend") -> None:
-    """Subscribe to `backend`'s events and keep the display awake for as
-    long as a take or video check is in progress on it — same "waiting" (armed/
-    counting in) or "recording" phase, or an in-progress video check, that
-    `ui/record.py`'s `_update_recording_active` treats as active. For
-    CLI/headless callers (`start-session`, `takeloom server`) that have no
-    AppState to drive `set_active()` for them.
-    """
-    phases = {"recording_status": None, "video_check_status": None}
-
-    def _on_event(event: str, data: dict) -> None:
-        phase = data.get("phase")
-        if phase is None or event not in phases:
-            return
-        phases[event] = phase
-        set_active(
-            phases["recording_status"] in ("waiting", "recording")
-            or phases["video_check_status"] == "recording"
-        )
-
-    backend.on_event(_on_event)
