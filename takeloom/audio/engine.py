@@ -174,6 +174,7 @@ class AudioEngine:
         self._peak_level = float(np.max(np.abs(mono)))
 
         # Playback output: mix backing track + input monitoring
+        mix_position = self.mixer.position  # captured before read() advances it — see stream_mix below
         mix = self.mixer.read(frames)  # always stereo, shape (frames, 2)
         self._backing_peak_level = float(np.max(np.abs(mix)))
 
@@ -200,7 +201,23 @@ class AudioEngine:
         if self.mix_recorder:
             self.mix_recorder.write(full_mix)
         if self._stream_sink:
-            self._stream_sink(full_mix)
+            # The live stream never gets the backing track — only the
+            # instrument being recorded now, mixed with previously
+            # recorded takes of other instruments — even though it's still
+            # in the musician's headphones (outdata, above) and in the
+            # produced video (mix_recorder, above). Built from the same
+            # [mix_position, mix_position+frames) window mixer.read()
+            # above just advanced past, via read_excluding() rather than a
+            # second read() call, which would double-advance playback
+            # position.
+            stream_mix = self.mixer.read_excluding(mix_position, frames, exclude={"backing"})
+            if self.output_channels == 2:
+                stream_mix[:, 0] += monitor_mono[:, 0]
+                stream_mix[:, 1] += monitor_mono[:, 0]
+            else:
+                stream_mix = stream_mix[:, :1] + monitor_mono
+            np.clip(stream_mix, -1.0, 1.0, out=stream_mix)
+            self._stream_sink(stream_mix)
 
         # Check if song ended
         if self.mixer.is_playing and self.mixer.is_finished:

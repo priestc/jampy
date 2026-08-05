@@ -93,28 +93,49 @@ class Mixer:
         return self._position >= self.duration_frames and self.duration_frames > 0
 
     def read(self, frames: int) -> np.ndarray:
-        """Read mixed audio for the next `frames` frames.
+        """Read mixed audio for the next `frames` frames, advancing
+        playback position by `frames`.
 
         Returns stereo float32 array of shape (frames, 2).
-        If not playing, returns silence.
+        If not playing, returns silence (and does not advance).
         """
-        output = np.zeros((frames, 2), dtype=np.float32)
         if not self._playing:
-            return output
+            return np.zeros((frames, 2), dtype=np.float32)
+        output = self._sum_sources(self._position, frames, exclude=None)
+        self._position += frames
+        return output
 
+    def read_excluding(self, position: int, frames: int, exclude: set[str]) -> np.ndarray:
+        """Same summing logic as read(), for the exact [position,
+        position+frames) window a same-sized read() call elsewhere just
+        advanced past (or is about to) — but skipping any source named in
+        `exclude`, and without touching playback position/state itself.
+        Callers are responsible for passing a position that actually lines
+        up with their own read() call; this never advances anything on its
+        own, so calling both isn't a double-advance the way calling read()
+        twice per block would be.
+
+        Used to build a second, parallel mix — e.g. AudioEngine's live
+        stream feed, which needs everything read() does except the backing
+        track — alongside (not instead of) the normal read() call that
+        monitoring/recording still uses unchanged."""
+        if not self._playing:
+            return np.zeros((frames, 2), dtype=np.float32)
+        return self._sum_sources(position, frames, exclude)
+
+    def _sum_sources(self, position: int, frames: int, exclude: set[str] | None) -> np.ndarray:
+        output = np.zeros((frames, 2), dtype=np.float32)
         for source in self.sources:
-            if not source.active:
+            if not source.active or (exclude and source.name in exclude):
                 continue
             src_len = len(source.data)
-            start = self._position
+            start = position
             end = start + frames
             if start >= src_len:
                 continue
             actual_end = min(end, src_len)
             n = actual_end - start
             output[:n] += source.data[start:actual_end] * source.volume
-
-        self._position += frames
         # Clip to prevent clipping distortion
         np.clip(output, -1.0, 1.0, out=output)
         return output
