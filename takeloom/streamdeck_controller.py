@@ -129,8 +129,8 @@ _INSPIRATION_VOLUME_BUTTONS: list[tuple] = [
 # monitor-mode toggle are always available so their active_state is None,
 # while Restart only means anything mid-take and is dimmed otherwise.
 _RECORDING_TOGGLE: tuple = (0, None, None, "r", None, None, None)  # rendered by update_recording_page
-_RECORDING_NEXT: tuple = (1, "skip", "Next", "n", None, (0, 160, 220), (0, 160, 220))
-_RECORDING_RESTART: tuple = (2, "prev", "Restart", "b", "recording", (255, 140, 0), (55, 35, 10))
+_RECORDING_NEXT: tuple = (2, "skip", "Next", "n", None, (0, 160, 220), (0, 160, 220))
+_RECORDING_RESTART: tuple = (1, "prev", "Restart", "b", "recording", (255, 140, 0), (55, 35, 10))
 RECORDING_MONITOR_TOGGLE_KEY_INDEX = 3
 _RECORDING_MONITOR_TOGGLE: tuple = (
     RECORDING_MONITOR_TOGGLE_KEY_INDEX, None, None, "m", None, None, None,
