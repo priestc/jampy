@@ -99,6 +99,15 @@ Start a new session with a different instrument (e.g. "bass"). The backing track
 
 To record virtual instruments, software synths, or system audio, you need a virtual audio loopback device. See [Desktop Audio Capture Setup](docs/desktop-audio-capture.md) for instructions.
 
+### Live Streaming
+
+The GUI's Streaming tab can push every session live to YouTube over RTMP — just paste a
+stream key from YouTube Studio and enable it. Connecting a YouTube account is optional
+and only needed if you also want each session's stream auto-titled with the studio,
+musician, project, and date; that requires creating your own free Google Cloud OAuth
+credentials. See [YouTube Streaming Setup](docs/youtube-streaming-setup.md) for the
+steps, and why it can't just be a one-click sign-in.
+
 ## Project Structure
 
 Each project creates this directory layout:
