@@ -591,7 +591,9 @@ def update_setlist() -> None:
     removed = 0
     kept_tracks = []
     for track in project.setlist.tracks:
-        if track.backing_track in found_files:
+        # Filter slots have no backing file at all (backing_track is
+        # always "") — never removed here regardless of found_files.
+        if track.is_inspiration_filter or track.backing_track in found_files:
             kept_tracks.append(track)
         else:
             click.echo(f"  - {track.backing_track} (removed)")

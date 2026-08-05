@@ -84,3 +84,6 @@ message if a session couldn't set a title for this reason).
   A blank value (e.g. no musician set for an instrument) just disappears from the
   rendered text rather than being smoothed over — edit the template if that leaves
   stray punctuation you don't want.
+- **Description footer:** every broadcast's description always ends with "Made with
+  Takeloom" and a link back to this repo, appended after your own description
+  template regardless of what it says.

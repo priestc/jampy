@@ -54,6 +54,18 @@ def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dic
     return tracks
 
 
+def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list[dict]:
+    """Query the inspiration server for every track matching one arbitrary
+    filter dict (e.g. {"artist": "Miles Davis"} or {"genre": "Rock"}) —
+    the same underlying query as query_inspiration_tracks's per-project
+    filters, for one filter given directly rather than read from
+    setlist.json. Backs a setlist "inspiration filter" slot's random draw
+    each session — see backend.py's _resolve_filter_slot."""
+    if not filter_criteria:
+        raise InspirationError("This filter slot has no filter criteria set.")
+    return _post_track_query(config, [filter_criteria])
+
+
 def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
     """Query radioserver directly by artist and/or title, independent of a
     project's own configured inspiration filters — backs the Add to

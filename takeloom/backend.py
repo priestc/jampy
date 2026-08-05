@@ -17,6 +17,7 @@ be invoked from a non-UI thread for the same reason.
 from __future__ import annotations
 
 import json
+import random
 import shutil
 import socket
 import tempfile
@@ -196,6 +197,15 @@ class Backend(ABC):
         added, instead of add_inspiration_backing_track's fuzzier
         search-then-guess. `track_info` is one of those track dicts
         (id/artist/title/year/format/duration)."""
+        ...
+
+    @abstractmethod
+    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
+        """Add a standing setlist "slot" that draws a random track matching
+        `filter_criteria` (e.g. {"artist": "Miles Davis"} or {"genre":
+        "Rock"}) fresh each session, instead of one fixed song — see
+        TrackEntry's docstring and backend.py's _resolve_filter_slot_for_
+        session. `label` is the slot's display name in the Setlist list."""
         ...
 
     # --- inspiration ---
@@ -629,13 +639,34 @@ class _ActiveSession:
     current_track: TrackEntry | None = None
     current_track_index: int | None = None
     playing: bool = False
+    # Position in the setlist's own order to resume _advance_locked's scan
+    # from — NOT the same as current_track_index once a filter slot has
+    # been resolved this session: current_track_index then points at the
+    # resolved concrete track whichever position find_or_add_inspiration_
+    # track happened to add it at (append at the end), while this stays at
+    # the filter slot's own position, so auto-advance continues through
+    # the rest of the setlist in order instead of jumping to wherever the
+    # resolved track landed. Identical to current_track_index for every
+    # other case (unaffected — matches pre-existing behavior exactly).
+    setlist_scan_index: int | None = None
     # Setlist indices that completed a take *during this session* — the
     # setlist itself isn't updated until post-processing, so auto-advance
-    # has to remember these itself to not offer the same song twice.
+    # has to remember these itself to not offer the same song twice. A
+    # filter slot's own index is added here the moment it's resolved
+    # (see _resolve_filter_slot_for_session), not when a take completes —
+    # otherwise it would keep getting redrawn every auto-advance cycle
+    # within this same session, since its own preferred_takes never gets
+    # a take (the resolved concrete track's does).
     completed_track_indices: set = field(default_factory=set)
     # Inspiration-track ids added to the setlist by this session's track
-    # loads — post-processing removes any that ended up with no take at all.
+    # loads — post-processing removes any that ended up with no take at
+    # all. Also covers a filter slot's resolved pick, same reasoning.
     added_inspiration_ids: set = field(default_factory=set)
+    # original filter-slot index -> resolved concrete track's index, for
+    # this session only — a filter slot revisited later in the same
+    # session (e.g. a manual reselect) gets the same resolved track back
+    # rather than a fresh random draw each time.
+    resolved_filter_picks: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -918,6 +949,13 @@ class LocalBackend(Backend):
         project = self._open_project(project_name)
         config = self.get_config()
         return self._add_inspiration_entry(project, config, track_info, on_progress)
+
+    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
+        if not filter_criteria:
+            raise BackendError("Enter at least one filter field (artist and/or genre).")
+        project = self._open_project(project_name)
+        entry = project.add_inspiration_filter_slot(label, filter_criteria)
+        return entry.to_dict()
 
     @staticmethod
     def _add_inspiration_entry(
@@ -1219,8 +1257,9 @@ class LocalBackend(Backend):
                 if req.track_source == "setlist":
                     if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
                         raise BackendError("Invalid track selection.")
-                    index = req.track_index
-                    track = project.setlist.tracks[index]
+                    scan_index = req.track_index
+                    track = project.setlist.tracks[scan_index]
+                    track, index = self._resolve_filter_slot_for_session(session, config, track, scan_index)
                 elif req.track_source == "inspiration":
                     if not req.inspiration_info:
                         raise BackendError("No inspiration track selected.")
@@ -1236,6 +1275,7 @@ class LocalBackend(Backend):
                         session.added_inspiration_ids.add(track.inspiration_track_id)
                         project.save_setlist()
                     index = project.setlist.tracks.index(track)
+                    scan_index = index
                 else:
                     raise BackendError("Select a track from the Setlist or Inspiration list first.")
 
@@ -1247,6 +1287,7 @@ class LocalBackend(Backend):
                         track_index=session.current_track_index, track_name=session.current_track.name,
                     )
                 self._load_track_locked(session, track, index, config)
+                session.setlist_scan_index = scan_index
             except BackendError:
                 if opened_here:
                     self._abort_empty_session_locked(session)
@@ -1306,6 +1347,68 @@ class LocalBackend(Backend):
             "track_loaded", frame=engine.session_frames, track_index=index, track_name=track.name,
         )
 
+    def _resolve_filter_slot(
+        self, project: Project, config: StudioConfig, track: TrackEntry, persist: bool = True,
+    ) -> tuple[TrackEntry, bool]:
+        """Draw one random track matching `track.inspiration_filter` from
+        the inspiration server and get-or-add it as a real setlist entry —
+        the same mechanism as picking a specific track off the Inspiration
+        tab (see find_or_add_inspiration_track). A non-filter track passes
+        through unchanged.
+
+        Returns (resolved_track, was_newly_added) — was_newly_added lets a
+        real session (unlike Video Check, which passes persist=False and
+        ignores it) track the pick the same way an ad-hoc Inspiration-tab
+        pick already is (see _ActiveSession.added_inspiration_ids), so a
+        draw nobody ends up recording doesn't linger in the setlist
+        forever. Always draws fresh — callers that want "the same pick
+        reused for the rest of one session" (start_recording/
+        _advance_locked) use _resolve_filter_slot_for_session instead,
+        which wraps this with that caching."""
+        if not track.is_inspiration_filter:
+            return track, False
+        from .inspiration import InspirationError, find_or_add_inspiration_track, search_tracks_by_filter
+        try:
+            matches = search_tracks_by_filter(config, track.inspiration_filter)
+        except InspirationError as e:
+            raise BackendError(str(e)) from e
+        if not matches:
+            raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
+        existing_ids = {t.inspiration_track_id for t in project.setlist.tracks if t.inspiration_track_id}
+        track_info = random.choice(matches)
+        resolved = find_or_add_inspiration_track(project, track_info)
+        was_new = resolved.inspiration_track_id not in existing_ids
+        if persist:
+            project.save_setlist()
+        return resolved, was_new
+
+    def _resolve_filter_slot_for_session(
+        self, session: "_ActiveSession", config: StudioConfig, track: TrackEntry, index: int,
+    ) -> tuple[TrackEntry, int]:
+        """_resolve_filter_slot(), cached for the rest of `session` — a
+        filter slot revisited later in the same session (e.g. a manual
+        reselect) gets the same resolved track back rather than a fresh
+        random draw each time. Also marks the filter slot's own `index` as
+        completed for this session (session.completed_track_indices) the
+        moment it's drawn, regardless of whether the resulting take itself
+        later succeeds — otherwise _advance_locked would keep re-offering
+        the same filter slot indefinitely within one session, since the
+        slot's own preferred_takes never actually gets a take (the
+        resolved concrete track does). A non-filter track passes through
+        unchanged (and isn't cached — nothing to cache)."""
+        if not track.is_inspiration_filter:
+            return track, index
+        cached_index = session.resolved_filter_picks.get(index)
+        if cached_index is not None:
+            return session.project.setlist.tracks[cached_index], cached_index
+        resolved, was_new = self._resolve_filter_slot(session.project, config, track)
+        resolved_index = session.project.setlist.tracks.index(resolved)
+        if was_new:
+            session.added_inspiration_ids.add(resolved.inspiration_track_id)
+        session.resolved_filter_picks[index] = resolved_index
+        session.completed_track_indices.add(index)
+        return resolved, resolved_index
+
     def _start_playback_locked(self, session: "_ActiveSession") -> None:
         """Start the loaded track's backing from 0:00 — the moment a take
         segment begins on the session timeline. Called with
@@ -1332,11 +1435,13 @@ class LocalBackend(Backend):
         still needs a take for the session's instrument — skipping both
         tracks with takes already on disk and ones completed earlier in
         this same session (the setlist doesn't learn about those until
-        post-processing). Returns the loaded track, or None (emitting a
-        "waiting" status) when nothing's left. Called with
-        self._record_lock held; playback must already be stopped."""
+        post-processing). Returns the loaded track (resolved, if the
+        setlist position found is a filter slot — see
+        _resolve_filter_slot_for_session), or None (emitting a "waiting"
+        status) when nothing's left. Called with self._record_lock held;
+        playback must already be stopped."""
         tracks = session.project.setlist.tracks
-        start = (session.current_track_index + 1) if session.current_track_index is not None else 0
+        start = (session.setlist_scan_index + 1) if session.setlist_scan_index is not None else 0
         index = None
         for i in range(start, len(tracks)):
             if i in session.completed_track_indices:
@@ -1353,8 +1458,11 @@ class LocalBackend(Backend):
                 "status": status_prefix + "No more tracks need a take — press Stop to end the session.",
             })
             return None
-        self._load_track_locked(session, tracks[index], index, self.get_config())
-        return tracks[index]
+        config = self.get_config()
+        track, resolved_index = self._resolve_filter_slot_for_session(session, config, tracks[index], index)
+        self._load_track_locked(session, track, resolved_index, config)
+        session.setlist_scan_index = index
+        return track
 
     def _abort_empty_session_locked(self, session: "_ActiveSession") -> None:
         """Roll back a session start_recording() itself just opened when its
@@ -1693,6 +1801,10 @@ class LocalBackend(Backend):
                 if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
                     raise BackendError("Invalid track selection.")
                 track = project.setlist.tracks[req.track_index]
+                # persist=False: same as the ad-hoc inspiration branch below
+                # — video check never calls save_setlist(), so a filter
+                # slot's random draw here never actually lands on disk.
+                track, _was_new = self._resolve_filter_slot(project, config, track, persist=False)
             elif req.track_source == "inspiration":
                 if not req.inspiration_info:
                     raise BackendError("No inspiration track selected.")

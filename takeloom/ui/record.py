@@ -465,6 +465,11 @@ class RecordFrame(ttk.Frame):
         self.inspiration_listbox.bind("<<ListboxSelect>>", self._on_inspiration_select)
 
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
+        if track.is_inspiration_filter:
+            # Never has a take of its own (see TrackEntry's docstring) —
+            # no duration/checkmark to show, just what it draws from.
+            criteria = ", ".join(f"{k}: {v}" for k, v in track.inspiration_filter.items())
+            return f"🎲 {track.name}  ({criteria})"
         dur = format_duration(track.duration_seconds)
         take = track.get_take_for_instrument(inst_name)
         if take is None:

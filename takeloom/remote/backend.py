@@ -124,6 +124,12 @@ class RemoteBackend(Backend):
             timeout=DOWNLOAD_TIMEOUT,
         )
 
+    def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
+        return self._client.call(
+            "add_inspiration_filter_slot",
+            {"project_name": project_name, "label": label, "filter_criteria": filter_criteria},
+        )
+
     # --- inspiration ---
 
     def query_inspiration_tracks(self, project_name: str) -> list[dict]:

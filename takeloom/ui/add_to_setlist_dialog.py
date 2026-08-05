@@ -197,11 +197,16 @@ class _AutocompleteEntry(ttk.Frame):
 
 
 class AddToSetlistDialog(tk.Toplevel):
-    """Add a single backing track to `project_name`'s setlist. Three
-    tabs — File, YouTube URL, Inspiration — share one Add button that
-    acts on whichever tab is currently selected; switching tabs doesn't
-    lose anything typed into the others. `on_track_added` fires once, on
-    success, right before the dialog closes itself."""
+    """Add a single backing track to `project_name`'s setlist. Four
+    tabs — File, YouTube URL, Inspiration, Inspiration Filter — share one
+    Add button that acts on whichever tab is currently selected; switching
+    tabs doesn't lose anything typed into the others. `on_track_added`
+    fires once, on success, right before the dialog closes itself.
+
+    Inspiration Filter is different from the other three: it doesn't add
+    one fixed song, but a standing "slot" that draws a random track
+    matching its filter fresh every session — see TrackEntry's docstring
+    in project.py and backend.py's _resolve_filter_slot_for_session."""
 
     _FILE_PLACEHOLDER = "Drag an audio/video file here, or click Browse..."
 
@@ -232,6 +237,7 @@ class AddToSetlistDialog(tk.Toplevel):
         self._build_file_tab()
         self._build_youtube_tab()
         self._build_inspiration_tab()
+        self._build_inspiration_filter_tab()
 
         self.progress = ttk.Progressbar(frame, mode="determinate", maximum=100, length=400)
         self.progress.pack(fill="x", pady=(10, 0))
@@ -369,6 +375,36 @@ class AddToSetlistDialog(tk.Toplevel):
         year = track.get("year")
         return f"{track.get('title', '')} ({year})" if year else track.get("title", "")
 
+    # --- Inspiration Filter tab ---
+
+    def _build_inspiration_filter_tab(self) -> None:
+        tab = ttk.Frame(self.notebook, padding=12)
+        self.notebook.add(tab, text="Inspiration Filter")
+
+        ttk.Label(
+            tab, text="Adds a slot to the setlist that draws a random track matching this filter "
+                      "every session, instead of one fixed song.",
+            foreground="#666666", wraplength=380, justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        ttk.Label(tab, text="Label").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.filter_label_var = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.filter_label_var, width=30).grid(row=1, column=1, sticky="ew")
+
+        def fetch_filter_artists(text: str) -> list[tuple[str, None]]:
+            return [(name, None) for name in self._backend.search_inspiration_artists(text)]
+
+        ttk.Label(tab, text="Artist").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.filter_artist_field = _AutocompleteEntry(tab, fetch=fetch_filter_artists)
+        self.filter_artist_field.grid(row=2, column=1, sticky="ew")
+
+        ttk.Label(tab, text="Genre").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.filter_genre_var = tk.StringVar()
+        ttk.Entry(tab, textvariable=self.filter_genre_var, width=30).grid(row=3, column=1, sticky="ew")
+        tab.columnconfigure(1, weight=1)
+
+        self.filter_artist_field.bind_return(lambda _e: self._on_add())
+
     # --- add ---
 
     def _on_window_close(self) -> None:
@@ -401,7 +437,7 @@ class AddToSetlistDialog(tk.Toplevel):
                 return backend.add_youtube_backing_track(project, url, on_progress=on_progress)
 
             self._start_add(do_youtube)
-        else:
+        elif current == "Inspiration":
             artist = self.artist_field.get().strip()
             title = self.title_field.get().strip()
             if not artist and not title:
@@ -422,6 +458,19 @@ class AddToSetlistDialog(tk.Toplevel):
                 return backend.add_inspiration_backing_track(project, artist, title, on_progress=on_progress)
 
             self._start_add(do_inspiration)
+        else:
+            label = self.filter_label_var.get().strip()
+            filter_artist = self.filter_artist_field.get().strip()
+            filter_genre = self.filter_genre_var.get().strip()
+            if not label:
+                messagebox.showerror("Cannot add", "Enter a label for this filter slot.", parent=self)
+                return
+            if not filter_artist and not filter_genre:
+                messagebox.showerror("Cannot add", "Enter an artist and/or genre to filter by.", parent=self)
+                return
+            filter_criteria = {k: v for k, v in {"artist": filter_artist, "genre": filter_genre}.items() if v}
+
+            self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 
     def _start_add(self, call: Callable[[Backend, str], dict]) -> None:
         self._working = True

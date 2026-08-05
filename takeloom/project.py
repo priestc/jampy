@@ -24,13 +24,27 @@ class TakeInfo:
 
 @dataclass
 class TrackEntry:
-    """A single song/track in the setlist."""
+    """A single song/track in the setlist.
+
+    A track with is_inspiration_filter=True is a standing "slot" rather
+    than a fixed song: backing_track stays "" (there's no file — this
+    entry is never itself loaded for playback), and inspiration_filter
+    holds the filter criteria (e.g. {"artist": "Miles Davis"} or
+    {"genre": "Rock"}) a session resolves into an actual, concrete track
+    each time this slot comes up — see backend.py's
+    _resolve_filter_slot_for_session. preferred_takes on a filter slot
+    itself is always empty; takes belong to whichever concrete track a
+    given session happened to draw, exactly like an ad-hoc Inspiration-tab
+    pick.
+    """
     name: str
     backing_track: str  # relative path to backing track file
     duration_seconds: float = 0.0
     volume: int = 100  # playback volume percentage
     takes_volume: int = 100  # playback volume for other instruments' takes
     inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
+    is_inspiration_filter: bool = False
+    inspiration_filter: dict = field(default_factory=dict)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
 
@@ -56,6 +70,8 @@ class TrackEntry:
             volume=data.get("volume", 100),
             takes_volume=data.get("takes_volume", 100),
             inspiration_track_id=data.get("inspiration_track_id", 0),
+            is_inspiration_filter=data.get("is_inspiration_filter", False),
+            inspiration_filter=data.get("inspiration_filter", {}),
             preferred_takes=takes,
         )
 
@@ -153,6 +169,18 @@ class Project:
         if self.setlist_path.exists():
             data = json.loads(_strip_json_comments(self.setlist_path.read_text()))
             self.setlist = Setlist.from_dict(data)
+
+    def add_inspiration_filter_slot(self, label: str, filter_criteria: dict) -> TrackEntry:
+        """Add a standing "draw a random song from this filter each
+        session" slot to the setlist — see TrackEntry's docstring. Unlike
+        add_backing_track, there's no file to copy; the slot itself is
+        never played directly."""
+        entry = TrackEntry(
+            name=label, backing_track="", is_inspiration_filter=True, inspiration_filter=dict(filter_criteria),
+        )
+        self.setlist.add_track(entry)
+        self.save_setlist()
+        return entry
 
     def add_backing_track(
         self, source_path: Path, track_name: str | None = None, duration_seconds: float = 0.0,

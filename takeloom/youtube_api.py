@@ -237,6 +237,9 @@ def find_stream_id(access_token: str, stream_key: str) -> str:
     )
 
 
+ATTRIBUTION_FOOTER = "\n\nMade with Takeloom\nhttps://github.com/priestc/takeloom"
+
+
 def create_and_bind_broadcast(
     access_token: str, stream_id: str, title: str, description: str, privacy_status: str,
 ) -> str:
@@ -245,13 +248,21 @@ def create_and_bind_broadcast(
     onto YouTube. enableAutoStart/enableAutoStop (plus disabling the
     monitor-stream health-check step) let YouTube flip the broadcast live/
     complete on its own as the bound stream's RTMP data starts/stops, with
-    no manual transition() call needed to go live."""
+    no manual transition() call needed to go live.
+
+    ATTRIBUTION_FOOTER is appended to every description here — at the
+    actual API call, not baked into the user's own editable description
+    template — so it's always present regardless of what that template
+    says, and the user's own text is truncated first (reserving room for
+    it) rather than the footer risking getting pushed out by a long
+    description."""
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    full_description = description[:MAX_DESCRIPTION_LENGTH - len(ATTRIBUTION_FOOTER)] + ATTRIBUTION_FOOTER
     broadcast = _api_request(
         access_token, "POST", "liveBroadcasts", params={"part": "id,snippet,status,contentDetails"},
         body={
             "snippet": {
-                "title": title[:MAX_TITLE_LENGTH], "description": description[:MAX_DESCRIPTION_LENGTH],
+                "title": title[:MAX_TITLE_LENGTH], "description": full_description,
                 "scheduledStartTime": now_iso,
             },
             "status": {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False},
