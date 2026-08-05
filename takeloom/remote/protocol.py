@@ -105,6 +105,9 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
     if op == "next_track":
         backend.next_track()
         return {}
+    if op == "redraw_current_track":
+        backend.redraw_current_track()
+        return {}
     if op == "is_recording":
         return {"recording": backend.is_recording()}
     if op == "adjust_backing_volume":

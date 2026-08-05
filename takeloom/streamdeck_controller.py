@@ -135,6 +135,15 @@ RECORDING_MONITOR_TOGGLE_KEY_INDEX = 3
 _RECORDING_MONITOR_TOGGLE: tuple = (
     RECORDING_MONITOR_TOGGLE_KEY_INDEX, None, None, "m", None, None, None,
 )  # rendered by update_monitoring_mode
+# Always available (like Next) rather than dimmed/enabled by phase — the
+# backend itself is what actually decides whether there's anything to
+# redraw (the current track must be a setlist "inspiration filter" slot's
+# draw; see backend.py's redraw_current_track), so pressing this with
+# nothing applicable just logs a message instead of doing anything,
+# same as Next with nothing left in the setlist. Unlike Next, which
+# advances to the next actual setlist position, this replaces whatever's
+# currently loaded with a different random draw from the same filter.
+_RECORDING_REDRAW: tuple = (10, "dice", "Redraw", "d", None, (150, 90, 220), (150, 90, 220))
 
 # Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
 # Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
@@ -146,7 +155,15 @@ PRODUCTION_MONITOR_COLOR = (0, 160, 200)
 # RECORDING_BUTTONS/RECORDING_VOLUME_BUTTONS are public (no leading
 # underscore): the Tk UI's on-screen emulator (ui/streamdeck_emulator.py)
 # draws the exact same button set as the physical device from these tables.
-RECORDING_BUTTONS: list[tuple] = [_RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE]
+# Redraw sits at key index 10, past the volume block below (4-9) rather
+# than shifting any of them — decks too small to have a key 10 (e.g. the
+# 4-key/dial Stream Deck Plus, the 6-key Mini) just drop it via
+# use_recording_layout's key_count filtering, same as any other button
+# that doesn't fit; the Tk UI's on-screen emulator always has room for it
+# regardless of what physical deck (if any) is connected.
+RECORDING_BUTTONS: list[tuple] = [
+    _RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE, _RECORDING_REDRAW,
+]
 
 RECORDING_VOLUME_BUTTONS: list[tuple] = [
     (4, "vol_dn",   "Vol -",   "l", None, (0,   120, 200), (0,   120, 200)),
@@ -217,6 +234,12 @@ def _draw_icon(draw: "ImageDraw.ImageDraw", icon: str, cx: int, cy: int, size: i
     elif icon == "quit":       # ✕
         draw.line([cx - r, cy - r, cx + r, cy + r], fill=f, width=lw)
         draw.line([cx + r, cy - r, cx - r, cy + r], fill=f, width=lw)
+
+    elif icon == "dice":       # die face: rounded square, 3 diagonal pips
+        draw.rounded_rectangle([cx - r, cy - r, cx + r, cy + r], radius=max(2, r // 3), outline=f, width=lw)
+        pip_r = max(2, size // 10)
+        for dx, dy in ((-r // 2, -r // 2), (0, 0), (r // 2, r // 2)):
+            draw.ellipse([cx + dx - pip_r, cy + dy - pip_r, cx + dx + pip_r, cy + dy + pip_r], fill=f)
 
     elif icon == "headphones":
         # Headband arc over two ear cups

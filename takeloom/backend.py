@@ -278,6 +278,19 @@ class Backend(ABC):
         ...
 
     @abstractmethod
+    def redraw_current_track(self) -> None:
+        """Replace the currently loaded track with a different random draw
+        from the same setlist "inspiration filter" slot (see TrackEntry's
+        docstring in project.py) — unlike next_track(), this stays at the
+        same setlist position rather than advancing to the next one. The
+        in-progress song, if any, is logged as skipped (no take), same as
+        next_track(). Raises BackendError if nothing's loaded or the
+        current track isn't a filter slot's draw — callers driving this
+        from a Stream Deck key just log that rather than treating it as
+        fatal (see recording_driver.py)."""
+        ...
+
+    @abstractmethod
     def is_recording(self) -> bool: ...
 
     def get_levels(self) -> tuple[float, float]:
@@ -1337,7 +1350,9 @@ class LocalBackend(Backend):
             "track_loaded", frame=engine.session_frames, track_index=index, track_name=track.name,
         )
 
-    def _resolve_filter_slot(self, config: StudioConfig, track: TrackEntry, instrument_name: str) -> TrackEntry:
+    def _resolve_filter_slot(
+        self, config: StudioConfig, track: TrackEntry, instrument_name: str, exclude_id: int | None = None,
+    ) -> TrackEntry:
         """Resolve `track` for `instrument_name` to record. A non-filter
         track passes through unchanged.
 
@@ -1351,12 +1366,21 @@ class LocalBackend(Backend):
         gains a new top-level entry here — see TrackEntry's docstring and
         _resolve_filter_slot_for_session's caching wrapper, which is what
         actually gets called during a session; this is the pure "pick one"
-        step, split out for testability."""
+        step, split out for testability.
+
+        `exclude_id` (redraw_current_track's use) leaves one specific
+        inspiration_track_id out of consideration — so "give me a
+        different one" doesn't just hand back what's already loaded —
+        falling back to allowing it anyway if excluding it would leave no
+        candidates at all (a filter matching only one song shouldn't error
+        out just because that one song is the one being redrawn away
+        from)."""
         if not track.is_inspiration_filter:
             return track
         reusable = [
             entry for entry in track.filter_takes.values()
             if entry.preferred_takes and instrument_name not in entry.preferred_takes
+            and entry.inspiration_track_id != exclude_id
         ]
         if reusable:
             return random.choice(reusable)
@@ -1367,7 +1391,8 @@ class LocalBackend(Backend):
             raise BackendError(str(e)) from e
         if not matches:
             raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
-        return build_inspiration_track_entry(random.choice(matches))
+        candidates = [m for m in matches if m.get("id") != exclude_id] or matches
+        return build_inspiration_track_entry(random.choice(candidates))
 
     def _resolve_filter_slot_for_session(
         self, session: "_ActiveSession", config: StudioConfig, track: TrackEntry, index: int,
@@ -1540,6 +1565,33 @@ class LocalBackend(Backend):
                 prefix = f"Skipped '{session.current_track.name}'. "
             if self._advance_locked(session, status_prefix=prefix) is not None:
                 self._start_playback_locked(session)
+
+    def redraw_current_track(self) -> None:
+        with self._record_lock:
+            session = self._active_session
+            if session is None or session.current_track is None or session.current_track_index is None:
+                raise BackendError("Nothing is currently loaded.")
+            index = session.current_track_index
+            slot = session.project.setlist.tracks[index]
+            if not slot.is_inspiration_filter:
+                raise BackendError("The current track isn't a random draw — nothing to redraw.")
+
+            if session.playing:
+                self._log_session_event(
+                    "track_skipped", frame=session.engine.session_frames,
+                    track_index=index, track_name=session.current_track.name,
+                )
+                session.engine.mixer.set_playing(False)
+                session.playing = False
+
+            config = self.get_config()
+            # Excludes whatever's currently loaded, so "redraw" doesn't
+            # just hand the same song back (see _resolve_filter_slot).
+            exclude_id = session.current_track.inspiration_track_id
+            resolved = self._resolve_filter_slot(config, slot, session.inst.name, exclude_id=exclude_id)
+            session.resolved_filter_picks[index] = resolved
+            self._load_track_locked(session, resolved, index, config)
+            self._start_playback_locked(session)
 
     def get_active_recording_target(self) -> tuple[str, str, int] | None:
         """Returns (project_name, instrument_name, track_index) for the

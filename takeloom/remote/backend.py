@@ -180,6 +180,10 @@ class RemoteBackend(Backend):
         # Can involve a backing-track download on the server side.
         self._client.call("next_track", {}, timeout=LONG_TIMEOUT)
 
+    def redraw_current_track(self) -> None:
+        # Can involve an inspiration-server query + download on the server side.
+        self._client.call("redraw_current_track", {}, timeout=LONG_TIMEOUT)
+
     def is_recording(self) -> bool:
         return self._client.call("is_recording", {})["recording"]
 

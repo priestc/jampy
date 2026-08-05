@@ -131,6 +131,9 @@ class RecordingDeckDriver:
                     self._backend.stop_recording()
             elif key == "n":
                 self._next_track()
+            elif key == "d":
+                if self.phase in ("waiting", "recording"):
+                    self._backend.redraw_current_track()
             elif key == "b":
                 if self.phase == "recording":
                     self._backend.restart_take()
