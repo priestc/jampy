@@ -119,6 +119,10 @@ class StudioConfig:
     youtube_oauth_client_id: str = ""
     youtube_oauth_client_secret: str = ""
     youtube_oauth_refresh_token: str = ""  # "" means not connected
+    # Filled in per session by render_stream_template() — see its docstring
+    # for the available {placeholder} names.
+    youtube_title_template: str = "{date} * {musician} * {project}"
+    youtube_description_template: str = "{studio}, {studio-location}, {instrument name}"
     youtube_broadcast_visibility: str = "unlisted"  # "public" | "unlisted" | "private"
     window_width: int = 1100  # remembered main window size, so it reopens as it was left
     window_height: int = 650

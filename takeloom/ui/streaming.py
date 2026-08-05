@@ -170,6 +170,23 @@ class StreamingFrame(ttk.Frame):
         ).grid(row=row, column=1, sticky="w", pady=4)
         row += 1
 
+        ttk.Label(self, text="Title template").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.title_template_var = tk.StringVar(value=self.config_obj.youtube_title_template)
+        ttk.Entry(self, textvariable=self.title_template_var, width=48).grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+
+        ttk.Label(self, text="Description template").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.description_template_var = tk.StringVar(value=self.config_obj.youtube_description_template)
+        ttk.Entry(self, textvariable=self.description_template_var, width=48).grid(row=row, column=1, sticky="ew", pady=4)
+        row += 1
+
+        ttk.Label(
+            self,
+            text="Placeholders: {date}, {studio}, {studio-location}, {musician}, {project}, {instrument name}.",
+            foreground="#666666",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+
         connect_row = ttk.Frame(self)
         connect_row.grid(row=row, column=0, columnspan=2, sticky="w", pady=(6, 0))
         self.oauth_status_var = tk.StringVar(value=self._connection_status_text())
@@ -295,6 +312,8 @@ class StreamingFrame(ttk.Frame):
             if label == self.visibility_var.get():
                 self.config_obj.youtube_broadcast_visibility = value
                 break
+        self.config_obj.youtube_title_template = self.title_template_var.get()
+        self.config_obj.youtube_description_template = self.description_template_var.get()
 
         errors = self.config_obj.validate()
         if errors:

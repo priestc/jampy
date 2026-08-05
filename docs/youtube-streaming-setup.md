@@ -2,9 +2,8 @@
 
 Takeloom's Streaming tab can push every session live to YouTube over RTMP using just a
 stream key — no Google sign-in required. This page is only about the *optional* extra
-step: connecting a YouTube account so each session's stream gets a real title
-(studio, musician, project, and date) instead of whatever title was last set on that
-stream key.
+step: connecting a YouTube account so each session's stream gets a real title and
+description instead of whatever was last set on that stream key.
 
 ## Why you have to create your own Google Cloud project
 
@@ -77,3 +76,11 @@ message if a session couldn't set a title for this reason).
 - **Broadcast visibility:** the Streaming tab's visibility dropdown (Public / Unlisted
   / Private) controls what each session's auto-created broadcast is set to. It defaults
   to Unlisted so a first connection can't accidentally go public.
+- **Title/description templates:** the Streaming tab's "Title template" and
+  "Description template" fields control exactly what gets sent, using
+  `{placeholder}` tokens: `{date}`, `{studio}`, `{studio-location}`, `{musician}`,
+  `{project}`, `{instrument name}`. Defaults to `{date} * {musician} * {project}` for
+  the title and `{studio}, {studio-location}, {instrument name}` for the description.
+  A blank value (e.g. no musician set for an instrument) just disappears from the
+  rendered text rather than being smoothed over — edit the template if that leaves
+  stray punctuation you don't want.

@@ -1888,24 +1888,31 @@ class LocalBackend(Backend):
             })
 
     def _create_youtube_broadcast(self, config: StudioConfig, project: Project, inst) -> str | None:
-        """Best-effort: title and bind a fresh YouTube broadcast to the
-        configured stream key via the Data API (see youtube_api.py), so the
-        stream shows up on YouTube titled with the studio/musician/project/
-        date instead of whatever title (or none) was left on that stream
+        """Best-effort: title/describe and bind a fresh YouTube broadcast
+        to the configured stream key via the Data API (see youtube_api.py),
+        rendering the user's own title/description templates (Streaming
+        tab) instead of whatever title (or none) was left on that stream
         key from last time. Returns the new broadcast's id (for
         _complete_youtube_broadcast at session end), or None on any
         failure — which never blocks the RTMP stream itself, just leaves
-        its title alone."""
+        its title/description alone."""
         from .youtube_api import (
-            YouTubeAPIError, build_stream_title, create_and_bind_broadcast, find_stream_id, refresh_access_token,
+            YouTubeAPIError, create_and_bind_broadcast, find_stream_id, refresh_access_token, render_stream_template,
         )
         try:
             access_token = refresh_access_token(
                 config.youtube_oauth_client_id, config.youtube_oauth_client_secret, config.youtube_oauth_refresh_token,
             )
             stream_id = find_stream_id(access_token, config.youtube_stream_key)
-            title = build_stream_title(config.studio_name, inst.musician or config.studio_musician, project.name)
-            broadcast_id = create_and_bind_broadcast(access_token, stream_id, title, config.youtube_broadcast_visibility)
+            template_values = dict(
+                studio=config.studio_name, studio_location=config.studio_location,
+                musician=inst.musician or config.studio_musician, project=project.name, instrument=inst.name,
+            )
+            title = render_stream_template(config.youtube_title_template, **template_values)
+            description = render_stream_template(config.youtube_description_template, **template_values)
+            broadcast_id = create_and_bind_broadcast(
+                access_token, stream_id, title, description, config.youtube_broadcast_visibility,
+            )
             # The broadcast id is proof YouTube actually accepted the create
             # + bind calls (an HTTPError anywhere in that chain would have
             # been caught below instead), not just that we made the request.

@@ -39,9 +39,11 @@ YOUTUBE_API_BASE = "https://www.googleapis.com/youtube/v3"
 # no narrower official scope that still covers broadcast management.
 YOUTUBE_SCOPE = "https://www.googleapis.com/auth/youtube"
 
-# YouTube truncates/rejects titles beyond this regardless; enforced here so
-# the error (if any) is ours to word, not a raw API rejection.
+# YouTube truncates/rejects titles/descriptions beyond these regardless;
+# enforced here so the error (if any) is ours to word, not a raw API
+# rejection.
 MAX_TITLE_LENGTH = 100
+MAX_DESCRIPTION_LENGTH = 5000
 
 
 class YouTubeAPIError(Exception):
@@ -235,18 +237,23 @@ def find_stream_id(access_token: str, stream_key: str) -> str:
     )
 
 
-def create_and_bind_broadcast(access_token: str, stream_id: str, title: str, privacy_status: str) -> str:
-    """Create a titled liveBroadcast and bind it to `stream_id`, returning
-    the new broadcast's id. This is what actually gets the title onto
-    YouTube. enableAutoStart/enableAutoStop (plus disabling the monitor-
-    stream health-check step) let YouTube flip the broadcast live/complete
-    on its own as the bound stream's RTMP data starts/stops, with no
-    manual transition() call needed to go live."""
+def create_and_bind_broadcast(
+    access_token: str, stream_id: str, title: str, description: str, privacy_status: str,
+) -> str:
+    """Create a titled+described liveBroadcast and bind it to `stream_id`,
+    returning the new broadcast's id. This is what actually gets the title
+    onto YouTube. enableAutoStart/enableAutoStop (plus disabling the
+    monitor-stream health-check step) let YouTube flip the broadcast live/
+    complete on its own as the bound stream's RTMP data starts/stops, with
+    no manual transition() call needed to go live."""
     now_iso = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S.000Z")
     broadcast = _api_request(
         access_token, "POST", "liveBroadcasts", params={"part": "id,snippet,status,contentDetails"},
         body={
-            "snippet": {"title": title[:MAX_TITLE_LENGTH], "scheduledStartTime": now_iso},
+            "snippet": {
+                "title": title[:MAX_TITLE_LENGTH], "description": description[:MAX_DESCRIPTION_LENGTH],
+                "scheduledStartTime": now_iso,
+            },
             "status": {"privacyStatus": privacy_status, "selfDeclaredMadeForKids": False},
             "contentDetails": {
                 "enableAutoStart": True, "enableAutoStop": True,
@@ -274,11 +281,34 @@ def transition_broadcast(access_token: str, broadcast_id: str, status: str) -> N
     )
 
 
-def build_stream_title(studio_name: str, musician: str, project_name: str, when: datetime | None = None) -> str:
-    """Studio / musician / project / date, skipping any that are blank —
-    the same "join what's actually set" approach as video/capture.py's
-    format_watermark_text."""
+def render_stream_template(
+    template: str, *, studio: str, studio_location: str, musician: str, project: str, instrument: str,
+    when: datetime | None = None,
+) -> str:
+    """Fill in a title/description template's {placeholders} with this
+    session's details — used for both StudioConfig.youtube_title_template
+    and youtube_description_template, since both are just a template
+    string plus this same set of values.
+
+    Plain substring replacement rather than str.format(): a couple of
+    these placeholder names (`{studio-location}`, `{instrument name}`)
+    aren't valid str.format field names — a hyphen/space isn't legal in a
+    Python identifier, which is what a bare field name has to be — so
+    str.format would raise on the very defaults this is built to support.
+    A blank value (e.g. no musician set) just disappears, leaving whatever
+    punctuation/spacing the template had around it — deliberately literal,
+    since the whole point of a user-edited template is that they control
+    the exact wording, not that it gets smoothed over automatically."""
     when = when or datetime.now()
-    parts = [p for p in (studio_name, musician, project_name) if p]
-    parts.append(when.strftime("%B %d, %Y"))
-    return "  •  ".join(parts)
+    values = {
+        "{date}": when.strftime("%B %d, %Y"),
+        "{studio}": studio,
+        "{studio-location}": studio_location,
+        "{musician}": musician,
+        "{project}": project,
+        "{instrument name}": instrument,
+    }
+    result = template
+    for placeholder, value in values.items():
+        result = result.replace(placeholder, value)
+    return result
