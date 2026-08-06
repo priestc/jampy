@@ -252,15 +252,6 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                         )
                 saved += 1
 
-    # Inspiration tracks this session added that never earned any take (for
-    # any instrument) shouldn't linger in the setlist.
-    added_ids = set(data.get("added_inspiration_ids", []))
-    if added_ids:
-        project.setlist.tracks = [
-            t for t in project.setlist.tracks
-            if not (t.inspiration_track_id in added_ids and not t.preferred_takes)
-        ]
-
     project.save_setlist()
 
     # The whole-session archive video, watermarked once for the session.

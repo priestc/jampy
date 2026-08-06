@@ -71,27 +71,17 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return backend.add_local_backing_track(args["project_name"], args["source_path"], args.get("track_name"))
     if op == "add_youtube_backing_track":
         return backend.add_youtube_backing_track(args["project_name"], args["url"])
-    if op == "add_inspiration_backing_track":
-        return backend.add_inspiration_backing_track(args["project_name"], args["artist"], args["title"])
-    if op == "add_inspiration_track_by_id":
-        return backend.add_inspiration_track_by_id(args["project_name"], args["track_info"])
     if op == "add_inspiration_filter_slot":
         return backend.add_inspiration_filter_slot(args["project_name"], args["label"], args["filter_criteria"])
-    if op == "query_inspiration_tracks":
-        return {"tracks": backend.query_inspiration_tracks(args["project_name"])}
     if op == "search_inspiration_artists":
         return {"suggestions": backend.search_inspiration_artists(args["partial"])}
-    if op == "search_inspiration_titles":
-        return {"suggestions": backend.search_inspiration_titles(args["partial"], args.get("artist", ""))}
     if op == "search_inspiration_by_filter":
         return {"tracks": backend.search_inspiration_by_filter(args["filter_criteria"])}
     if op == "start_recording":
         req = StartRecordingRequest(
             project_name=args["project_name"],
             instrument_name=args["instrument_name"],
-            track_source=args["track_source"],
-            track_index=args.get("track_index"),
-            inspiration_info=args.get("inspiration_info"),
+            track_index=args["track_index"],
         )
         backend.start_recording(req)
         return {}

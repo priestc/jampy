@@ -1,6 +1,5 @@
 """Record page: pick an instrument + project, choose a track from the
-project's setlist or from your inspiration library, preview the camera,
-and record a take.
+project's setlist, preview the camera, and record a take.
 
 Everything here goes through `app_state.backend` — in local mode that's a
 `LocalBackend` talking directly to this machine's hardware; in remote mode
@@ -48,13 +47,6 @@ class RecordFrame(ttk.Frame):
 
         self._selected_track: TrackEntry | None = None
         self._selected_track_index: int | None = None
-        self._selected_inspiration_info: dict | None = None
-        self._selected_track_source: str | None = None  # "setlist" | "inspiration"
-        self._inspiration_tracks: list[dict] = []
-        # Set by _auto_select_default_track() when the setlist is empty —
-        # inspiration tracks load asynchronously, so the actual auto-select
-        # happens once _on_inspiration_loaded() gets a result.
-        self._auto_select_inspiration_pending = False
 
         # "idle" (no session) | "waiting" (session open, track cued or
         # between songs) | "recording" (backing playing). Non-idle means a
@@ -398,19 +390,14 @@ class RecordFrame(ttk.Frame):
         backend = self.app_state.backend
         self._run_backend(lambda: backend.set_compressor_settings(settings))
 
-    # --- right column: Setlist / Inspiration tabs ---
+    # --- right column: Setlist ---
 
     def _build_right(self, right: ttk.Frame) -> None:
         right.columnconfigure(0, weight=1)
         right.rowconfigure(0, weight=1)
 
-        self.notebook = notebook = ttk.Notebook(right)
-        notebook.grid(row=0, column=0, sticky="nsew")
-
-        setlist_tab = ttk.Frame(notebook)
-        self.inspiration_tab = inspiration_tab = ttk.Frame(notebook)
-        notebook.add(setlist_tab, text="Setlist")
-        notebook.add(inspiration_tab, text="Inspiration")
+        setlist_tab = ttk.Frame(right)
+        setlist_tab.grid(row=0, column=0, sticky="nsew")
 
         setlist_tab.columnconfigure(0, weight=1)
         setlist_tab.rowconfigure(2, weight=1)
@@ -442,30 +429,6 @@ class RecordFrame(ttk.Frame):
         self.setlist_listbox.bind("<Button-2>", self._on_setlist_right_click)
         self.setlist_listbox.bind("<Control-Button-1>", self._on_setlist_right_click)
 
-        inspiration_tab.columnconfigure(0, weight=1)
-        inspiration_tab.rowconfigure(2, weight=1)
-        inspiration_header = ttk.Frame(inspiration_tab)
-        inspiration_header.grid(row=0, column=0, sticky="ew", pady=(8, 0))
-        ttk.Label(inspiration_header, text="Inspiration Tracks", font=("TkDefaultFont", 11, "bold")).pack(side="left")
-        ttk.Button(inspiration_header, text="↻ Refresh", command=self._refresh_inspiration).pack(side="right")
-
-        self.inspiration_status_var = tk.StringVar(value="")
-        ttk.Label(inspiration_tab, textvariable=self.inspiration_status_var, foreground="#666666").grid(
-            row=1, column=0, sticky="w", pady=(2, 4)
-        )
-
-        inspiration_wrap = ttk.Frame(inspiration_tab)
-        inspiration_wrap.grid(row=2, column=0, sticky="nsew")
-        inspiration_scroll = ttk.Scrollbar(inspiration_wrap, orient="vertical")
-        self.inspiration_listbox = tk.Listbox(
-            inspiration_wrap, height=10, exportselection=False,
-            yscrollcommand=inspiration_scroll.set,
-        )
-        inspiration_scroll.configure(command=self.inspiration_listbox.yview)
-        self.inspiration_listbox.pack(side="left", fill="both", expand=True)
-        inspiration_scroll.pack(side="right", fill="y")
-        self.inspiration_listbox.bind("<<ListboxSelect>>", self._on_inspiration_select)
-
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring), and
@@ -483,14 +446,6 @@ class RecordFrame(ttk.Frame):
         else:
             mark = " ✓ (audio only)"
         return f"{track.name}  ({dur}){mark}"
-
-    def _inspiration_display(self, t: dict) -> str:
-        artist = t.get("artist", "Unknown")
-        title = t.get("title", "Unknown")
-        year = t.get("year", "")
-        dur = format_duration(t.get("duration") or 0)
-        year_str = f" ({year})" if year else ""
-        return f"{artist} - {title}{year_str}  {dur}"
 
     def _refresh_setlist(self) -> None:
         self.setlist_listbox.delete(0, tk.END)
@@ -511,43 +466,9 @@ class RecordFrame(ttk.Frame):
         track_word = "track" if len(tracks) == 1 else "tracks"
         self.setlist_total_var.set(f"{len(tracks)} {track_word} — {format_duration(total)} total")
 
-    def _refresh_inspiration(self) -> None:
-        self.inspiration_listbox.delete(0, tk.END)
-        self._inspiration_tracks = []
-        if not self._project_name:
-            return
-        self.inspiration_status_var.set("Loading inspiration tracks...")
-        backend = self.app_state.backend
-        project_name = self._project_name
-
-        self._run_backend(
-            lambda: backend.query_inspiration_tracks(project_name),
-            lambda tracks, error: self._on_inspiration_loaded(tracks or [], error),
-        )
-
-    def _on_inspiration_loaded(self, tracks: list[dict], error: str | None) -> None:
-        self._inspiration_tracks = tracks
-        self.inspiration_listbox.delete(0, tk.END)
-        if error:
-            self.inspiration_status_var.set(error)
-            return
-        self.inspiration_status_var.set(f"{len(tracks)} tracks")
-        for t in tracks:
-            self.inspiration_listbox.insert(tk.END, self._inspiration_display(t))
-
-        if self._auto_select_inspiration_pending:
-            self._auto_select_inspiration_pending = False
-            if tracks and self._selected_track_source is None:
-                self.notebook.select(self.inspiration_tab)
-                self.inspiration_listbox.selection_set(0)
-                self._on_inspiration_select()
-
     def _clear_selection(self) -> None:
         self._selected_track = None
         self._selected_track_index = None
-        self._selected_inspiration_info = None
-        self._selected_track_source = None
-        self._auto_select_inspiration_pending = False
         if hasattr(self, "selection_var"):
             self.selection_var.set("No track selected")
         self._update_start_button_state()
@@ -562,7 +483,6 @@ class RecordFrame(ttk.Frame):
         if _event is not None:
             self._persist_last_selection()
         if not self._project_name:
-            self._refresh_inspiration()
             return
 
         backend = self.app_state.backend
@@ -602,26 +522,20 @@ class RecordFrame(ttk.Frame):
             return
         self._setlist = Setlist.from_dict(data)
         self._refresh_setlist()
-        self._refresh_inspiration()
         self._auto_select_default_track()
 
     def _auto_select_default_track(self) -> None:
         """Pick a sensible starting track so Record is one click away right
-        after opening: the setlist's first track, or — if the setlist is
-        empty — the Inspiration tab's first track once it's loaded (see
-        _on_inspiration_loaded, since that load is async)."""
-        if self._selected_track_source is not None:
+        after opening: the setlist's first track."""
+        if self._selected_track_index is not None:
             return  # already selected (e.g. this ran once for this project already)
         if self._setlist and self._setlist.tracks:
             self.setlist_listbox.selection_set(0)
             self._on_setlist_select()
-        else:
-            self._auto_select_inspiration_pending = True
 
     def _refresh_setlist_from_server(self) -> None:
         """Re-fetch just the current project's setlist (e.g. after a take
-        finishes) without disturbing the current project/instrument selection
-        or re-querying inspiration tracks."""
+        finishes) without disturbing the current project/instrument selection."""
         if not self._project_name:
             return
         backend = self.app_state.backend
@@ -668,10 +582,7 @@ class RecordFrame(ttk.Frame):
             return
         self._selected_track = self._setlist.tracks[sel[0]]
         self._selected_track_index = sel[0]
-        self._selected_inspiration_info = None
-        self._selected_track_source = "setlist"
-        self.inspiration_listbox.selection_clear(0, tk.END)
-        self.selection_var.set(f"Selected: {self._selected_track.name} (setlist)")
+        self.selection_var.set(f"Selected: {self._selected_track.name}")
         self._update_start_button_state()
 
     def _on_setlist_right_click(self, event: object) -> None:
@@ -706,7 +617,7 @@ class RecordFrame(ttk.Frame):
             track.inspiration_filter = new_criteria
             track.name = derive_filter_label(new_criteria)
             if self._selected_track_index == index:
-                self.selection_var.set(f"Selected: {track.name} (setlist)")
+                self.selection_var.set(f"Selected: {track.name}")
             self._save_setlist_and_refresh()
 
         EditFilterDialog(self, self.app_state.backend, track.inspiration_filter, on_save)
@@ -729,7 +640,7 @@ class RecordFrame(ttk.Frame):
             return
         track.name = new_name
         if self._selected_track_index == index:
-            self.selection_var.set(f"Selected: {track.name} (setlist)")
+            self.selection_var.set(f"Selected: {track.name}")
         self._save_setlist_and_refresh()
 
     def _on_delete_track(self, index: int) -> None:
@@ -760,28 +671,13 @@ class RecordFrame(ttk.Frame):
             return
         self._refresh_setlist()
 
-    def _on_inspiration_select(self, _event: object = None) -> None:
-        sel = self.inspiration_listbox.curselection()
-        if not sel:
-            return
-        info = self._inspiration_tracks[sel[0]]
-        self._selected_track = None
-        self._selected_track_index = None
-        self._selected_inspiration_info = info
-        self._selected_track_source = "inspiration"
-        self.setlist_listbox.selection_clear(0, tk.END)
-        artist = info.get("artist", "Unknown")
-        title = info.get("title", "Unknown")
-        self.selection_var.set(f"Selected: {artist} - {title} (inspiration)")
-        self._update_start_button_state()
-
     def _update_start_button_state(self) -> None:
         if not hasattr(self, "video_check_button"):
             return
         ready = (
             bool(self.instrument_var.get())
             and self._project_name is not None
-            and self._selected_track_source is not None
+            and self._selected_track_index is not None
         )
         if self._video_check_phase != "idle":
             self.video_check_button.state(["!disabled"])
@@ -795,7 +691,6 @@ class RecordFrame(ttk.Frame):
         self.project_combo.configure(state=combo_state)
         list_state = "normal" if enabled else "disabled"
         self.setlist_listbox.configure(state=list_state)
-        self.inspiration_listbox.configure(state=list_state)
         self.refresh_devices_button.state(["!disabled"] if enabled else ["disabled"])
 
     # --- refresh devices (camera/audio plugged in after the UI was launched) ---
@@ -915,26 +810,19 @@ class RecordFrame(ttk.Frame):
 
     def _build_selected_request(self) -> StartRecordingRequest | None:
         """Build a StartRecordingRequest from the current instrument/project/
-        track selection — shared by _start_recording and _start_video_check,
-        which both act on whatever's currently picked in the Setlist/
-        Inspiration list. Shows an error dialog and returns None if
-        incomplete."""
+        track selection — shared by _start_recording and _start_video_check.
+        Shows an error dialog and returns None if incomplete."""
         instrument_name = self.instrument_var.get()
         if not instrument_name or not self._project_name:
             messagebox.showerror("Cannot start", "Select an instrument and a project first.")
             return None
 
-        if self._selected_track_source == "setlist" and self._selected_track_index is not None:
+        if self._selected_track_index is not None:
             return StartRecordingRequest(
                 project_name=self._project_name, instrument_name=instrument_name,
-                track_source="setlist", track_index=self._selected_track_index,
+                track_index=self._selected_track_index,
             )
-        elif self._selected_track_source == "inspiration" and self._selected_inspiration_info is not None:
-            return StartRecordingRequest(
-                project_name=self._project_name, instrument_name=instrument_name,
-                track_source="inspiration", inspiration_info=self._selected_inspiration_info,
-            )
-        messagebox.showerror("Cannot start", "Select a track from the Setlist or Inspiration list first.")
+        messagebox.showerror("Cannot start", "Select a track from the Setlist first.")
         return None
 
     def _start_recording(self) -> None:

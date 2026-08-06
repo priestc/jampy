@@ -1,36 +1,38 @@
 # Inspiration Server: Autocomplete API
 
-This document specs out two new read-only endpoints for the **inspiration
+This document specs out a read-only endpoint for the **inspiration
 server** (referred to in code as "radioserver") — the separate service that
 hosts a studio's music library and that Takeloom queries for backing
-tracks. It is written for whoever implements those endpoints in the
-inspiration server's own codebase; it assumes no prior familiarity with
-Takeloom.
+tracks. It is written for whoever implements it in the inspiration
+server's own codebase; it assumes no prior familiarity with Takeloom.
 
-> **Revision note**: the Titles endpoint's response shape below changed
-> after the first version of this doc was already implemented — see
-> "REVISED" under `GET /library/api/autocomplete/titles/`. The Artists
-> endpoint is unchanged; if you already built that one, leave it as-is.
-> Takeloom's client already handles both the old and new title response
-> shapes, so this can land whenever convenient — it just won't get the
-> benefit described below (skipping the by-name search entirely) until
-> the new shape ships.
+> **Superseded**: Takeloom no longer has a way to add one specific
+> inspiration-server track directly by artist/title — "inspiration
+> filter" setlist slots (which draw a random matching track fresh each
+> session, see `takeloom/inspiration.py`'s `search_tracks_by_filter`)
+> are the only way a project pulls in inspiration-server songs now. The
+> Titles autocomplete endpoint this doc originally specced (narrowing to
+> one exact track for a direct add) has no client left to call it and
+> can be skipped/removed if not already built — only the Artists
+> endpoint below is still live, backing an inspiration filter's Artist
+> field.
 
 ## Background: what's calling this, and why
 
 Takeloom is a desktop app for recording multi-instrument backing-track
-sessions. One of its dialogs — "Add to Setlist" — lets a musician add a
-track to a project's setlist by typing an artist and/or title instead of
-picking from a pre-filtered browse list. That dialog already has two text
-fields (Artist, Title) wired up to autocomplete-as-you-type — a dropdown
-that's supposed to populate with suggestions pulled from the inspiration
-server's library as the user types. Right now the suggestion source is a
-stub that always returns an empty list, because the inspiration server has
-no endpoint to ask "what artists/titles do you have matching this partial
-text" yet. That's what this document specs out. **No Takeloom-side changes
-are needed once these endpoints exist** — the client code that will call
-them is already written and waiting; see "Client-side integration point"
-at the end of this document for exactly where.
+sessions. The "Add to Setlist" dialog's "Inspiration Filter" tab lets a
+musician set up a standing filter (artist/genre/year range/length range)
+that draws a random matching track from the inspiration server's library
+each session, rather than adding one fixed song. Its Artist field is
+wired up to autocomplete-as-you-type — a dropdown that populates with
+suggestions pulled from the inspiration server's library as the user
+types. Right now the suggestion source is a stub that always returns an
+empty list, because the inspiration server has no endpoint to ask "what
+artists do you have matching this partial text" yet. That's what this
+document specs out. **No Takeloom-side changes are needed once this
+endpoint exists** — the client code that will call it is already written
+and waiting; see "Client-side integration point" at the end of this
+document for exactly where.
 
 ## Existing API contract (for reference/consistency)
 
@@ -66,13 +68,13 @@ Returns the raw audio file bytes for that track.
 
 ---
 
-## New endpoints to add
+## Endpoint
 
-Two endpoints, one per field — kept separate rather than a single
-parameterized endpoint since they have genuinely different scoping
-behavior (see the optional `artist` param on the titles endpoint below).
+Only the Artists endpoint is still needed — see the "Superseded" note
+above regarding the Titles endpoint this section originally specced
+alongside it.
 
-### 1. `GET /library/api/autocomplete/artists/`
+### `GET /library/api/autocomplete/artists/`
 
 Suggests artist names matching partial text typed into the dialog's
 Artist field.
@@ -90,8 +92,8 @@ Artist field.
 ```
 A flat list of distinct artist name strings, no other metadata needed —
 the client just drops these into the field, it doesn't need IDs at this
-stage (an ID lookup happens later, in the existing `/library/api/tracks/`
-call, once the user submits the full artist+title).
+stage — matching is resolved later, when the filter slot actually draws
+a track via the existing `/library/api/tracks/` call.
 
 **Empty/short query**: if `q` is missing or empty, return `{"suggestions": []}`
 rather than every artist in the library. (The client won't currently send
@@ -111,68 +113,12 @@ Authorization: Bearer <api_key>
 {"suggestions": ["Miles Davis", "Miles Davis Quintet", "Milestones"]}
 ```
 
-### 2. `GET /library/api/autocomplete/titles/` — REVISED
-
-Suggests tracks matching partial title text typed into the dialog's Title
-field.
-
-**Query params**
-
-| Param    | Required | Description |
-|----------|----------|-------------|
-| `q`      | yes      | Partial, case-insensitive title text. Same empty/error handling as above. |
-| `limit`  | no       | Same as above: default `10`, cap `25`. |
-| `artist` | no       | If present, narrow results to tracks by this artist only (exact match against the artist field, case-insensitive). |
-
-**Response** — `200 OK`. Unlike Artists, this returns full track objects
-(same shape as `/library/api/tracks/`'s track dicts), not bare strings:
-```json
-{"suggestions": [
-  {"id": 4821, "artist": "Miles Davis", "title": "So What", "year": 1959, "format": "flac", "duration": 545.2},
-  {"id": 4903, "artist": "Miles Davis", "title": "Solar", "year": 1954, "format": "flac", "duration": 224.8}
-]}
-```
-
-**Why the change**: the first version of this endpoint returned bare
-title strings, matching Artists. That worked for display, but left
-Takeloom no way to know *which* track the user actually picked when they
-selected a suggestion — it had to fall back to a second, separate
-by-name search against `/library/api/tracks/` to resolve the title back
-into a track record. That search endpoint is built for broad
-library-browsing filters, not a precise single-song lookup, so it could
-(and did) return an unrelated track sharing the same artist when the
-title match wasn't exact enough for its filter logic — the user picks
-"Bob Dylan" / "Are You Ready" from your own autocomplete and a different
-Bob Dylan song gets added instead. Returning the full track record (with
-`id`) from *this* endpoint means the record the user actually selected
-in the dropdown is the exact same record Takeloom adds — no second
-lookup, no ambiguity, no guessing.
-
-If the same title string legitimately belongs to more than one track
-(e.g. a studio and a live version both literally titled "So What") and
-your dedup logic collapses them to one row, returning either one is
-fine — that ambiguity already exists in the library itself and isn't
-something this endpoint needs to solve.
-
-**Example**:
-```
-GET /library/api/autocomplete/titles/?q=so&artist=Miles%20Davis
-Authorization: Bearer <api_key>
-
-200 OK
-{"suggestions": [
-  {"id": 4821, "artist": "Miles Davis", "title": "So What", "year": 1959, "format": "flac", "duration": 545.2}
-]}
-```
-
 ---
 
 ## Matching & ranking behavior
 
 - Match **substring**, not just prefix — a musician typing "davis" for
-  "Miles Davis" should still get a hit. Case-insensitive throughout. This
-  applies to the `title` field on Titles' track objects the same as it
-  applies to Artists' bare strings.
+  "Miles Davis" should still get a hit. Case-insensitive throughout.
 - **Rank prefix matches above substring-only matches** (e.g. querying
   "mile" should put "Miles Davis" ahead of "Two Miles From Nowhere"),
   then alphabetically within each group. This is the single biggest
@@ -180,7 +126,7 @@ Authorization: Bearer <api_key>
 - **Deduplicate** — if the same artist string appears on many tracks (the
   overwhelmingly common case), it should appear once in the suggestion
   list, not once per track. `SELECT DISTINCT` (or your ORM's equivalent)
-  on the artist/title column, not a naive per-track scan.
+  on the artist column, not a naive per-track scan.
 - Minimum query length: consider requiring at least 2 characters before
   returning non-empty results, to avoid a single keystroke matching
   thousands of rows. This is a judgment call against your library size —
@@ -193,7 +139,7 @@ no server-side debouncing — that's a client-side concern and is out of
 scope for this doc, but don't assume requests are rate-limited on
 arrival). Each request needs to be cheap:
 
-- Add a database index on whatever column(s) back the artist/title
+- Add a database index on whatever column backs the artist
   lookup if one doesn't already exist — a `LIKE '%q%'`/`ILIKE` scan over
   an unindexed text column on a large library will get slow fast. If
   you're on Postgres and want substring (not just prefix) matches to stay
@@ -217,10 +163,6 @@ Match the existing `/library/api/tracks/` endpoint's conventions:
 
 - [ ] `GET .../autocomplete/artists/?q=<3+ char partial match>` returns
       expected, deduplicated, ranked results.
-- [ ] Same for `.../autocomplete/titles/?q=...`.
-- [ ] `.../autocomplete/titles/?q=...&artist=<exact artist>` narrows
-      correctly, and an artist with no matching titles returns `[]`
-      rather than erroring.
 - [ ] Missing `q` returns `{"suggestions": []}`, not a 500.
 - [ ] `limit` above the hard cap gets clamped, not rejected or ignored.
 - [ ] Missing/bad `Authorization` header returns `401`, matching the
@@ -233,11 +175,6 @@ Match the existing `/library/api/tracks/` endpoint's conventions:
 ## Client-side integration point (context only — no action needed here)
 
 This side is already done and live in the Takeloom repo:
-`search_artist_suggestions`/`search_title_suggestions` in
-`takeloom/inspiration.py` call these two endpoints, feeding the Add to
-Setlist dialog's Artist/Title autocomplete fields
-(`takeloom/ui/add_to_setlist_dialog.py`). The client accepts both the
-old (bare string) and new (full track object) shapes from Titles — it
-only gets to skip the secondary by-name search once a given response
-actually includes an `id`. There's nothing further to do on the Takeloom
-side once Titles is updated to the new shape; it'll just start working.
+`search_artist_suggestions` in `takeloom/inspiration.py` calls this
+endpoint, feeding an inspiration filter slot's Artist autocomplete field
+(`takeloom/ui/filter_fields.py`).

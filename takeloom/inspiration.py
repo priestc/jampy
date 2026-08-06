@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Callable
 
 from .config import StudioConfig
-from .project import Project, TrackEntry
+from .project import TrackEntry
 from .utils import format_duration
 
 ProgressCallback = Callable[[float | None, str], None]
@@ -96,80 +96,15 @@ def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
     return data.get("tracks", [])
 
 
-def query_inspiration_tracks(project: Project, config: StudioConfig) -> list[dict]:
-    """Query tracks from radioserver matching the project's inspiration filters."""
-    if not project.setlist.inspiration:
-        raise InspirationError(
-            'No inspiration filters in setlist.json. Add an "inspiration" key with '
-            'filter sets, e.g.: "inspiration": [{"genre": "Rock"}, {"artist": "Miles Davis"}]'
-        )
-    tracks = _post_track_query(config, project.setlist.inspiration)
-    if not tracks:
-        raise InspirationError("No tracks matched the inspiration filters.")
-    return tracks
-
-
 def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list[dict]:
     """Query the inspiration server for every track matching one arbitrary
-    filter dict (e.g. {"artist": "Miles Davis"} or {"genre": "Rock"}) —
-    the same underlying query as query_inspiration_tracks's per-project
-    filters, for one filter given directly rather than read from
-    setlist.json. Backs a setlist "inspiration filter" slot's random draw
-    each session — see backend.py's _resolve_filter_slot."""
+    filter dict (e.g. {"artist": "Miles Davis"} or {"genre": "Rock"}).
+    Backs both a setlist "inspiration filter" slot's random draw each
+    session (see backend.py's _resolve_filter_slot) and the "Show
+    tracks..." preview of what a slot currently matches."""
     if not filter_criteria:
         raise InspirationError("This filter slot has no filter criteria set.")
     return _post_track_query(config, [filter_criteria])
-
-
-def search_inspiration_tracks(config: StudioConfig, artist: str = "", title: str = "") -> list[dict]:
-    """Query radioserver directly by artist and/or title, independent of a
-    project's own configured inspiration filters — backs the Add to
-    Setlist dialog's "Add from Inspiration" search, as opposed to
-    query_inspiration_tracks()'s per-project filtered browsing."""
-    filters = {k: v for k, v in {"artist": artist.strip(), "title": title.strip()}.items() if v}
-    if not filters:
-        raise InspirationError("Enter an artist and/or title to search.")
-    tracks = _post_track_query(config, [filters])
-    if not tracks:
-        raise InspirationError(f"No match found for {_describe(artist, title)}.")
-    return tracks
-
-
-def _describe(artist: str, title: str) -> str:
-    if artist and title:
-        return f'"{artist} - {title}"'
-    return f'"{artist or title}"'
-
-
-def select_best_match(tracks: list[dict], artist: str, title: str) -> dict:
-    """Pick the track that actually matches what was searched for, out of
-    whatever /library/api/tracks/'s filter search returned. That endpoint
-    is built for broad library-browsing filters (see
-    query_inspiration_tracks) rather than a precise "find this one song"
-    lookup, so it can return loosely-related tracks alongside — or
-    instead of — an exact hit (e.g. matching just the artist and
-    ignoring an unmatched title). Requiring an exact, case-insensitive
-    match on whichever of artist/title was actually given — and raising
-    rather than guessing when there isn't one — is what stops a search
-    like "Bob Dylan" / "Are You Ready" from silently adding some other
-    Bob Dylan track instead."""
-    artist_norm = artist.strip().lower()
-    title_norm = title.strip().lower()
-
-    def is_exact(t: dict) -> bool:
-        if artist_norm and t.get("artist", "").strip().lower() != artist_norm:
-            return False
-        if title_norm and t.get("title", "").strip().lower() != title_norm:
-            return False
-        return True
-
-    exact = [t for t in tracks if is_exact(t)]
-    if exact:
-        return exact[0]
-    raise InspirationError(
-        f"No exact match for {_describe(artist, title)} — the server returned "
-        f"{len(tracks)} similar track(s) instead. Try adjusting the artist/title."
-    )
 
 
 def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
@@ -197,24 +132,8 @@ def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
 
 
 def search_artist_suggestions(config: StudioConfig, partial: str, limit: int = 10) -> list[str]:
-    """Autocomplete suggestions for the Add to Setlist dialog's Artist field."""
+    """Autocomplete suggestions for an inspiration filter's Artist field."""
     return _get_suggestions(config, "artists", {"q": partial.strip(), "limit": limit})
-
-
-def search_title_suggestions(config: StudioConfig, partial: str, artist: str = "", limit: int = 10) -> list[dict]:
-    """Autocomplete suggestions for the Add to Setlist dialog's Title
-    field, optionally narrowed to a specific artist. Each result is a
-    track dict (id/artist/title/year/format/duration) — see
-    docs/inspiration-server-autocomplete-api.md — so selecting one can
-    add that exact track directly, with no secondary by-name search
-    needed. Tolerates an older server still returning bare title strings
-    (normalized here to a dict with no "id"), which just means the
-    caller falls back to the by-name search path for that selection."""
-    params = {"q": partial.strip(), "limit": limit}
-    if artist.strip():
-        params["artist"] = artist.strip()
-    raw = _get_suggestions(config, "titles", params)
-    return [item if isinstance(item, dict) else {"title": item} for item in raw]
 
 
 def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
@@ -222,9 +141,7 @@ def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
     adding it to any project's setlist — used for a session-only,
     throwaway resolution (a setlist "filter slot"'s random draw — see
     backend.py's _resolve_filter_slot) that should never persist as a
-    setlist entry itself. Mirrors find_or_add_inspiration_track's entry
-    shape exactly, just without the "find or add to project.setlist.
-    tracks" part."""
+    setlist entry itself."""
     track_id = track_info["id"]
     artist = track_info.get("artist", "Unknown")
     title = track_info.get("title", "Unknown")
@@ -239,17 +156,6 @@ def build_inspiration_track_entry(track_info: dict) -> TrackEntry:
         duration_seconds=duration,
         inspiration_track_id=track_id,
     )
-
-
-def find_or_add_inspiration_track(project: Project, track_info: dict) -> TrackEntry:
-    """Return the setlist entry for an inspiration track, creating it if absent."""
-    track_id = track_info["id"]
-    for entry in project.setlist.tracks:
-        if entry.inspiration_track_id == track_id:
-            return entry
-    entry = build_inspiration_track_entry(track_info)
-    project.setlist.add_track(entry)
-    return entry
 
 
 _DOWNLOAD_CHUNK_SIZE = 65536
@@ -294,8 +200,8 @@ def download_inspiration_track(
                 raise InspirationError(f"Download incomplete: got {read} of {total} bytes.")
     except urllib.error.URLError as e:
         # A partial file left behind here would look "already downloaded"
-        # to add_inspiration_backing_track's exists() check next time,
-        # permanently leaving a truncated/corrupt backing track in place.
+        # to the next caller's exists() check, permanently leaving a
+        # truncated/corrupt backing track in place.
         backing_path.unlink(missing_ok=True)
         raise InspirationError(f"Download failed: {e}") from e
     except Exception:

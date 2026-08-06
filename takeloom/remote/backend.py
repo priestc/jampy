@@ -100,30 +100,6 @@ class RemoteBackend(Backend):
             "add_youtube_backing_track", {"project_name": project_name, "url": url}, timeout=DOWNLOAD_TIMEOUT,
         )
 
-    def add_inspiration_backing_track(
-        self, project_name: str, artist: str, title: str,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        if on_progress:
-            on_progress(None, "Searching and downloading on the remote studio (live progress isn't available over Remote yet)...")
-        return self._client.call(
-            "add_inspiration_backing_track",
-            {"project_name": project_name, "artist": artist, "title": title},
-            timeout=DOWNLOAD_TIMEOUT,
-        )
-
-    def add_inspiration_track_by_id(
-        self, project_name: str, track_info: dict,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        if on_progress:
-            on_progress(None, "Downloading on the remote studio (live progress isn't available over Remote yet)...")
-        return self._client.call(
-            "add_inspiration_track_by_id",
-            {"project_name": project_name, "track_info": track_info},
-            timeout=DOWNLOAD_TIMEOUT,
-        )
-
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
         return self._client.call(
             "add_inspiration_filter_slot",
@@ -132,25 +108,11 @@ class RemoteBackend(Backend):
 
     # --- inspiration ---
 
-    def query_inspiration_tracks(self, project_name: str) -> list[dict]:
-        result = self._client.call(
-            "query_inspiration_tracks", {"project_name": project_name}, timeout=LONG_TIMEOUT,
-        )
-        return result["tracks"]
-
     def search_inspiration_artists(self, partial: str) -> list[str]:
         try:
             return self._client.call("search_inspiration_artists", {"partial": partial})["suggestions"]
         except BackendError:
             return []  # autocomplete fires on every keystroke — a connection hiccup shouldn't surface as an error
-
-    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
-        try:
-            return self._client.call(
-                "search_inspiration_titles", {"partial": partial, "artist": artist},
-            )["suggestions"]
-        except BackendError:
-            return []
 
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         return self._client.call(
@@ -165,9 +127,7 @@ class RemoteBackend(Backend):
             {
                 "project_name": req.project_name,
                 "instrument_name": req.instrument_name,
-                "track_source": req.track_source,
                 "track_index": req.track_index,
-                "inspiration_info": req.inspiration_info,
             },
             timeout=LONG_TIMEOUT,
         )

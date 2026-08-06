@@ -166,17 +166,16 @@ class RecordingDeckDriver:
             self._backend.next_track()
             return
         req = self._resolve_start_request()
-        if req is None or req.track_source != "setlist":
+        if req is None:
             return
         index = self._backend.next_untaken_track_index(
-            req.project_name, req.instrument_name, (req.track_index or 0) + 1,
+            req.project_name, req.instrument_name, req.track_index + 1,
         )
         if index is None:
             self._log(f"No more tracks in '{req.project_name}' need a take for '{req.instrument_name}'.")
             return
         self._backend.start_recording(StartRecordingRequest(
-            project_name=req.project_name, instrument_name=req.instrument_name,
-            track_source="setlist", track_index=index,
+            project_name=req.project_name, instrument_name=req.instrument_name, track_index=index,
         ))
         self._backend.unpause_recording()
 

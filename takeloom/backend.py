@@ -49,9 +49,7 @@ AUTO_ADVANCE_GAP_SECONDS = 2.0
 class StartRecordingRequest:
     project_name: str
     instrument_name: str
-    track_source: str  # "setlist" | "inspiration"
-    track_index: int | None = None       # for track_source == "setlist"
-    inspiration_info: dict | None = None  # for track_source == "inspiration"
+    track_index: int
 
 
 EventCallback = Callable[[str, dict], None]
@@ -164,58 +162,21 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def add_inspiration_backing_track(
-        self, project_name: str, artist: str, title: str,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        """Search the inspiration server by artist and/or title and add the
-        exact match as a backing track — the Add to Setlist dialog's
-        "Add from Inspiration" search, as opposed to picking one off the
-        Inspiration tab's per-project filtered browse list. Downloads the
-        audio immediately (unlike selecting an Inspiration-tab track for
-        recording, which defers the download to start_recording()), since
-        this is meant to leave the track fully ready to record.
-
-        If given, on_progress(percent, message) reports live download
-        progress — inspiration files are full-quality and can take a
-        while. RemoteBackend can't stream this live over its simple
-        request/response RPC, so it calls on_progress once with a
-        placeholder message instead, same as add_youtube_backing_track."""
-        ...
-
-    @abstractmethod
-    def add_inspiration_track_by_id(
-        self, project_name: str, track_info: dict,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        """Add a specific, already-known inspiration track directly, with
-        no by-name search step — used when `track_info` came straight off
-        the Add to Setlist dialog's Title autocomplete (which returns
-        full track records, not just title strings — see
-        docs/inspiration-server-autocomplete-api.md), so the exact track
-        the user picked in the dropdown is the exact track that gets
-        added, instead of add_inspiration_backing_track's fuzzier
-        search-then-guess. `track_info` is one of those track dicts
-        (id/artist/title/year/format/duration)."""
-        ...
-
-    @abstractmethod
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
         """Add a standing setlist "slot" that draws a random track matching
         `filter_criteria` (e.g. {"artist": "Miles Davis"} or {"genre":
         "Rock"}) fresh each session, instead of one fixed song — see
         TrackEntry's docstring and backend.py's _resolve_filter_slot_for_
-        session. `label` is the slot's display name in the Setlist list."""
+        session. `label` is the slot's display name in the Setlist list.
+        This is the only way a project's setlist grows an inspiration-
+        sourced entry now — see FilterCriteriaFields/EditFilterDialog."""
         ...
 
     # --- inspiration ---
 
     @abstractmethod
-    def query_inspiration_tracks(self, project_name: str) -> list[dict]: ...
-
-    @abstractmethod
     def search_inspiration_artists(self, partial: str) -> list[str]:
-        """Autocomplete suggestions for the Add to Setlist dialog's Artist
+        """Autocomplete suggestions for an inspiration filter's Artist
         field, from the inspiration server's autocomplete endpoint (see
         docs/inspiration-server-autocomplete-api.md). Returns [] rather
         than raising on any failure — this fires on every keystroke, so a
@@ -224,19 +185,12 @@ class Backend(ABC):
         ...
 
     @abstractmethod
-    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
-        """Same as search_inspiration_artists, for the Title field.
-        `artist`, if given, narrows suggestions to that artist's tracks."""
-        ...
-
-    @abstractmethod
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         """Every inspiration-server track matching `filter_criteria` (same
         shape as an inspiration filter slot's inspiration_filter — artist/
         genre/year_min/year_max/duration_min/duration_max) — backs the
         setlist's "Show tracks..." context menu action, so an operator can
-        see exactly what a filter slot might draw before recording. Not
-        project-scoped, unlike query_inspiration_tracks."""
+        see exactly what a filter slot might draw before recording."""
         ...
 
     # --- recording ---
@@ -672,11 +626,6 @@ class _ActiveSession:
     # a take (the take belongs to whatever song got drawn, which is never
     # itself added to the setlist — see _resolve_filter_slot).
     completed_track_indices: set = field(default_factory=set)
-    # Inspiration-track ids added to the setlist by this session's track
-    # loads — post-processing removes any that ended up with no take at
-    # all. Never touched by a filter slot's draw (see _resolve_filter_slot
-    # — that's the whole point: the setlist doesn't change).
-    added_inspiration_ids: set = field(default_factory=set)
     # filter-slot index -> the TrackEntry drawn for it this session (never
     # added to project.setlist.tracks — see _resolve_filter_slot). Session-
     # only cache: a filter slot revisited later in the same session (e.g. a
@@ -942,30 +891,6 @@ class LocalBackend(Backend):
         entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration, source="youtube")
         return entry.to_dict()
 
-    def add_inspiration_backing_track(
-        self, project_name: str, artist: str, title: str,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        from .inspiration import InspirationError, search_inspiration_tracks, select_best_match
-        project = self._open_project(project_name)
-        config = self.get_config()
-        if on_progress:
-            on_progress(None, f"Searching for {artist or title}...")
-        try:
-            matches = search_inspiration_tracks(config, artist=artist, title=title)
-            track_info = select_best_match(matches, artist, title)
-        except InspirationError as e:
-            raise BackendError(str(e)) from e
-        return self._add_inspiration_entry(project, config, track_info, on_progress)
-
-    def add_inspiration_track_by_id(
-        self, project_name: str, track_info: dict,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        project = self._open_project(project_name)
-        config = self.get_config()
-        return self._add_inspiration_entry(project, config, track_info, on_progress)
-
     def add_inspiration_filter_slot(self, project_name: str, label: str, filter_criteria: dict) -> dict:
         if not filter_criteria:
             raise BackendError("Enter at least one filter field (artist and/or genre).")
@@ -973,40 +898,11 @@ class LocalBackend(Backend):
         entry = project.add_inspiration_filter_slot(label, filter_criteria)
         return entry.to_dict()
 
-    @staticmethod
-    def _add_inspiration_entry(
-        project: Project, config: StudioConfig, track_info: dict,
-        on_progress: Callable[[float | None, str], None] | None = None,
-    ) -> dict:
-        from .inspiration import InspirationError, download_inspiration_track, find_or_add_inspiration_track
-        entry = find_or_add_inspiration_track(project, track_info)
-        project.save_setlist()
-        backing_path = project.backing_tracks_dir / entry.backing_track
-        if not backing_path.exists():
-            try:
-                download_inspiration_track(entry, backing_path, config, on_progress=on_progress)
-            except InspirationError as e:
-                raise BackendError(str(e)) from e
-        return entry.to_dict()
-
     # --- inspiration ---
-
-    def query_inspiration_tracks(self, project_name: str) -> list[dict]:
-        from .inspiration import InspirationError, query_inspiration_tracks
-        project = self._open_project(project_name)
-        config = self.get_config()
-        try:
-            return query_inspiration_tracks(project, config)
-        except InspirationError as e:
-            raise BackendError(str(e)) from e
 
     def search_inspiration_artists(self, partial: str) -> list[str]:
         from .inspiration import search_artist_suggestions
         return search_artist_suggestions(self.get_config(), partial)
-
-    def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
-        from .inspiration import search_title_suggestions
-        return search_title_suggestions(self.get_config(), partial, artist=artist)
 
     def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
         from .inspiration import InspirationError, search_tracks_by_filter
@@ -1277,28 +1173,10 @@ class LocalBackend(Backend):
 
             try:
                 project = session.project
-                if req.track_source == "setlist":
-                    if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
-                        raise BackendError("Invalid track selection.")
-                    index = req.track_index
-                    track = self._resolve_filter_slot_for_session(session, config, project.setlist.tracks[index], index)
-                elif req.track_source == "inspiration":
-                    if not req.inspiration_info:
-                        raise BackendError("No inspiration track selected.")
-                    from .inspiration import find_or_add_inspiration_track
-                    existing_ids = {
-                        t.inspiration_track_id for t in project.setlist.tracks if t.inspiration_track_id
-                    }
-                    track = find_or_add_inspiration_track(project, req.inspiration_info)
-                    if track.inspiration_track_id not in existing_ids:
-                        # Persisted right away (not deferred to take completion,
-                        # which now only happens at session end) — post-
-                        # processing removes it again if it never gets a take.
-                        session.added_inspiration_ids.add(track.inspiration_track_id)
-                        project.save_setlist()
-                    index = project.setlist.tracks.index(track)
-                else:
-                    raise BackendError("Select a track from the Setlist or Inspiration list first.")
+                if not (0 <= req.track_index < len(project.setlist.tracks)):
+                    raise BackendError("Invalid track selection.")
+                index = req.track_index
+                track = self._resolve_filter_slot_for_session(session, config, project.setlist.tracks[index], index)
 
                 if session.playing and session.current_track is not None:
                     # Loading a different track over a playing one abandons
@@ -1869,20 +1747,10 @@ class LocalBackend(Backend):
             if inst is None:
                 raise BackendError(f"Instrument '{req.instrument_name}' not found.")
 
-            if req.track_source == "setlist":
-                if req.track_index is None or not (0 <= req.track_index < len(project.setlist.tracks)):
-                    raise BackendError("Invalid track selection.")
-                track = project.setlist.tracks[req.track_index]
-                track = self._resolve_filter_slot(config, track, inst.name)
-            elif req.track_source == "inspiration":
-                if not req.inspiration_info:
-                    raise BackendError("No inspiration track selected.")
-                from .inspiration import find_or_add_inspiration_track
-                # Only mutates this call's in-memory Project — video check never
-                # calls save_setlist(), so this never actually lands on disk.
-                track = find_or_add_inspiration_track(project, req.inspiration_info)
-            else:
-                raise BackendError("Select a track from the Setlist or Inspiration list first.")
+            if not (0 <= req.track_index < len(project.setlist.tracks)):
+                raise BackendError("Invalid track selection.")
+            track = project.setlist.tracks[req.track_index]
+            track = self._resolve_filter_slot(config, track, inst.name)
 
             input_info = config.resolve_input(inst.input_label)
             if input_info is None:
@@ -2414,7 +2282,6 @@ class LocalBackend(Backend):
             "sample_rate": session.engine.sample_rate,
             "mix_start_frame": session.mix_start_frame,
             "has_video": session.session_video_raw is not None,
-            "added_inspiration_ids": sorted(session.added_inspiration_ids),
             # filter-slot index -> the song actually drawn for it this
             # session (see _resolve_filter_slot) — the setlist itself
             # never records this, so post-processing needs it from here

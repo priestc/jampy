@@ -47,8 +47,8 @@ def _timestamp() -> str:
 # see _handle_request, which only logs ops outside this set.
 _READ_ONLY_OPS = {
     "hostname", "get_config", "list_audio_devices", "list_cameras",
-    "list_projects", "get_setlist", "query_inspiration_tracks",
-    "search_inspiration_artists", "search_inspiration_titles", "search_inspiration_by_filter",
+    "list_projects", "get_setlist",
+    "search_inspiration_artists", "search_inspiration_by_filter",
     "is_recording", "get_compressor_settings", "get_monitoring_mode",
 }
 
