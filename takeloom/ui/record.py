@@ -464,13 +464,29 @@ class RecordFrame(ttk.Frame):
         inspiration_scroll.pack(side="right", fill="y")
         self.inspiration_listbox.bind("<<ListboxSelect>>", self._on_inspiration_select)
 
+    def _filter_criteria_display(self, filter_criteria: dict) -> str:
+        parts = []
+        for key, value in filter_criteria.items():
+            if key in ("year_min", "year_max"):
+                continue
+            parts.append(f"{key}: {value}")
+        year_min, year_max = filter_criteria.get("year_min"), filter_criteria.get("year_max")
+        if year_min is not None or year_max is not None:
+            if year_min is not None and year_max is not None:
+                parts.append(f"year: {year_min}–{year_max}")
+            elif year_min is not None:
+                parts.append(f"year: {year_min}+")
+            else:
+                parts.append(f"year: up to {year_max}")
+        return ", ".join(parts)
+
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring) —
             # instead, roll up which instruments have a take on any song
             # this slot has drawn (track.filter_takes), across every song
             # it's ever drawn, not just one.
-            criteria = ", ".join(f"{k}: {v}" for k, v in track.inspiration_filter.items())
+            criteria = self._filter_criteria_display(track.inspiration_filter)
             instruments = sorted({inst for entry in track.filter_takes.values() for inst in entry.preferred_takes})
             takes_str = f" — has takes: {', '.join(instruments)}" if instruments else ""
             return f"🎲 {track.name}  ({criteria}){takes_str}"

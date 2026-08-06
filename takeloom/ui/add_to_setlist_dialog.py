@@ -403,10 +403,25 @@ class AddToSetlistDialog(tk.Toplevel):
 
         ttk.Label(tab, text="Genre").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.filter_genre_var = tk.StringVar()
-        ttk.Entry(tab, textvariable=self.filter_genre_var, width=30).grid(row=3, column=1, sticky="ew")
+        genre_entry = ttk.Entry(tab, textvariable=self.filter_genre_var, width=30)
+        genre_entry.grid(row=3, column=1, sticky="ew")
+
+        year_row = ttk.Frame(tab)
+        year_row.grid(row=4, column=1, sticky="w")
+        ttk.Label(tab, text="Year range").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.filter_year_min_var = tk.StringVar()
+        self.filter_year_max_var = tk.StringVar()
+        year_min_entry = ttk.Entry(year_row, textvariable=self.filter_year_min_var, width=8)
+        year_min_entry.pack(side="left")
+        ttk.Label(year_row, text=" to ").pack(side="left")
+        year_max_entry = ttk.Entry(year_row, textvariable=self.filter_year_max_var, width=8)
+        year_max_entry.pack(side="left")
         tab.columnconfigure(1, weight=1)
 
         self.filter_artist_field.bind_return(lambda _e: self._on_add())
+        genre_entry.bind("<Return>", lambda _e: self._on_add())
+        year_min_entry.bind("<Return>", lambda _e: self._on_add())
+        year_max_entry.bind("<Return>", lambda _e: self._on_add())
 
     # --- add ---
 
@@ -465,13 +480,39 @@ class AddToSetlistDialog(tk.Toplevel):
             label = self.filter_label_var.get().strip()
             filter_artist = self.filter_artist_field.get().strip()
             filter_genre = self.filter_genre_var.get().strip()
+            year_min_text = self.filter_year_min_var.get().strip()
+            year_max_text = self.filter_year_max_var.get().strip()
             if not label:
                 messagebox.showerror("Cannot add", "Enter a label for this filter slot.", parent=self)
                 return
-            if not filter_artist and not filter_genre:
-                messagebox.showerror("Cannot add", "Enter an artist and/or genre to filter by.", parent=self)
+
+            year_min = year_max = None
+            for text, field_name in ((year_min_text, "minimum year"), (year_max_text, "maximum year")):
+                if text and not text.isdigit():
+                    messagebox.showerror("Cannot add", f"Enter a numeric {field_name} (e.g. 1975).", parent=self)
+                    return
+            if year_min_text:
+                year_min = int(year_min_text)
+            if year_max_text:
+                year_max = int(year_max_text)
+            if year_min is not None and year_max is not None and year_min > year_max:
+                messagebox.showerror("Cannot add", "Minimum year can't be after maximum year.", parent=self)
                 return
-            filter_criteria = {k: v for k, v in {"artist": filter_artist, "genre": filter_genre}.items() if v}
+
+            if not filter_artist and not filter_genre and year_min is None and year_max is None:
+                messagebox.showerror(
+                    "Cannot add", "Enter an artist, genre, and/or year range to filter by.", parent=self,
+                )
+                return
+            filter_criteria = {}
+            if filter_artist:
+                filter_criteria["artist"] = filter_artist
+            if filter_genre:
+                filter_criteria["genre"] = filter_genre
+            if year_min is not None:
+                filter_criteria["year_min"] = year_min
+            if year_max is not None:
+                filter_criteria["year_max"] = year_max
 
             self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 
