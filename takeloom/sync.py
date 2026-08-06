@@ -73,3 +73,21 @@ def sync_vault_session_up(local_dir: Path, vault_relative: str, remote: str) -> 
         return result.returncode == 0
     except (FileNotFoundError, OSError):
         return False
+
+
+def sync_vault_file_down(remote: str, vault_relative: str, local_path: Path) -> bool:
+    """Download one file from the remote backup server into the vault,
+    at `vault_relative`'s path relative to the vault root (e.g.
+    "backing_tracks/a1b2c3d4_song1.mp3") — used by
+    vault.ensure_setlist_files_local to pull back a file "remote" vault
+    mode already pruned locally. Returns whether it succeeded (and the
+    file now actually exists locally), same success-signal reasoning as
+    sync_vault_session_up."""
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    source = _remote_path(remote, vault_relative)
+    cmd = ["rsync", "-avz", "--checksum", source, str(local_path)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0 and local_path.exists()
+    except (FileNotFoundError, OSError):
+        return False

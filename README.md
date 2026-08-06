@@ -33,13 +33,15 @@ takeloom setup-instruments         # assign instruments to input channels
 `setup-recording-devices` also lets you pick a camera. If one is configured, every session
 records video alongside the audio (see [Recording Session](#recording-session)).
 
-`setup-studio` also configures the **Studio Session Vault** — where recorded sessions are
-stored, kept separate from a project (which is really just its setlist, backing tracks, and
-completed takes — see [Project Structure](#project-structure)). Three modes: local only
-(default, under `~/Documents`), remote only (pushed to the backup server and removed
-locally once that's verified), or both (pushed but also kept locally). If you have sessions
-recorded before the vault existed, run `takeloom migrate-sessions-to-vault` once to move
-them in — safe to re-run, already-migrated sessions are skipped.
+`setup-studio` also configures the **Studio Session Vault** — shared storage for everything
+a project used to keep to itself: recorded sessions, backing tracks, and completed takes
+(see [Project Structure](#project-structure)). A project is just a setlist file now. Three
+vault modes: local only (default, under `~/Documents`), remote only (pushed to the backup
+server and removed locally once that's verified), or both (pushed but also kept locally).
+Starting a session downloads whatever that project's setlist needs from the remote first,
+in remote-only mode. If you have projects from before the vault existed, run
+`takeloom migrate-sessions-to-vault` once to move everything in — safe to re-run,
+already-migrated projects are skipped.
 
 ### Graphical Interface
 
@@ -56,24 +58,25 @@ the same fields as `takeloom setup-studio` — with more screens to follow.
 takeloom new-project
 ```
 
-Enter a project name (e.g. "My Album"). Creates the project folder structure in `~/Takeloom Projects/`.
+Enter a project name (e.g. "My Album"). Creates `~/Takeloom Projects/My Album.json` — an
+empty setlist.
 
 ### Updating the Setlist
 
-Copy audio files (FLAC, WAV, MP3, M4A) into the project's `backing_tracks/` directory, then:
+Copy audio files (FLAC, WAV, MP3, M4A) into the vault's `backing_tracks/` directory, then:
 
 ```bash
-cd ~/Takeloom\ Projects/My\ Album
-takeloom update-setlist
+takeloom update-setlist "My Album"
 ```
 
-Scans `backing_tracks/`, adds new files to `setlist.json`, and removes entries for deleted files. Each track in `setlist.json` includes a `volume` field (default 100%) that you can edit manually to adjust backing track playback level.
+Adds any of the vault's backing tracks not yet in this project's setlist (omit the project
+name to use the last-used project). Each track in the setlist includes a `volume` field
+(default 100%) that you can edit manually to adjust backing track playback level.
 
 ### Recording Session
 
 ```bash
-cd ~/Takeloom\ Projects/My\ Album
-takeloom start-session guitar
+takeloom start-session guitar "My Album"
 ```
 
 The session plays the backing track through your speakers, monitors your instrument input in real-time, and records your take. Controls:
@@ -88,11 +91,11 @@ The session plays the backing track through your speakers, monitors your instrum
 | `u` | Raise backing track volume by 5% | Any time |
 | `q` | End session | Any time |
 
-**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to `completed_takes/` and set as the preferred take in the setlist.
+**Completing a take:** Press `r` to start, then `e` when the song finishes. The take is saved to the vault's `completed_takes/` and set as the preferred take in the setlist.
 
 **Restarting a take:** Press `b` to loop back to the beginning. The backing track restarts and a new take file begins.
 
-**Volume adjustments** are saved back to `setlist.json` at the end of the session.
+**Volume adjustments** are saved back to the setlist file at the end of the session.
 
 **Video:** if a camera is configured (`takeloom setup-recording-devices`), the whole session is
 also recorded on video, saved as `session_video.mp4` alongside `session.flac` once the session
@@ -118,36 +121,51 @@ steps, and why it can't just be a one-click sign-in.
 
 ## Project Structure
 
-A project is just a setlist and its outputs — nothing session-shaped lives here. Each
-project creates this directory layout:
+A project is just a setlist file — `<projects_dir>/My Album.json`. Everything else lives in
+the shared Studio Session Vault (see [Studio Setup](#studio-setup)) instead of belonging to
+one project, so two different projects can reference the same backing track or completed
+take (most commonly a song pulled in from the Inspiration library — see
+[Cross-Project Take Reuse](#cross-project-take-reuse)) without either downloading or
+recording it twice:
 
 ```
-My Album/
-├── setlist.json
+<projects_dir>/
+├── My Album.json
+└── Side Project.json
+
+<vault>/
 ├── backing_tracks/
 │   ├── song1.mp3
-│   └── song2.flac
-└── completed_takes/
-    ├── song1 - guitar - take1.flac
-    ├── song1 - bass - take1.flac
-    └── song2 - guitar - take2.flac
+│   └── a1b2c3d4_song2.flac
+├── completed_takes/
+│   ├── song1 - guitar - take1.flac
+│   ├── song1 - bass - take1.flac
+│   └── song2 - guitar - take2.flac
+├── inspiration_takes.json
+└── sessions/
+    └── My Album/
+        └── 2025-01-15_14-30-00_guitar/
+            ├── session.flac
+            ├── session_video.mp4
+            └── session_log.json
 ```
 
-- `completed_takes/` — individual per-song recordings, one file per take
+- `backing_tracks/` and `completed_takes/` are shared across every project. A locally
+  uploaded file gets a short random prefix added only if its plain name would otherwise
+  collide with an unrelated project's file; a file that already has a globally unique name
+  (a YouTube download, or one pulled from the Inspiration library) keeps it as-is.
 - Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
-
-Recorded sessions themselves live separately, in the Studio Session Vault (see
-[Studio Setup](#studio-setup)):
-
-```
-<vault>/
-└── My Album/
-    └── 2025-01-15_14-30-00_guitar/
-        ├── session.flac
-        ├── session_video.mp4
-        └── session_log.json
-```
-
+- `inspiration_takes.json` — the cross-project take index (see below).
 - `session.flac` — the continuous raw recording spanning the full session
-- `session_log.json` — musician, studio, and event data; what post-session processing replays to find completed takes and copy them into the project's `completed_takes/`
+- `session_log.json` — musician, studio, and event data; what post-session processing replays to find completed takes and copy them into the vault's `completed_takes/`
 - `session_video.mp4` is only present when a camera is configured
+
+### Cross-Project Take Reuse
+
+A song pulled from the Inspiration library carries a stable ID from that library, so a take
+recorded on it from *any* project is recorded into `inspiration_takes.json` too, keyed by
+that ID. This is what lets an "inspiration filter" setlist slot (a standing "draw a random
+song from this filter each session" entry — added from the GUI's Streaming/Setlist screens)
+prefer redrawing a song other instruments already have a take on, and what lets
+`ensure_setlist_files_local` (session start, in remote vault mode) pull down another
+project's take on a shared song before it's needed.

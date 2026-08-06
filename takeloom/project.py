@@ -1,8 +1,19 @@
-"""Project, Setlist, and TrackEntry management."""
+"""Project, Setlist, and TrackEntry management.
+
+A project is just a setlist file (<projects_dir>/<name>.json) — nothing
+session- or file-storage-shaped lives with it. Backing tracks, completed
+takes, and recorded sessions all live in the Studio Session Vault instead
+(see takeloom/vault.py), shared across every project rather than each
+project owning its own copies. That's what lets two different projects
+reference the same inspiration-server song without downloading or
+recording it twice — see vault.py's inspiration take index.
+"""
 
 from __future__ import annotations
 
 import json
+import secrets
+import shutil
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
@@ -32,18 +43,12 @@ class TrackEntry:
     holds the filter criteria (e.g. {"artist": "Miles Davis"} or
     {"genre": "Rock"}) a session draws an actual song from fresh each time
     this slot comes up — see backend.py's _resolve_filter_slot. The
-    setlist itself never grows a new top-level entry for a drawn song;
-    instead, filter_takes holds one nested TrackEntry per distinct song
-    this slot has ever drawn that went on to earn a take, keyed by
-    str(inspiration_track_id) — each with its own real preferred_takes,
-    exactly like an ordinary track, just not a row of its own in
-    Setlist.tracks. This is what lets a later session prefer redrawing a
-    song other instruments have already recorded on this slot (see
-    _resolve_filter_slot) instead of always drawing something brand new,
-    and lets the Setlist view show something like "has takes: bass,
-    electric-guitar" for the slot as a whole (see ui/record.py's
-    _track_display) without the setlist growing new rows for every draw.
-    preferred_takes on the filter slot's own top-level entry is always
+    setlist itself never grows a new entry for a drawn song; which song
+    got drawn, and its take, are tracked in the Studio Session Vault's
+    shared inspiration-take index (vault.py) instead — keyed by
+    inspiration_track_id, not by which project or slot happened to draw
+    it, so any project referencing the same song sees the same takes.
+    preferred_takes on the filter slot's own entry is therefore always
     empty, which is also what makes it come up as "still needs a take"
     again on every future session.
     """
@@ -55,7 +60,6 @@ class TrackEntry:
     inspiration_track_id: int = 0  # radioserver track ID (0 = local file)
     is_inspiration_filter: bool = False
     inspiration_filter: dict = field(default_factory=dict)
-    filter_takes: dict = field(default_factory=dict)  # str(inspiration_track_id) -> nested TrackEntry
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
 
@@ -74,9 +78,6 @@ class TrackEntry:
         takes = {}
         for inst, take_data in data.get("preferred_takes", {}).items():
             takes[inst] = TakeInfo(**take_data)
-        filter_takes = {
-            key: TrackEntry.from_dict(entry_data) for key, entry_data in data.get("filter_takes", {}).items()
-        }
         return cls(
             name=data["name"],
             backing_track=data["backing_track"],
@@ -86,7 +87,6 @@ class TrackEntry:
             inspiration_track_id=data.get("inspiration_track_id", 0),
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             inspiration_filter=data.get("inspiration_filter", {}),
-            filter_takes=filter_takes,
             preferred_takes=takes,
         )
 
@@ -129,32 +129,29 @@ class Setlist:
 
 
 class Project:
-    """A recording project with a setlist and directory structure."""
+    """A recording project: just a setlist file, plus the (shared, vault-
+    wide) backing_tracks/completed_takes directories every project reads
+    and writes into."""
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.name = path.name
-        self.backing_tracks_dir = path / "backing_tracks"
-        self.completed_takes_dir = path / "completed_takes"
-        # Legacy: recorded sessions now live in the Studio Session Vault
-        # (see takeloom/vault.py), not here — this is only kept around for
-        # migrate_projects_to_vault() to find sessions recorded before the
-        # vault existed. Never created for a new project (see create()).
-        self.sessions_dir = path / "sessions"
-        self.setlist_path = path / "setlist.json"
+    def __init__(self, setlist_path: Path, vault_root: Path) -> None:
+        self.setlist_path = setlist_path
+        self.name = setlist_path.stem
+        self.backing_tracks_dir = vault_root / "backing_tracks"
+        self.completed_takes_dir = vault_root / "completed_takes"
         self.setlist = Setlist()
 
     def create(self) -> None:
-        """Create project directory structure."""
-        ensure_dir(self.path)
-        ensure_dir(self.backing_tracks_dir)
-        ensure_dir(self.completed_takes_dir)
+        """Create a new, empty project: just the setlist file — the
+        shared vault directories are ensured on demand by whatever
+        actually writes into them first, same as any other project using
+        them."""
+        ensure_dir(self.setlist_path.parent)
         self.save_setlist()
 
     @classmethod
-    def open(cls, path: Path) -> Project:
-        """Open an existing project."""
-        proj = cls(path)
+    def open(cls, setlist_path: Path, vault_root: Path) -> Project:
+        """Open an existing project from its setlist file."""
+        proj = cls(setlist_path, vault_root)
         if proj.setlist_path.exists():
             data = json.loads(proj.setlist_path.read_text())
             proj.setlist = Setlist.from_dict(data)
@@ -173,10 +170,11 @@ class Project:
                 take.has_video = video_path.exists()
 
     @classmethod
-    def create_new(cls, parent_dir: Path, name: str) -> Project:
-        """Create a new project in the given directory."""
+    def create_new(cls, parent_dir: Path, name: str, vault_root: Path) -> Project:
+        """Create a new project (a single <name>.json setlist file) in the
+        given directory."""
         safe_name = sanitize_filename(name)
-        proj = cls(parent_dir / safe_name)
+        proj = cls(parent_dir / f"{safe_name}.json", vault_root)
         proj.create()
         return proj
 
@@ -185,7 +183,7 @@ class Project:
 
     def load_setlist(self) -> None:
         if self.setlist_path.exists():
-            data = json.loads(_strip_json_comments(self.setlist_path.read_text()))
+            data = json.loads(self.setlist_path.read_text())
             self.setlist = Setlist.from_dict(data)
 
     def add_inspiration_filter_slot(self, label: str, filter_criteria: dict) -> TrackEntry:
@@ -204,11 +202,20 @@ class Project:
         self, source_path: Path, track_name: str | None = None, duration_seconds: float = 0.0,
     ) -> TrackEntry:
         """Add a backing track file to the project. Copies the file into
-        backing_tracks/, unless it's already sitting there (e.g. a file just
-        downloaded directly into that directory)."""
-        import shutil
-        dest = self.backing_tracks_dir / source_path.name
-        if dest.resolve() != source_path.resolve():
+        the vault's shared backing_tracks/ (see takeloom/vault.py), unless
+        it's already sitting there (a YouTube download's filename already
+        embeds the video's globally unique ID — see youtube.py — so it's
+        collision-safe as-is). Anything else gets a short random prefix
+        added before copying: backing_tracks/ is shared across every
+        project now, so two unrelated projects' local uploads could
+        otherwise collide on an ordinary filename like "song1.mp3" and
+        silently alias each other."""
+        ensure_dir(self.backing_tracks_dir)
+        if source_path.parent.resolve() == self.backing_tracks_dir.resolve():
+            dest = source_path
+        else:
+            safe_stem = sanitize_filename(source_path.stem) or "track"
+            dest = self.backing_tracks_dir / f"{secrets.token_hex(4)}_{safe_stem}{source_path.suffix}"
             shutil.copy2(source_path, dest)
         name = track_name or source_path.stem
         entry = TrackEntry(name=name, backing_track=dest.name, duration_seconds=duration_seconds)
@@ -216,11 +223,9 @@ class Project:
         self.save_setlist()
         return entry
 
+    @staticmethod
     def list_projects(parent_dir: Path) -> list[Path]:
-        """List existing projects in a directory."""
+        """List existing projects (setlist files) in a directory."""
         if not parent_dir.exists():
             return []
-        return [
-            p for p in sorted(parent_dir.iterdir())
-            if p.is_dir() and (p / "setlist.json").exists()
-        ]
+        return sorted(p for p in parent_dir.iterdir() if p.is_file() and p.suffix == ".json")

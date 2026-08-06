@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import queue
 import select
@@ -40,6 +39,22 @@ from .utils import format_duration, take_filename, next_take_number, ensure_dir
 @click.group()
 def main() -> None:
     """Takeloom - Music Recording Session Manager."""
+
+
+def _resolve_project(config: StudioConfig, name: str | None) -> Project:
+    """Open a project by name, falling back to the last-used one — a
+    project is just <projects_dir>/<name>.json now (see project.py), not
+    a folder to cd into, so every CLI command that used to infer "the
+    current project" from cwd needs a name instead."""
+    name = name or config.last_selected_project
+    if not name:
+        click.echo("Error: no project name given, and no last-used project in config.", err=True)
+        raise SystemExit(1)
+    setlist_path = Path(config.projects_dir) / f"{name}.json"
+    if not setlist_path.exists():
+        click.echo(f"Error: project '{name}' not found ({setlist_path}).", err=True)
+        raise SystemExit(1)
+    return Project.open(setlist_path, Path(config.session_vault_path))
 
 
 @main.command()
@@ -476,27 +491,14 @@ def new_project() -> None:
     projects_dir = Path(config.projects_dir)
 
     name = click.prompt("Project name")
-    project = Project.create_new(projects_dir, name)
+    project = Project.create_new(projects_dir, name, Path(config.session_vault_path))
     if config.backup_server:
         project.setlist.backup_server = config.backup_server
         project.save_setlist()
 
-    click.echo(f"Created project: {project.path}")
-    click.echo("  backing_tracks/")
-    click.echo("  completed_takes/")
-    click.echo("  sessions/")
-    click.echo("  setlist.json")
-
-    # Scan backing_tracks/ and update setlist
-    saved_cwd = Path.cwd()
-    try:
-        os.chdir(project.path)
-        ctx = click.get_current_context()
-        ctx.invoke(update_setlist)
-    except SystemExit:
-        pass
-    finally:
-        os.chdir(saved_cwd)
+    click.echo(f"Created project: {project.setlist_path}")
+    click.echo(f"Add backing tracks to the shared vault's backing_tracks/ folder, then run:")
+    click.echo(f"  takeloom update-setlist {name!r}")
 
     click.echo()
     click.echo("To enable inspiration features, add an \"inspiration\" key to setlist.json:")
@@ -509,50 +511,48 @@ def new_project() -> None:
 
 @main.command()
 def sync_push() -> None:
-    """Push local project files to the backup server."""
-    cwd = Path.cwd()
-    if not (cwd / "setlist.json").exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
-    project = Project.open(cwd)
-    remote = project.setlist.backup_server or StudioConfig.load().backup_server
+    """Push every project's setlist file to the backup server. A project
+    is just <projects_dir>/<name>.json now — this pushes them all at
+    once rather than one project's own folder, unlike the old per-project
+    layout. Recorded sessions, backing tracks, and completed takes sync
+    separately via the Studio Session Vault (see 'takeloom setup-studio')."""
+    config = StudioConfig.load()
+    remote = config.backup_server
     if not remote:
-        click.echo("Error: No backup server configured.", err=True)
-        click.echo("Set it in setlist.json or via 'takeloom setup-studio'.")
+        click.echo("Error: No backup server configured. Set it via 'takeloom setup-studio'.", err=True)
         raise SystemExit(1)
 
     from .sync import sync_up
-    sync_up(project.path, remote)
+    sync_up(Path(config.projects_dir), remote)
 
 
 @main.command()
 def sync_pull() -> None:
-    """Pull project files from the backup server."""
-    cwd = Path.cwd()
-    if not (cwd / "setlist.json").exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
-    project = Project.open(cwd)
-    remote = project.setlist.backup_server or StudioConfig.load().backup_server
+    """Pull every project's setlist file from the backup server. See
+    sync-push for why this operates on all projects at once now."""
+    config = StudioConfig.load()
+    remote = config.backup_server
     if not remote:
-        click.echo("Error: No backup server configured.", err=True)
-        click.echo("Set it in setlist.json or via 'takeloom setup-studio'.")
+        click.echo("Error: No backup server configured. Set it via 'takeloom setup-studio'.", err=True)
         raise SystemExit(1)
 
     from .sync import sync_down
-    sync_down(project.path, remote)
+    sync_down(Path(config.projects_dir), remote)
 
 
 @main.command(name="migrate-sessions-to-vault")
 def migrate_sessions_to_vault_command() -> None:
-    """One-time migration: move every project's recorded sessions out of
-    its own sessions/ folder into the Studio Session Vault (see 'takeloom
-    setup-studio'). Going forward, new sessions are recorded straight into
-    the vault — this is only for sessions recorded before that existed.
+    """One-time migration from the old per-project folder layout
+    (<projects_dir>/<name>/{setlist.json, backing_tracks/,
+    completed_takes/, sessions/}) to the current one: a flat
+    <projects_dir>/<name>.json setlist file, with backing tracks,
+    completed takes, and sessions all moved into the Studio Session Vault
+    (see 'takeloom setup-studio'). Going forward, all of these are read
+    from and written straight into the vault — this is only for content
+    recorded before it existed.
 
-    Safe to re-run: a session already migrated is skipped, not re-copied.
+    Safe to re-run: a project already migrated (its flat .json already
+    exists) is skipped entirely.
     """
     config = StudioConfig.load()
     if not config.session_vault_path:
@@ -561,41 +561,39 @@ def migrate_sessions_to_vault_command() -> None:
     if config.session_vault_mode in ("remote", "both") and not config.backup_server:
         click.echo(
             f"Warning: vault mode is '{config.session_vault_mode}' but no backup server is configured — "
-            "migrated sessions will only be moved locally.",
+            "migrated content will only be moved locally.",
         )
 
     from .vault import migrate_projects_to_vault
-    click.echo(f"Migrating sessions into vault: {config.session_vault_path}\n")
-    migrated, projects_touched = migrate_projects_to_vault(config, log=click.echo)
-    click.echo(f"\nDone: moved {migrated} session(s) across {projects_touched} project(s).")
+    click.echo(f"Migrating into vault: {config.session_vault_path}\n")
+    projects_migrated, sessions_migrated = migrate_projects_to_vault(config, log=click.echo)
+    click.echo(f"\nDone: migrated {projects_migrated} project(s), moving {sessions_migrated} session(s).")
 
 
 @main.command()
-def update_setlist() -> None:
-    """Scan backing_tracks/ and update setlist.json in the current directory."""
-    cwd = Path.cwd()
-    setlist_path = cwd / "setlist.json"
-    backing_dir = cwd / "backing_tracks"
+@click.argument("project_name", required=False, default=None)
+def update_setlist(project_name: str | None) -> None:
+    """Add any of the vault's backing tracks not yet in PROJECT_NAME's
+    setlist (falls back to the last-used project). backing_tracks/ is
+    shared vault-wide across every project now (see 'takeloom
+    setup-studio'), so unlike the old per-project folder, this only adds
+    — it never removes a track for a file that's simply used by some
+    other project instead."""
+    config = StudioConfig.load()
+    project = _resolve_project(config, project_name)
 
-    if not setlist_path.exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
+    from .vault import vault_backing_tracks_dir
+    backing_dir = vault_backing_tracks_dir(config)
     if not backing_dir.exists():
-        click.echo("Error: No backing_tracks/ directory found.", err=True)
+        click.echo(f"Error: vault backing_tracks/ directory not found ({backing_dir}).", err=True)
         raise SystemExit(1)
 
-    # Load existing setlist
-    project = Project.open(cwd)
     existing_files = {t.backing_track for t in project.setlist.tracks}
-
-    # Scan for backing-track-able files (audio, or video for its audio stream)
     found_files = {
         f.name for f in backing_dir.iterdir()
         if f.is_file() and f.suffix.lower() in SUPPORTED_EXTS
     }
 
-    # Add new tracks
     added = 0
     for fname in sorted(found_files - existing_files):
         fpath = backing_dir / fname
@@ -612,32 +610,17 @@ def update_setlist() -> None:
         click.echo(f"  + {fname} ({format_duration(duration)})")
         added += 1
 
-    # Remove tracks whose files no longer exist
-    removed = 0
-    kept_tracks = []
-    for track in project.setlist.tracks:
-        # Filter slots have no backing file at all (backing_track is
-        # always "") — never removed here regardless of found_files.
-        if track.is_inspiration_filter or track.backing_track in found_files:
-            kept_tracks.append(track)
-        else:
-            click.echo(f"  - {track.backing_track} (removed)")
-            removed += 1
-    project.setlist.tracks = kept_tracks
-
     project.save_setlist()
-    click.echo(f"\nSetlist updated: {added} added, {removed} removed, {len(kept_tracks)} total.")
+    click.echo(f"\nSetlist updated: {added} added, {len(project.setlist.tracks)} total.")
 
 
 @main.command()
-def listen() -> None:
-    """Listen to mixed takes for a track (without backing track)."""
-    cwd = Path.cwd()
-    if not (cwd / "setlist.json").exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
-    project = Project.open(cwd)
+@click.argument("project_name", required=False, default=None)
+def listen(project_name: str | None) -> None:
+    """Listen to mixed takes for a track (without backing track), from
+    PROJECT_NAME (falls back to the last-used project)."""
+    config = StudioConfig.load()
+    project = _resolve_project(config, project_name)
     if not project.setlist.tracks:
         click.echo("No tracks in setlist.")
         raise SystemExit(1)
@@ -672,8 +655,6 @@ def listen() -> None:
     # Import audio modules
     import sounddevice as sd
     from .audio.mixer import Mixer
-
-    config = StudioConfig.load()
 
     # Load all preferred takes into mixer with latency compensation
     mixer = Mixer(config.sample_rate)
@@ -729,8 +710,11 @@ def listen() -> None:
 
 @main.command()
 @click.argument("instrument")
-def start_session(instrument: str) -> None:
-    """Start a recording session for INSTRUMENT.
+@click.argument("project_name", required=False, default=None)
+def start_session(instrument: str, project_name: str | None) -> None:
+    """Start a recording session for INSTRUMENT, in PROJECT_NAME (falls
+    back to the last-used project). Run 'takeloom sync-pull' first if
+    another machine may have newer project files.
 
     Runs on LocalBackend — the same recording engine and Stream Deck driver
     (RecordingDeckDriver) as the Tk UI and `takeloom server`, so behavior is
@@ -768,21 +752,7 @@ def start_session(instrument: str) -> None:
         config.save()
         click.echo(f"  Saved '{instrument}' to config.\n")
 
-    # Check we're in a project directory. Note: unlike the pre-Backend
-    # version of this command, the project must also be discoverable under
-    # config.projects_dir by name — LocalBackend resolves projects by name,
-    # same requirement the UI and `takeloom server` already have.
-    cwd = Path.cwd()
-    if not (cwd / "setlist.json").exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
-    project = Project.open(cwd)
-
-    if project.setlist.backup_server:
-        from .sync import sync_down
-        sync_down(project.path, project.setlist.backup_server)
-        project.load_setlist()  # reload after sync may have updated it
+    project = _resolve_project(config, project_name)
 
     if not project.setlist.tracks:
         click.echo("Error: Setlist is empty. Run 'takeloom update-setlist' first.", err=True)
@@ -861,22 +831,11 @@ def start_session(instrument: str) -> None:
         click.echo(f"Error ending session: {e}", err=True)
     click.echo("Processing session takes...")
     backend.join_session_processing()
-
-    # Re-opened fresh: post-session processing (see processing/splicer.py)
-    # just wrote every completed take and the setlist to disk — this cleanup
-    # step needs that current on-disk state, not the stale copy opened
-    # before the session.
-    fresh_project = Project.open(cwd)
-    for track in fresh_project.setlist.tracks:
-        if track.inspiration_track_id:
-            bt_path = fresh_project.backing_tracks_dir / track.backing_track
-            if bt_path.exists():
-                bt_path.unlink()
-
-    remote = fresh_project.setlist.backup_server or config.backup_server
-    if remote:
-        from .sync import sync_up
-        sync_up(fresh_project.path, remote)
+    # Recorded session, backing tracks, and completed takes are already
+    # synced to the backup server by LocalBackend itself as part of
+    # ending the session (see vault.py) — nothing further to do here.
+    # If this project's own setlist.json needs pushing too (e.g. another
+    # machine will pick it up), run 'takeloom sync-push'.
 
 
 @contextmanager
@@ -904,11 +863,18 @@ def _recording_context(project=None, config=None):
         yield streamdeck, sd_keys
     finally:
         streamdeck.disconnect()
-        if project is not None:
-            remote = project.setlist.backup_server or (config.backup_server if config else None)
+        if project is not None and config is not None:
+            remote = project.setlist.backup_server or config.backup_server
             if remote:
                 from .sync import sync_up
-                sync_up(project.path, remote)
+                from .vault import sync_and_maybe_prune_dir, vault_backing_tracks_dir, vault_completed_takes_dir
+                # Pushes this project's own setlist.json alongside every
+                # other project's (see sync-push), plus the shared vault
+                # dirs this command (unlike start-session, which routes
+                # through LocalBackend/vault.py) writes into directly.
+                sync_up(Path(config.projects_dir), remote)
+                sync_and_maybe_prune_dir(config, vault_backing_tracks_dir(config), log=click.echo)
+                sync_and_maybe_prune_dir(config, vault_completed_takes_dir(config), log=click.echo)
 
 
 @main.command()
@@ -1099,15 +1065,11 @@ def _latency_adjust_phase(
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def _query_inspiration_tracks() -> tuple[list[dict], StudioConfig]:
-    """Query inspiration tracks from radioserver. Returns (tracks, config)."""
-    cwd = Path.cwd()
-    if not (cwd / "setlist.json").exists():
-        click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-        raise SystemExit(1)
-
-    project = Project.open(cwd)
+def _query_inspiration_tracks(project_name: str | None = None) -> tuple[list[dict], StudioConfig, Project]:
+    """Query inspiration tracks from radioserver, for PROJECT_NAME (falls
+    back to the last-used project). Returns (tracks, config, project)."""
     config = StudioConfig.load()
+    project = _resolve_project(config, project_name)
 
     click.echo("Querying inspiration tracks...")
     try:
@@ -1116,13 +1078,15 @@ def _query_inspiration_tracks() -> tuple[list[dict], StudioConfig]:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1)
 
-    return tracks, config
+    return tracks, config, project
 
 
 @main.command()
-def record_inspiration() -> None:
-    """Pick inspiration tracks to add to the setlist for recording."""
-    tracks, config = _query_inspiration_tracks()
+@click.argument("project_name", required=False, default=None)
+def record_inspiration(project_name: str | None) -> None:
+    """Pick inspiration tracks to add to PROJECT_NAME's setlist for
+    recording (falls back to the last-used project)."""
+    tracks, config, project = _query_inspiration_tracks(project_name)
 
     click.echo(f"\n{len(tracks)} tracks:\n")
     for i, t in enumerate(tracks):
@@ -1150,9 +1114,6 @@ def record_inspiration() -> None:
     if not indices:
         click.echo("No valid tracks selected.")
         raise SystemExit(1)
-
-    cwd = Path.cwd()
-    project = Project.open(cwd)
 
     added = 0
     for idx in indices:
@@ -1183,9 +1144,11 @@ def record_inspiration() -> None:
 
 
 @main.command()
-def list_inspirations() -> None:
-    """List tracks matching the current project's inspiration filters."""
-    tracks, config = _query_inspiration_tracks()
+@click.argument("project_name", required=False, default=None)
+def list_inspirations(project_name: str | None) -> None:
+    """List tracks matching PROJECT_NAME's inspiration filters (falls
+    back to the last-used project)."""
+    tracks, config, _project = _query_inspiration_tracks(project_name)
     click.echo(f"\n{len(tracks)} tracks:\n")
     for i, t in enumerate(tracks):
         artist = t.get("artist", "Unknown")
@@ -1201,8 +1164,10 @@ def list_inspirations() -> None:
 @main.command()
 @click.option("--verbose", "-v", is_flag=True, default=False, help="Print debug info.")
 @click.argument("instrument", required=False, default=None)
-def inspiration(instrument: str | None, verbose: bool) -> None:
-    """Play tracks from your music library for inspiration.
+@click.argument("project_name", required=False, default=None)
+def inspiration(instrument: str | None, project_name: str | None, verbose: bool) -> None:
+    """Play tracks from your music library for inspiration, from
+    PROJECT_NAME (falls back to the last-used project).
 
     Pass an INSTRUMENT name to start a recording session: each track is
     recorded automatically and added to the setlist with your take.
@@ -1215,7 +1180,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
         if verbose:
             click.echo(msg)
 
-    tracks, config = _query_inspiration_tracks()
+    tracks, config, queried_project = _query_inspiration_tracks(project_name)
     server = config.inspiration_server.rstrip("/")
 
     import sounddevice as sd
@@ -1232,11 +1197,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
     if is_recording:
         from .audio.engine import AudioEngine
 
-        cwd = Path.cwd()
-        if not (cwd / "setlist.json").exists():
-            click.echo("Error: No setlist.json in current directory. Are you in a project folder?", err=True)
-            raise SystemExit(1)
-        project = Project.open(cwd)
+        project = queried_project
         ensure_dir(project.completed_takes_dir)
 
         inst_obj = config.get_instrument(instrument)
@@ -1622,7 +1583,7 @@ def inspiration(instrument: str | None, verbose: bool) -> None:
 
                 # Batch exhausted — fetch next batch from server (obeys playlist settings)
                 vlog("[playlist] batch complete, fetching next batch...")
-                new_tracks, _ = _query_inspiration_tracks()
+                new_tracks, _, _ = _query_inspiration_tracks(project_name)
                 if not new_tracks:
                     click.echo("\nNo more tracks available.")
                     break

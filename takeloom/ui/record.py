@@ -482,14 +482,13 @@ class RecordFrame(ttk.Frame):
 
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         if track.is_inspiration_filter:
-            # Never has a take of its own (see TrackEntry's docstring) —
-            # instead, roll up which instruments have a take on any song
-            # this slot has drawn (track.filter_takes), across every song
-            # it's ever drawn, not just one.
+            # Never has a take of its own (see TrackEntry's docstring), and
+            # which songs it's drawn — and their takes — now live in the
+            # vault-wide shared index (vault.py), not on this slot, so
+            # there's nothing local to roll up here without a live
+            # inspiration-server query; just show the filter criteria.
             criteria = self._filter_criteria_display(track.inspiration_filter)
-            instruments = sorted({inst for entry in track.filter_takes.values() for inst in entry.preferred_takes})
-            takes_str = f" — has takes: {', '.join(instruments)}" if instruments else ""
-            return f"🎲 {track.name}  ({criteria}){takes_str}"
+            return f"🎲 {track.name}  ({criteria})"
         dur = format_duration(track.duration_seconds)
         take = track.get_take_for_instrument(inst_name)
         if take is None:

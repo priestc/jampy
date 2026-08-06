@@ -36,13 +36,16 @@ backend.py's _resolve_filter_slot happened to draw for it that session —
 never a top-level entry of its own. That's why every take here is named
 from the logged `track_name` (the drawn song's name, for a filter slot)
 rather than looked up from the setlist entry at track_index (the slot's
-own name) — and why a filter slot's take is attached to a *nested* entry
-in the slot's own TrackEntry.filter_takes (keyed by the drawn song's
+own name) — and why a filter slot's take is recorded into the shared
+vault-wide inspiration-take index (vault.py, keyed by the drawn song's
 inspiration_track_id, from the session log's filter_slot_draws) instead
 of the slot's own preferred_takes: the slot itself must stay "always
-needs a take" so it keeps getting redrawn, while filter_takes is what
-lets a later session recognize and prefer a song other instruments have
-already recorded on this same slot.
+needs a take" so it keeps getting redrawn, while the shared index is
+what lets a later session — in this project or any other — recognize
+and prefer a song other instruments have already recorded on. A regular
+(non-filter) inspiration-sourced track's take is recorded into both: its
+own preferred_takes (as always) and the shared index, so other projects
+referencing the same song can find it too.
 """
 
 from __future__ import annotations
@@ -53,8 +56,10 @@ from pathlib import Path
 
 import soundfile as sf
 
-from ..project import Project, TakeInfo, TrackEntry
+from ..config import StudioConfig
+from ..project import Project, TakeInfo
 from ..utils import take_filename, next_take_number, ensure_dir
+from ..vault import record_inspiration_take, vault_root
 
 # An abandoned (skipped/stopped) play-through this long is kept as a take
 # anyway — see module docstring.
@@ -133,7 +138,7 @@ def _copy_flac_segment(src: sf.SoundFile, start: int, end: int, out_path: Path) 
             remaining -= len(block)
 
 
-def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: float = 0.0) -> str:
+def process_session(session_dir: Path, config: StudioConfig) -> str:
     """Turn a finished session directory (session.flac + session_log.json,
     plus the raw video/mix pair when a camera ran) into completed take files
     and setlist updates. Returns a one-line human-readable summary.
@@ -144,7 +149,11 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
     log_path = session_dir / "session_log.json"
     data = json.loads(log_path.read_text())
 
-    project = Project.open(projects_dir / data["project"])
+    projects_dir = Path(config.projects_dir)
+    root = vault_root(config)
+    video_offset_ms = config.video_latency_compensation_ms
+
+    project = Project.open(projects_dir / f"{data['project']}.json", root)
     instrument = data["instrument"]
     musician = data.get("musician", "")
     sample_rate = data.get("sample_rate") or 48000
@@ -201,29 +210,34 @@ def process_session(session_dir: Path, projects_dir: Path, video_offset_ms: floa
 
                 take_info = TakeInfo(instrument=instrument, take_number=take_num, filename=flac_name, has_video=has_video)
                 if slot.is_inspiration_filter:
-                    # Attached to the drawn song's own nested entry (see
-                    # TrackEntry.filter_takes), not the slot's top-level
-                    # preferred_takes — the slot itself must stay "always
-                    # needs a take" so it keeps getting redrawn. draw_info
-                    # (this session's actual draw, from
-                    # backend.py's _save_session_log) is what lets a later
-                    # session recognize and prefer redrawing the same song
-                    # (see backend.py's _resolve_filter_slot) instead of
-                    # this take having nowhere to attach at all.
+                    # Recorded into the shared vault-wide index (vault.py),
+                    # not the slot's own top-level preferred_takes — the
+                    # slot itself must stay "always needs a take" so it
+                    # keeps getting redrawn. draw_info (this session's
+                    # actual draw, from backend.py's _save_session_log) is
+                    # what lets a later session — this project or any
+                    # other — recognize and prefer the same song (see
+                    # backend.py's _resolve_filter_slot).
                     draw_info = filter_slot_draws.get(str(take.track_index))
                     if draw_info:
-                        key = str(draw_info["inspiration_track_id"])
-                        nested = slot.filter_takes.get(key)
-                        if nested is None:
-                            nested = TrackEntry(
-                                name=draw_info["name"], backing_track=draw_info["backing_track"],
-                                duration_seconds=draw_info.get("duration_seconds", 0.0),
-                                inspiration_track_id=draw_info["inspiration_track_id"],
-                            )
-                            slot.filter_takes[key] = nested
-                        nested.set_preferred_take(instrument, take_info)
+                        record_inspiration_take(
+                            root, draw_info["inspiration_track_id"], draw_info["name"],
+                            draw_info["backing_track"], draw_info.get("duration_seconds", 0.0),
+                            instrument, take_info,
+                        )
                 else:
                     slot.set_preferred_take(instrument, take_info)
+                    if slot.inspiration_track_id:
+                        # A regular (non-filter) inspiration-sourced track:
+                        # mirror the take into the shared index too, so any
+                        # *other* project referencing this same song can
+                        # find it — same reuse mechanism a filter slot's
+                        # draw gets, just recorded alongside the ordinary
+                        # setlist entry rather than instead of it.
+                        record_inspiration_take(
+                            root, slot.inspiration_track_id, slot.name, slot.backing_track,
+                            slot.duration_seconds, instrument, take_info,
+                        )
                 saved += 1
 
     # Inspiration tracks this session added that never earned any take (for

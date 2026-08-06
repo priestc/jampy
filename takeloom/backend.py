@@ -873,15 +873,15 @@ class LocalBackend(Backend):
 
     def list_projects(self) -> list[str]:
         config = self.get_config()
-        return [p.name for p in Project.list_projects(Path(config.projects_dir))]
+        return [p.stem for p in Project.list_projects(Path(config.projects_dir))]
 
     def _open_project(self, project_name: str) -> Project:
         config = self.get_config()
         projects = Project.list_projects(Path(config.projects_dir))
-        path = next((p for p in projects if p.name == project_name), None)
+        path = next((p for p in projects if p.stem == project_name), None)
         if path is None:
             raise BackendError(f"Project '{project_name}' not found.")
-        return Project.open(path)
+        return Project.open(path, Path(config.session_vault_path))
 
     def get_setlist(self, project_name: str) -> dict:
         return self._open_project(project_name).setlist.to_dict()
@@ -898,9 +898,9 @@ class LocalBackend(Backend):
         safe_name = sanitize_filename(name)
         if not safe_name:
             raise BackendError("Enter a project name.")
-        if (projects_dir / safe_name).exists():
+        if (projects_dir / f"{safe_name}.json").exists():
             raise BackendError(f"A project named '{safe_name}' already exists.")
-        project = Project.create_new(projects_dir, name)
+        project = Project.create_new(projects_dir, name, Path(config.session_vault_path))
         return project.name
 
     def add_local_backing_track(
@@ -1334,8 +1334,23 @@ class LocalBackend(Backend):
         if backing_path.exists():
             engine.mixer.add_source("backing", backing_path, volume=track.volume / 100.0)
 
+        # For an inspiration-sourced track, an *other* project could have
+        # recorded a take on this exact song too — merged in from the
+        # shared vault-wide index (vault.py), not just this project's own
+        # preferred_takes, so layering finds it regardless of which
+        # project originally recorded it. This project's own record wins
+        # on conflict (same instrument in both) since it's the more
+        # specific/authoritative one for what's actually loaded here.
+        other_takes = dict(track.preferred_takes)
+        if track.inspiration_track_id:
+            from .vault import get_inspiration_entry, vault_root
+            shared = get_inspiration_entry(vault_root(config), track.inspiration_track_id)
+            if shared is not None:
+                for inst_name, take_info in shared.preferred_takes.items():
+                    other_takes.setdefault(inst_name, take_info)
+
         trim = int(config.latency_compensation_ms / 1000.0 * config.sample_rate)
-        for other_inst, take_info in track.preferred_takes.items():
+        for other_inst, take_info in other_takes.items():
             if other_inst.lower() == session.inst.name.lower():
                 continue
             take_path = project.completed_takes_dir / take_info.filename
@@ -1356,17 +1371,18 @@ class LocalBackend(Backend):
         """Resolve `track` for `instrument_name` to record. A non-filter
         track passes through unchanged.
 
-        Prefers a song this slot has already drawn in a past session that
-        has a take from some *other* instrument but not yet from this one
-        — track.filter_takes (see TrackEntry's docstring) — so a later
-        instrument can layer onto the same song instead of the setlist
-        only ever accumulating unrelated one-off takes. Only when no such
-        candidate exists does it draw a genuinely new one from the
-        inspiration server at random. Either way, the setlist itself never
-        gains a new top-level entry here — see TrackEntry's docstring and
-        _resolve_filter_slot_for_session's caching wrapper, which is what
-        actually gets called during a session; this is the pure "pick one"
-        step, split out for testability.
+        Queries the inspiration server for every song matching the
+        filter, then prefers one that some *other* project or session has
+        already recorded a take on (but not yet this instrument) — via
+        the shared vault-wide inspiration-take index (vault.py), not just
+        this project's own history — so a later instrument can layer onto
+        the same song instead of the setlist only ever accumulating
+        unrelated one-off takes. Falls back to a genuinely random pick
+        among every match when none qualify. Either way, the setlist
+        itself never gains a new entry here — see TrackEntry's docstring
+        and _resolve_filter_slot_for_session's caching wrapper, which is
+        what actually gets called during a session; this is the pure
+        "pick one" step, split out for testability.
 
         `exclude_id` (redraw_current_track's use) leaves one specific
         inspiration_track_id out of consideration — so "give me a
@@ -1377,13 +1393,6 @@ class LocalBackend(Backend):
         from)."""
         if not track.is_inspiration_filter:
             return track
-        reusable = [
-            entry for entry in track.filter_takes.values()
-            if entry.preferred_takes and instrument_name not in entry.preferred_takes
-            and entry.inspiration_track_id != exclude_id
-        ]
-        if reusable:
-            return random.choice(reusable)
         from .inspiration import InspirationError, build_inspiration_track_entry, search_tracks_by_filter
         try:
             matches = search_tracks_by_filter(config, track.inspiration_filter)
@@ -1392,7 +1401,16 @@ class LocalBackend(Backend):
         if not matches:
             raise BackendError(f"No inspiration tracks match the filter for '{track.name}'.")
         candidates = [m for m in matches if m.get("id") != exclude_id] or matches
-        return build_inspiration_track_entry(random.choice(candidates))
+
+        from .vault import load_inspiration_index, vault_root
+        index = load_inspiration_index(vault_root(config))
+        reusable = []
+        for m in candidates:
+            shared = index.get(str(m.get("id")))
+            if shared is not None and shared.preferred_takes and instrument_name not in shared.preferred_takes:
+                reusable.append(m)
+        chosen = random.choice(reusable) if reusable else random.choice(candidates)
+        return build_inspiration_track_entry(chosen)
 
     def _resolve_filter_slot_for_session(
         self, session: "_ActiveSession", config: StudioConfig, track: TrackEntry, index: int,
@@ -1406,7 +1424,8 @@ class LocalBackend(Backend):
         later succeeds — otherwise _advance_locked would keep re-offering
         the same filter slot indefinitely within one session, since the
         slot's own preferred_takes never actually gets a take (the take
-        belongs to whatever song got drawn — see TrackEntry.filter_takes).
+        belongs to whatever song got drawn — recorded into the shared
+        vault-wide index instead, see vault.record_inspiration_take).
         A non-filter track passes through unchanged (and isn't cached —
         nothing to cache)."""
         if not track.is_inspiration_filter:
@@ -2099,6 +2118,14 @@ class LocalBackend(Backend):
 
         config = self.get_config()
         project = self._open_project(project_name)
+        # Best-effort: pulls back anything "remote" vault mode pruned
+        # locally after an earlier session — see vault.py. A no-op in
+        # "local"/"both" modes, where nothing's ever missing, and never
+        # blocks the session from starting if a download fails.
+        from .vault import ensure_setlist_files_local
+        ensure_setlist_files_local(
+            config, project, log=lambda msg: self._emit("recording_status", {"status": msg}),
+        )
         inst = config.get_instrument(instrument_name)
         if inst is None:
             raise BackendError(f"Instrument '{instrument_name}' not found.")
@@ -2336,11 +2363,7 @@ class LocalBackend(Backend):
         from .processing.splicer import process_session
         config = self.get_config()
         try:
-            summary = process_session(
-                session_dir=session.session_dir,
-                projects_dir=Path(config.projects_dir),
-                video_offset_ms=config.video_latency_compensation_ms,
-            )
+            summary = process_session(session_dir=session.session_dir, config=config)
         except Exception as e:
             self._emit("recording_status", {
                 "phase": "idle",
@@ -2378,8 +2401,8 @@ class LocalBackend(Backend):
             # filter-slot index -> the song actually drawn for it this
             # session (see _resolve_filter_slot) — the setlist itself
             # never records this, so post-processing needs it from here
-            # to attach a completed take into the slot's own
-            # TrackEntry.filter_takes rather than the top-level setlist.
+            # to record a completed take into the shared vault-wide
+            # inspiration-take index (vault.py) rather than the setlist.
             "filter_slot_draws": {
                 str(index): {
                     "name": entry.name, "backing_track": entry.backing_track,
