@@ -464,31 +464,14 @@ class RecordFrame(ttk.Frame):
         inspiration_scroll.pack(side="right", fill="y")
         self.inspiration_listbox.bind("<<ListboxSelect>>", self._on_inspiration_select)
 
-    def _filter_criteria_display(self, filter_criteria: dict) -> str:
-        parts = []
-        for key, value in filter_criteria.items():
-            if key in ("year_min", "year_max"):
-                continue
-            parts.append(f"{key}: {value}")
-        year_min, year_max = filter_criteria.get("year_min"), filter_criteria.get("year_max")
-        if year_min is not None or year_max is not None:
-            if year_min is not None and year_max is not None:
-                parts.append(f"year: {year_min}–{year_max}")
-            elif year_min is not None:
-                parts.append(f"year: {year_min}+")
-            else:
-                parts.append(f"year: up to {year_max}")
-        return ", ".join(parts)
-
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring), and
             # which songs it's drawn — and their takes — now live in the
-            # vault-wide shared index (vault.py), not on this slot, so
-            # there's nothing local to roll up here without a live
-            # inspiration-server query; just show the filter criteria.
-            criteria = self._filter_criteria_display(track.inspiration_filter)
-            return f"🎲 {track.name}  ({criteria})"
+            # vault-wide shared index (vault.py), not on this slot. The
+            # slot's own name is already the auto-derived filter label
+            # (see inspiration.derive_filter_label) — nothing more to show.
+            return f"🎲 {track.name}"
         dur = format_duration(track.duration_seconds)
         take = track.get_take_for_instrument(inst_name)
         if take is None:

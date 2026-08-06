@@ -391,25 +391,21 @@ class AddToSetlistDialog(tk.Toplevel):
             foreground="#666666", wraplength=380, justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        ttk.Label(tab, text="Label (optional)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.filter_label_var = tk.StringVar()
-        ttk.Entry(tab, textvariable=self.filter_label_var, width=30).grid(row=1, column=1, sticky="ew")
-
         def fetch_filter_artists(text: str) -> list[tuple[str, None]]:
             return [(name, None) for name in self._backend.search_inspiration_artists(text)]
 
-        ttk.Label(tab, text="Artist").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(tab, text="Artist").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.filter_artist_field = _AutocompleteEntry(tab, fetch=fetch_filter_artists)
-        self.filter_artist_field.grid(row=2, column=1, sticky="ew")
+        self.filter_artist_field.grid(row=1, column=1, sticky="ew")
 
-        ttk.Label(tab, text="Genre").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(tab, text="Genre").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
         self.filter_genre_var = tk.StringVar()
         genre_entry = ttk.Entry(tab, textvariable=self.filter_genre_var, width=30)
-        genre_entry.grid(row=3, column=1, sticky="ew")
+        genre_entry.grid(row=2, column=1, sticky="ew")
 
         year_row = ttk.Frame(tab)
-        year_row.grid(row=4, column=1, sticky="w")
-        ttk.Label(tab, text="Year range").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
+        year_row.grid(row=3, column=1, sticky="w")
+        ttk.Label(tab, text="Year range").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.filter_year_min_var = tk.StringVar()
         self.filter_year_max_var = tk.StringVar()
         year_min_entry = ttk.Entry(year_row, textvariable=self.filter_year_min_var, width=8)
@@ -478,7 +474,6 @@ class AddToSetlistDialog(tk.Toplevel):
 
             self._start_add(do_inspiration)
         else:
-            label = self.filter_label_var.get().strip()
             filter_artist = self.filter_artist_field.get().strip()
             filter_genre = self.filter_genre_var.get().strip()
             year_min_text = self.filter_year_min_var.get().strip()
@@ -512,8 +507,7 @@ class AddToSetlistDialog(tk.Toplevel):
             if year_max is not None:
                 filter_criteria["year_max"] = year_max
 
-            if not label:
-                label = derive_filter_label(filter_criteria)
+            label = derive_filter_label(filter_criteria)
 
             self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 
