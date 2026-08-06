@@ -11,12 +11,20 @@ from typing import Callable
 
 from .config import StudioConfig
 from .project import Project, TrackEntry
+from .utils import format_duration
 
 ProgressCallback = Callable[[float | None, str], None]
 
 
 class InspirationError(Exception):
     """Raised when inspiration tracks can't be queried or downloaded."""
+
+
+def _fmt_length(seconds: float) -> str:
+    """"3:00" rather than format_duration()'s zero-padded "03:00" — reads
+    more naturally in a derived filter label."""
+    minutes, _, secs = format_duration(seconds).partition(":")
+    return f"{int(minutes)}:{secs}"
 
 
 def derive_filter_label(filter_criteria: dict) -> str:
@@ -29,6 +37,8 @@ def derive_filter_label(filter_criteria: dict) -> str:
     genre = (filter_criteria.get("genre") or "").strip()
     year_min = filter_criteria.get("year_min")
     year_max = filter_criteria.get("year_max")
+    length_min = filter_criteria.get("duration_min")
+    length_max = filter_criteria.get("duration_max")
 
     subject = " - ".join(p for p in (artist, genre) if p)
 
@@ -41,12 +51,26 @@ def derive_filter_label(filter_criteria: dict) -> str:
     else:
         year_part = ""
 
-    if subject and year_part:
-        return f"{subject} {year_part}"
+    if length_min is not None and length_max is not None:
+        if length_min == length_max:
+            length_part = f"around {_fmt_length(length_min)}"
+        else:
+            length_part = f"{_fmt_length(length_min)}-{_fmt_length(length_max)}"
+    elif length_min is not None:
+        length_part = f"over {_fmt_length(length_min)}"
+    elif length_max is not None:
+        length_part = f"under {_fmt_length(length_max)}"
+    else:
+        length_part = ""
+
+    qualifiers = " ".join(p for p in (year_part, length_part) if p)
+
+    if subject and qualifiers:
+        return f"{subject} {qualifiers}"
     if subject:
         return subject
-    if year_part:
-        return f"Tracks {year_part}"
+    if qualifiers:
+        return f"Tracks {qualifiers}"
     return "Inspiration Filter"
 
 
