@@ -22,11 +22,13 @@ from tkinter import messagebox, simpledialog, ttk
 from ..audio.filters import COMPRESSOR_PRESETS
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
+from ..inspiration import derive_filter_label
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
 from .add_to_setlist_dialog import AddToSetlistDialog
 from .app_state import AppState
+from .filter_slot_dialogs import EditFilterDialog, ShowTracksDialog
 from .level_meter import LevelMeter
 from .new_project_dialog import NewProjectDialog
 from .streamdeck_emulator import StreamDeckEmulator
@@ -682,13 +684,38 @@ class RecordFrame(ttk.Frame):
         self.setlist_listbox.selection_set(index)
         self._on_setlist_select()
 
+        track = self._setlist.tracks[index]
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
+        if track.is_inspiration_filter:
+            menu.add_command(label="Edit...", command=lambda: self._on_edit_filter(index))
+            menu.add_command(label="Show tracks...", command=lambda: self._on_show_filter_tracks(index))
+        else:
+            menu.add_command(label="Rename...", command=lambda: self._on_rename_track(index))
         menu.add_command(label="Delete", command=lambda: self._on_delete_track(index))
         try:
             menu.tk_popup(event.x_root, event.y_root)  # type: ignore[attr-defined]
         finally:
             menu.grab_release()
+
+    def _on_edit_filter(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+
+        def on_save(new_criteria: dict) -> None:
+            track.inspiration_filter = new_criteria
+            track.name = derive_filter_label(new_criteria)
+            if self._selected_track_index == index:
+                self.selection_var.set(f"Selected: {track.name} (setlist)")
+            self._save_setlist_and_refresh()
+
+        EditFilterDialog(self, self.app_state.backend, track.inspiration_filter, on_save)
+
+    def _on_show_filter_tracks(self, index: int) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        track = self._setlist.tracks[index]
+        ShowTracksDialog(self, self.app_state.backend, track.name, track.inspiration_filter)
 
     def _on_rename_track(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):

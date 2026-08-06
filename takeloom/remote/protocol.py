@@ -83,6 +83,8 @@ def dispatch(backend: Backend, op: str, args: dict) -> dict:
         return {"suggestions": backend.search_inspiration_artists(args["partial"])}
     if op == "search_inspiration_titles":
         return {"suggestions": backend.search_inspiration_titles(args["partial"], args.get("artist", ""))}
+    if op == "search_inspiration_by_filter":
+        return {"tracks": backend.search_inspiration_by_filter(args["filter_criteria"])}
     if op == "start_recording":
         req = StartRecordingRequest(
             project_name=args["project_name"],

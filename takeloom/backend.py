@@ -229,6 +229,16 @@ class Backend(ABC):
         `artist`, if given, narrows suggestions to that artist's tracks."""
         ...
 
+    @abstractmethod
+    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
+        """Every inspiration-server track matching `filter_criteria` (same
+        shape as an inspiration filter slot's inspiration_filter — artist/
+        genre/year_min/year_max/duration_min/duration_max) — backs the
+        setlist's "Show tracks..." context menu action, so an operator can
+        see exactly what a filter slot might draw before recording. Not
+        project-scoped, unlike query_inspiration_tracks."""
+        ...
+
     # --- recording ---
     #
     # All recording happens inside a session: one continuous audio stream
@@ -997,6 +1007,13 @@ class LocalBackend(Backend):
     def search_inspiration_titles(self, partial: str, artist: str = "") -> list[str]:
         from .inspiration import search_title_suggestions
         return search_title_suggestions(self.get_config(), partial, artist=artist)
+
+    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
+        from .inspiration import InspirationError, search_tracks_by_filter
+        try:
+            return search_tracks_by_filter(self.get_config(), filter_criteria)
+        except InspirationError as e:
+            raise BackendError(str(e)) from e
 
     # --- events ---
 

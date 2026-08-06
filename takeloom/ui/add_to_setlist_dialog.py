@@ -16,6 +16,7 @@ from tkinterdnd2 import DND_FILES, DND_TEXT
 from ..backend import Backend, BackendError
 from ..inspiration import derive_filter_label
 from ..youtube import is_youtube_url
+from .filter_fields import FilterCriteriaFields
 
 
 class _AutocompleteEntry(ttk.Frame):
@@ -189,6 +190,9 @@ class _AutocompleteEntry(ttk.Frame):
 
     def get(self) -> str:
         return self.var.get()
+
+    def set(self, text: str) -> None:
+        self.var.set(text)
 
     def focus_set(self) -> None:
         self.entry.focus_set()
@@ -391,47 +395,8 @@ class AddToSetlistDialog(tk.Toplevel):
             foreground="#666666", wraplength=380, justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        def fetch_filter_artists(text: str) -> list[tuple[str, None]]:
-            return [(name, None) for name in self._backend.search_inspiration_artists(text)]
-
-        ttk.Label(tab, text="Artist").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.filter_artist_field = _AutocompleteEntry(tab, fetch=fetch_filter_artists)
-        self.filter_artist_field.grid(row=1, column=1, sticky="ew")
-
-        ttk.Label(tab, text="Genre").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.filter_genre_var = tk.StringVar()
-        genre_entry = ttk.Entry(tab, textvariable=self.filter_genre_var, width=30)
-        genre_entry.grid(row=2, column=1, sticky="ew")
-
-        year_row = ttk.Frame(tab)
-        year_row.grid(row=3, column=1, sticky="w")
-        ttk.Label(tab, text="Year range").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.filter_year_min_var = tk.StringVar()
-        self.filter_year_max_var = tk.StringVar()
-        year_min_entry = ttk.Entry(year_row, textvariable=self.filter_year_min_var, width=8)
-        year_min_entry.pack(side="left")
-        ttk.Label(year_row, text=" to ").pack(side="left")
-        year_max_entry = ttk.Entry(year_row, textvariable=self.filter_year_max_var, width=8)
-        year_max_entry.pack(side="left")
-
-        length_row = ttk.Frame(tab)
-        length_row.grid(row=4, column=1, sticky="w")
-        ttk.Label(tab, text="Length range (min)").grid(row=4, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.filter_length_min_var = tk.StringVar()
-        self.filter_length_max_var = tk.StringVar()
-        length_min_entry = ttk.Entry(length_row, textvariable=self.filter_length_min_var, width=8)
-        length_min_entry.pack(side="left")
-        ttk.Label(length_row, text=" to ").pack(side="left")
-        length_max_entry = ttk.Entry(length_row, textvariable=self.filter_length_max_var, width=8)
-        length_max_entry.pack(side="left")
-        tab.columnconfigure(1, weight=1)
-
-        self.filter_artist_field.bind_return(lambda _e: self._on_add())
-        genre_entry.bind("<Return>", lambda _e: self._on_add())
-        year_min_entry.bind("<Return>", lambda _e: self._on_add())
-        year_max_entry.bind("<Return>", lambda _e: self._on_add())
-        length_min_entry.bind("<Return>", lambda _e: self._on_add())
-        length_max_entry.bind("<Return>", lambda _e: self._on_add())
+        self.filter_fields = FilterCriteriaFields(tab, self._backend, dialog_parent=self, start_row=1)
+        self.filter_fields.bind_return(lambda _e: self._on_add())
 
     # --- add ---
 
@@ -487,69 +452,10 @@ class AddToSetlistDialog(tk.Toplevel):
 
             self._start_add(do_inspiration)
         else:
-            filter_artist = self.filter_artist_field.get().strip()
-            filter_genre = self.filter_genre_var.get().strip()
-            year_min_text = self.filter_year_min_var.get().strip()
-            year_max_text = self.filter_year_max_var.get().strip()
-            length_min_text = self.filter_length_min_var.get().strip()
-            length_max_text = self.filter_length_max_var.get().strip()
-
-            year_min = year_max = None
-            for text, field_name in ((year_min_text, "minimum year"), (year_max_text, "maximum year")):
-                if text and not text.isdigit():
-                    messagebox.showerror("Cannot add", f"Enter a numeric {field_name} (e.g. 1975).", parent=self)
-                    return
-            if year_min_text:
-                year_min = int(year_min_text)
-            if year_max_text:
-                year_max = int(year_max_text)
-            if year_min is not None and year_max is not None and year_min > year_max:
-                messagebox.showerror("Cannot add", "Minimum year can't be after maximum year.", parent=self)
+            filter_criteria = self.filter_fields.get_criteria()
+            if filter_criteria is None:
                 return
-
-            length_min = length_max = None
-            for text, field_name in ((length_min_text, "minimum length"), (length_max_text, "maximum length")):
-                if not text:
-                    continue
-                try:
-                    minutes = float(text)
-                    if minutes < 0:
-                        raise ValueError
-                except ValueError:
-                    messagebox.showerror("Cannot add", f"Enter a numeric {field_name} in minutes (e.g. 3.5).", parent=self)
-                    return
-            if length_min_text:
-                length_min = round(float(length_min_text) * 60)
-            if length_max_text:
-                length_max = round(float(length_max_text) * 60)
-            if length_min is not None and length_max is not None and length_min > length_max:
-                messagebox.showerror("Cannot add", "Minimum length can't be more than maximum length.", parent=self)
-                return
-
-            if (
-                not filter_artist and not filter_genre and year_min is None and year_max is None
-                and length_min is None and length_max is None
-            ):
-                messagebox.showerror(
-                    "Cannot add", "Enter an artist, genre, year range, and/or length range to filter by.", parent=self,
-                )
-                return
-            filter_criteria = {}
-            if filter_artist:
-                filter_criteria["artist"] = filter_artist
-            if filter_genre:
-                filter_criteria["genre"] = filter_genre
-            if year_min is not None:
-                filter_criteria["year_min"] = year_min
-            if year_max is not None:
-                filter_criteria["year_max"] = year_max
-            if length_min is not None:
-                filter_criteria["duration_min"] = length_min
-            if length_max is not None:
-                filter_criteria["duration_max"] = length_max
-
             label = derive_filter_label(filter_criteria)
-
             self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 
     def _start_add(self, call: Callable[[Backend, str], dict]) -> None:

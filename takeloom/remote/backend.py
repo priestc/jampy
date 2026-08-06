@@ -152,6 +152,11 @@ class RemoteBackend(Backend):
         except BackendError:
             return []
 
+    def search_inspiration_by_filter(self, filter_criteria: dict) -> list[dict]:
+        return self._client.call(
+            "search_inspiration_by_filter", {"filter_criteria": filter_criteria}, timeout=LONG_TIMEOUT,
+        )["tracks"]
+
     # --- recording ---
 
     def start_recording(self, req: StartRecordingRequest) -> None:
