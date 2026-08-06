@@ -143,11 +143,10 @@ recording it twice:
 │   └── song2 - guitar - take2 [youtube:dQw4w9WgXcQ].flac
 ├── inspiration_takes.json
 └── sessions/
-    └── My Album/
-        └── 2025-01-15_14-30-00_guitar/
-            ├── session.flac
-            ├── session_video.mp4
-            └── session_log.json
+    └── 2025-01-15_14-30-00_guitar_My Album/
+        ├── session.flac
+        ├── session_video.mp4
+        └── session_log.json
 ```
 
 - `backing_tracks/` and `completed_takes/` are shared across every project. A locally

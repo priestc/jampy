@@ -5,7 +5,7 @@ takes. A project (see project.py) is just a setlist file now; every
 project reads and writes into these same three vault subfolders:
 
     <vault>/
-    ├── sessions/<project_name>/<session_name>/...
+    ├── sessions/<session_name>_<project_name>/...
     ├── backing_tracks/<filename>
     └── completed_takes/<filename>
 
@@ -43,7 +43,13 @@ def vault_completed_takes_dir(config: StudioConfig) -> Path:
 
 
 def vault_session_dir(config: StudioConfig, project_name: str, session_name: str) -> Path:
-    return vault_root(config) / "sessions" / project_name / session_name
+    """All sessions sit flat in one root sessions/ folder, not nested by
+    project — the project name is appended onto session_name instead
+    (e.g. "2026-08-04_15-26-33_bass_Album1"), since project isn't part
+    of a session's own identity here (it's whichever setlist happened to
+    be open at record time), and there's no other reason for a folder
+    listing to be split up by it."""
+    return vault_root(config) / "sessions" / f"{session_name}_{project_name}"
 
 
 # --- shared inspiration-take index ---
