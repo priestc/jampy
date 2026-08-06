@@ -196,13 +196,19 @@ class Project:
             data = json.loads(self.setlist_path.read_text())
             self.setlist = Setlist.from_dict(data)
 
-    def add_inspiration_filter_slot(self, label: str, filter_criteria: dict) -> TrackEntry:
+    def add_inspiration_filter_slot(
+        self, label: str, filter_criteria: dict, duration_seconds: float = 0.0,
+    ) -> TrackEntry:
         """Add a standing "draw a random song from this filter each
         session" slot to the setlist — see TrackEntry's docstring. Unlike
         add_backing_track, there's no file to copy; the slot itself is
-        never played directly."""
+        never played directly. `duration_seconds` is the average across
+        every currently-matching track (see inspiration.average_duration)
+        — the slot has no single fixed song of its own to derive a
+        duration from otherwise."""
         entry = TrackEntry(
             name=label, backing_track="", is_inspiration_filter=True, inspiration_filter=dict(filter_criteria),
+            duration_seconds=duration_seconds,
         )
         self.setlist.add_track(entry)
         self.save_setlist()

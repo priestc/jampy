@@ -169,7 +169,10 @@ class Backend(ABC):
         TrackEntry's docstring and backend.py's _resolve_filter_slot_for_
         session. `label` is the slot's display name in the Setlist list.
         This is the only way a project's setlist grows an inspiration-
-        sourced entry now — see FilterCriteriaFields/EditFilterDialog."""
+        sourced entry now — see FilterCriteriaFields/EditFilterDialog. The
+        entry's duration_seconds is set to the average across every
+        currently-matching track (see inspiration.average_duration),
+        since the slot has no single fixed song of its own."""
         ...
 
     # --- inspiration ---
@@ -895,7 +898,16 @@ class LocalBackend(Backend):
         if not filter_criteria:
             raise BackendError("Enter at least one filter field (artist and/or genre).")
         project = self._open_project(project_name)
-        entry = project.add_inspiration_filter_slot(label, filter_criteria)
+        from .inspiration import InspirationError, average_duration, search_tracks_by_filter
+        try:
+            matches = search_tracks_by_filter(self.get_config(), filter_criteria)
+            duration = average_duration(matches)
+        except InspirationError:
+            # Still worth adding the slot even if the inspiration server
+            # is briefly unreachable — just without a duration estimate
+            # yet (0.0, same as before this was tracked at all).
+            duration = 0.0
+        entry = project.add_inspiration_filter_slot(label, filter_criteria, duration_seconds=duration)
         return entry.to_dict()
 
     # --- inspiration ---

@@ -107,6 +107,19 @@ def search_tracks_by_filter(config: StudioConfig, filter_criteria: dict) -> list
     return _post_track_query(config, [filter_criteria])
 
 
+def average_duration(tracks: list[dict]) -> float:
+    """Mean duration (seconds) across `tracks` (inspiration-server track
+    dicts, as from search_tracks_by_filter) — a filter slot has no
+    single fixed song of its own, so this stands in as its
+    duration_seconds for setlist display and the total-runtime sum.
+    0.0 if there's nothing to average (an unmatched filter, or tracks
+    missing duration data)."""
+    durations = [t["duration"] for t in tracks if t.get("duration")]
+    if not durations:
+        return 0.0
+    return sum(durations) / len(durations)
+
+
 def _get_suggestions(config: StudioConfig, kind: str, params: dict) -> list:
     """GET one of the inspiration server's autocomplete endpoints (see
     docs/inspiration-server-autocomplete-api.md). Autocomplete fires on

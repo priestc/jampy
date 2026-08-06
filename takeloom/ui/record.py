@@ -21,7 +21,7 @@ from tkinter import messagebox, simpledialog, ttk
 from ..audio.filters import COMPRESSOR_PRESETS
 from ..backend import BackendError, StartRecordingRequest
 from ..config import StudioConfig
-from ..inspiration import derive_filter_label
+from ..inspiration import average_duration, derive_filter_label
 from ..project import Setlist, TrackEntry
 from ..recording_driver import RecordingDeckDriver
 from ..utils import format_duration
@@ -430,14 +430,16 @@ class RecordFrame(ttk.Frame):
         self.setlist_listbox.bind("<Control-Button-1>", self._on_setlist_right_click)
 
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
+        dur = format_duration(track.duration_seconds)
         if track.is_inspiration_filter:
             # Never has a take of its own (see TrackEntry's docstring), and
             # which songs it's drawn — and their takes — now live in the
             # vault-wide shared index (vault.py), not on this slot. The
             # slot's own name is already the auto-derived filter label
-            # (see inspiration.derive_filter_label) — nothing more to show.
-            return f"🎲 {track.name}"
-        dur = format_duration(track.duration_seconds)
+            # (see inspiration.derive_filter_label). duration_seconds is
+            # the average across every currently-matching track (see
+            # inspiration.average_duration) rather than one fixed song's.
+            return f"🎲 {track.name}  (~{dur})"
         take = track.get_take_for_instrument(inst_name)
         if take is None:
             mark = ""
@@ -618,9 +620,19 @@ class RecordFrame(ttk.Frame):
             track.name = derive_filter_label(new_criteria)
             if self._selected_track_index == index:
                 self.selection_var.set(f"Selected: {track.name}")
-            self._save_setlist_and_refresh()
+            backend = self.app_state.backend
+            self._run_backend(
+                lambda: average_duration(backend.search_inspiration_by_filter(new_criteria)),
+                lambda avg, error: self._apply_filter_slot_duration(index, avg if error is None else 0.0),
+            )
 
         EditFilterDialog(self, self.app_state.backend, track.inspiration_filter, on_save)
+
+    def _apply_filter_slot_duration(self, index: int, avg_duration: float) -> None:
+        if not self._setlist or index >= len(self._setlist.tracks):
+            return
+        self._setlist.tracks[index].duration_seconds = avg_duration
+        self._save_setlist_and_refresh()
 
     def _on_show_filter_tracks(self, index: int) -> None:
         if not self._setlist or index >= len(self._setlist.tracks):
