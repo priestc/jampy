@@ -138,9 +138,9 @@ recording it twice:
 │   ├── song1.mp3
 │   └── a1b2c3d4_song2.flac
 ├── completed_takes/
-│   ├── song1 - guitar - take1.flac
-│   ├── song1 - bass - take1.flac
-│   └── song2 - guitar - take2.flac
+│   ├── song1 - guitar - take1 [upload: a1b2c3d4_song1].flac
+│   ├── song1 - bass - take1 [upload: a1b2c3d4_song1].flac
+│   └── song2 - guitar - take2 [youtube: song2_dQw4w9WgXcQ].flac
 ├── inspiration_takes.json
 └── sessions/
     └── My Album/
@@ -154,6 +154,10 @@ recording it twice:
   uploaded file gets a short random prefix added only if its plain name would otherwise
   collide with an unrelated project's file; a file that already has a globally unique name
   (a YouTube download, or one pulled from the Inspiration library) keeps it as-is.
+- A completed take's filename names the exact backing track it was recorded against —
+  `[upload: <file>]`, `[youtube: <file>]`, or `[inspiration: <file>]` — since backing tracks
+  are shared vault-wide now and two entries can share a display name while pointing at
+  different audio.
 - Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
 - `inspiration_takes.json` — the cross-project take index (see below).
 - `session.flac` — the continuous raw recording spanning the full session

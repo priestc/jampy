@@ -929,7 +929,7 @@ class LocalBackend(Backend):
             )
         except YouTubeDownloadError as e:
             raise BackendError(str(e)) from e
-        entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration)
+        entry = project.add_backing_track(dest_path, track_name=title, duration_seconds=duration, source="youtube")
         return entry.to_dict()
 
     def add_inspiration_backing_track(

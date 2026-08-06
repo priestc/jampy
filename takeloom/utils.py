@@ -37,11 +37,22 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
 
 
-def take_filename(track_name: str, instrument: str, take_number: int, ext: str = "flac") -> str:
-    """Generate take filename: 'track - instrument - takeN.ext'."""
+def take_filename(
+    track_name: str, instrument: str, take_number: int, source: str, backing_track: str, ext: str = "flac",
+) -> str:
+    """Generate take filename: 'track - instrument - takeN [source: backing
+    track].ext'. `source` is TrackEntry.source_label() — "upload",
+    "youtube", or "inspiration" — and `backing_track` its backing_track
+    filename (the exact file this take was recorded against); backing
+    tracks are shared vault-wide now (see vault.py), so two entries can
+    share a display name while pointing at different audio, and the
+    filename should make which one — and where it came from — explicit
+    rather than relying on the take being found next to the right
+    backing track by chance."""
     safe_track = sanitize_filename(track_name)
     safe_inst = sanitize_filename(instrument)
-    return f"{safe_track} - {safe_inst} - take{take_number}.{ext}"
+    safe_backing = sanitize_filename(Path(backing_track).stem) if backing_track else "unknown"
+    return f"{safe_track} - {safe_inst} - take{take_number} [{source}: {safe_backing}].{ext}"
 
 
 def next_take_number(completed_dir: Path, track_name: str, instrument: str) -> int:

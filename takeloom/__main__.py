@@ -1378,7 +1378,10 @@ def inspiration(instrument: str | None, project_name: str | None, verbose: bool)
                     if is_recording:
                         track_entry = find_or_add_inspiration_track(project, track_info)
                         take_num = next_take_number(project.completed_takes_dir, track_entry.name, instrument)
-                        fname = take_filename(track_entry.name, instrument, take_num, "flac")
+                        fname = take_filename(
+                            track_entry.name, instrument, take_num,
+                            track_entry.source_label(), track_entry.backing_track, "flac",
+                        )
                         rec_path = project.completed_takes_dir / fname
                         engine.mixer.clear()
                         engine.mixer.add_source("inspiration", tmp_path, volume=volume * rg_linear)
@@ -1438,7 +1441,10 @@ def inspiration(instrument: str | None, project_name: str | None, verbose: bool)
                                         rec_path.unlink()
                                     recording_active = False
                                 take_num = next_take_number(project.completed_takes_dir, track_entry.name, instrument)
-                                fname = take_filename(track_entry.name, instrument, take_num, "flac")
+                                fname = take_filename(
+                                    track_entry.name, instrument, take_num,
+                                    track_entry.source_label(), track_entry.backing_track, "flac",
+                                )
                                 rec_path = project.completed_takes_dir / fname
                                 engine.mixer.reset()
                                 click.echo("  >> Restarted — press [space] to record again")

@@ -189,8 +189,21 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                 # archived take's filename/watermark.
                 track_name = take.track_name or slot.name
 
+                # For a filter slot, the take belongs to whatever song got
+                # drawn this session (draw_info), not the slot's own
+                # (never-populated) backing_track — needed up front so the
+                # filename itself (take_filename) can name the actual
+                # backing track/source, not the slot's.
+                draw_info = filter_slot_draws.get(str(take.track_index)) if slot.is_inspiration_filter else None
+                if slot.is_inspiration_filter:
+                    take_backing_track = draw_info["backing_track"] if draw_info else ""
+                    take_source = "inspiration"
+                else:
+                    take_backing_track = slot.backing_track
+                    take_source = slot.source_label()
+
                 take_num = next_take_number(completed_dir, track_name, instrument)
-                flac_name = take_filename(track_name, instrument, take_num, "flac")
+                flac_name = take_filename(track_name, instrument, take_num, take_source, take_backing_track, "flac")
                 _copy_flac_segment(src, start, end, completed_dir / flac_name)
 
                 has_video = False
@@ -201,7 +214,7 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     )
                     has_video = clip_session_video(
                         session_video_raw, session_mix_flac, completed_dir / flac_name,
-                        completed_dir / take_filename(track_name, instrument, take_num, "mp4"),
+                        completed_dir / take_filename(track_name, instrument, take_num, take_source, take_backing_track, "mp4"),
                         mix_start_s=(start - mix_start_frame) / sample_rate,
                         duration_s=(end - start) / sample_rate,
                         watermark_text=watermark, video_offset_ms=video_offset_ms,
@@ -218,7 +231,6 @@ def process_session(session_dir: Path, config: StudioConfig) -> str:
                     # what lets a later session — this project or any
                     # other — recognize and prefer the same song (see
                     # backend.py's _resolve_filter_slot).
-                    draw_info = filter_slot_draws.get(str(take.track_index))
                     if draw_info:
                         record_inspiration_take(
                             root, draw_info["inspiration_track_id"], draw_info["name"],

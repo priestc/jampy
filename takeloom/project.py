@@ -62,12 +62,25 @@ class TrackEntry:
     inspiration_filter: dict = field(default_factory=dict)
     preferred_takes: dict[str, TakeInfo] = field(default_factory=dict)
     # key = instrument name, value = preferred take for that instrument
+    source: str = "upload"  # "upload" or "youtube" — only meaningful when
+    # inspiration_track_id is 0; see source_label(). Existing entries
+    # from before this field existed default to "upload".
 
     def set_preferred_take(self, instrument: str, take: TakeInfo) -> None:
         self.preferred_takes[instrument] = take
 
     def get_take_for_instrument(self, instrument: str) -> TakeInfo | None:
         return self.preferred_takes.get(instrument)
+
+    def source_label(self) -> str:
+        """Human-readable source: "inspiration" (radioserver-sourced,
+        including a filter slot's drawn song), "youtube" (a downloaded
+        video), or "upload" (a manually added local file) — used to make
+        completed-take filenames explicit about what they were recorded
+        against (see utils.take_filename)."""
+        if self.inspiration_track_id:
+            return "inspiration"
+        return self.source
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -88,6 +101,7 @@ class TrackEntry:
             is_inspiration_filter=data.get("is_inspiration_filter", False),
             inspiration_filter=data.get("inspiration_filter", {}),
             preferred_takes=takes,
+            source=data.get("source", "upload"),
         )
 
 
@@ -200,6 +214,7 @@ class Project:
 
     def add_backing_track(
         self, source_path: Path, track_name: str | None = None, duration_seconds: float = 0.0,
+        source: str = "upload",
     ) -> TrackEntry:
         """Add a backing track file to the project. Copies the file into
         the vault's shared backing_tracks/ (see takeloom/vault.py), unless
@@ -209,7 +224,11 @@ class Project:
         added before copying: backing_tracks/ is shared across every
         project now, so two unrelated projects' local uploads could
         otherwise collide on an ordinary filename like "song1.mp3" and
-        silently alias each other."""
+        silently alias each other.
+
+        `source` ("upload" or "youtube") is recorded on the entry — see
+        TrackEntry.source_label() — so completed takes recorded against
+        it can name explicitly what backing track they came from."""
         ensure_dir(self.backing_tracks_dir)
         if source_path.parent.resolve() == self.backing_tracks_dir.resolve():
             dest = source_path
@@ -218,7 +237,7 @@ class Project:
             dest = self.backing_tracks_dir / f"{secrets.token_hex(4)}_{safe_stem}{source_path.suffix}"
             shutil.copy2(source_path, dest)
         name = track_name or source_path.stem
-        entry = TrackEntry(name=name, backing_track=dest.name, duration_seconds=duration_seconds)
+        entry = TrackEntry(name=name, backing_track=dest.name, duration_seconds=duration_seconds, source=source)
         self.setlist.add_track(entry)
         self.save_setlist()
         return entry
