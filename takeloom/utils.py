@@ -37,22 +37,52 @@ def sanitize_filename(name: str) -> str:
     return re.sub(r'[<>:"/\\|?*]', '', name).strip()
 
 
+_YOUTUBE_ID_RE = re.compile(r"\[([A-Za-z0-9_-]{6,15})\]|_([A-Za-z0-9_-]{6,15})$")
+# "inspiration_" prefix from inspiration.py's backing_track naming
+# (f"inspiration_{track_id}.{fmt}") and add_backing_track's collision-
+# safe upload prefix (secrets.token_hex(4), 8 hex chars) — see below.
+_INSPIRATION_STEM_RE = re.compile(r"^inspiration_(\d+)$")
+_UPLOAD_PREFIX_RE = re.compile(r"^([0-9a-f]{8})_")
+
+
+def _backing_track_id(source: str, backing_track: str) -> str:
+    """A short identifier for `backing_track`, for the source tag in
+    take_filename() — the actual video/track ID rather than the whole
+    filename, per the naming schemes in youtube.py/inspiration.py/
+    project.py's add_backing_track(). Falls back to the file's stem
+    (still short in practice) if nothing more specific is recognized."""
+    stem = Path(backing_track).stem if backing_track else "unknown"
+    if source == "inspiration":
+        m = _INSPIRATION_STEM_RE.match(stem)
+        if m:
+            return m.group(1)
+    elif source == "youtube":
+        m = _YOUTUBE_ID_RE.search(stem)
+        if m:
+            return m.group(1) or m.group(2)
+    elif source == "upload":
+        m = _UPLOAD_PREFIX_RE.match(stem)
+        if m:
+            return m.group(1)
+    return stem
+
+
 def take_filename(
     track_name: str, instrument: str, take_number: int, source: str, backing_track: str, ext: str = "flac",
 ) -> str:
-    """Generate take filename: 'track - instrument - takeN [source: backing
-    track].ext'. `source` is TrackEntry.source_label() — "upload",
-    "youtube", or "inspiration" — and `backing_track` its backing_track
-    filename (the exact file this take was recorded against); backing
-    tracks are shared vault-wide now (see vault.py), so two entries can
-    share a display name while pointing at different audio, and the
-    filename should make which one — and where it came from — explicit
-    rather than relying on the take being found next to the right
-    backing track by chance."""
+    """Generate take filename: 'track - instrument - takeN [source:id].ext'.
+    `source` is TrackEntry.source_label() — "upload", "youtube", or
+    "inspiration" — and `backing_track` its backing_track filename (the
+    exact file this take was recorded against); backing tracks are
+    shared vault-wide now (see vault.py), so two entries can share a
+    display name while pointing at different audio, and the filename
+    should make which one — and where it came from — explicit rather
+    than relying on the take being found next to the right backing track
+    by chance."""
     safe_track = sanitize_filename(track_name)
     safe_inst = sanitize_filename(instrument)
-    safe_backing = sanitize_filename(Path(backing_track).stem) if backing_track else "unknown"
-    return f"{safe_track} - {safe_inst} - take{take_number} [{source}: {safe_backing}].{ext}"
+    tag_id = sanitize_filename(_backing_track_id(source, backing_track))
+    return f"{safe_track} - {safe_inst} - take{take_number} [{source}:{tag_id}].{ext}"
 
 
 def next_take_number(completed_dir: Path, track_name: str, instrument: str) -> int:
