@@ -14,6 +14,7 @@ from typing import Callable
 from tkinterdnd2 import DND_FILES, DND_TEXT
 
 from ..backend import Backend, BackendError
+from ..inspiration import derive_filter_label
 from ..youtube import is_youtube_url
 
 
@@ -390,7 +391,7 @@ class AddToSetlistDialog(tk.Toplevel):
             foreground="#666666", wraplength=380, justify="left",
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
-        ttk.Label(tab, text="Label").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(tab, text="Label (optional)").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
         self.filter_label_var = tk.StringVar()
         ttk.Entry(tab, textvariable=self.filter_label_var, width=30).grid(row=1, column=1, sticky="ew")
 
@@ -482,9 +483,6 @@ class AddToSetlistDialog(tk.Toplevel):
             filter_genre = self.filter_genre_var.get().strip()
             year_min_text = self.filter_year_min_var.get().strip()
             year_max_text = self.filter_year_max_var.get().strip()
-            if not label:
-                messagebox.showerror("Cannot add", "Enter a label for this filter slot.", parent=self)
-                return
 
             year_min = year_max = None
             for text, field_name in ((year_min_text, "minimum year"), (year_max_text, "maximum year")):
@@ -513,6 +511,9 @@ class AddToSetlistDialog(tk.Toplevel):
                 filter_criteria["year_min"] = year_min
             if year_max is not None:
                 filter_criteria["year_max"] = year_max
+
+            if not label:
+                label = derive_filter_label(filter_criteria)
 
             self._start_add(lambda backend, project: backend.add_inspiration_filter_slot(project, label, filter_criteria))
 

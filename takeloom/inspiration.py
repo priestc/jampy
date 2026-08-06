@@ -19,6 +19,37 @@ class InspirationError(Exception):
     """Raised when inspiration tracks can't be queried or downloaded."""
 
 
+def derive_filter_label(filter_criteria: dict) -> str:
+    """Auto-derive a human-readable label for an inspiration filter slot
+    from its criteria — e.g. {"genre": "Doo Wop", "year_max": 1965} ->
+    "Doo Wop before 1965", {"artist": "Bob Dylan", "year_min": 2003,
+    "year_max": 2006} -> "Bob Dylan 2003-2006" — so the "Add inspiration
+    filter" dialog doesn't need a name typed in by hand."""
+    artist = (filter_criteria.get("artist") or "").strip()
+    genre = (filter_criteria.get("genre") or "").strip()
+    year_min = filter_criteria.get("year_min")
+    year_max = filter_criteria.get("year_max")
+
+    subject = " - ".join(p for p in (artist, genre) if p)
+
+    if year_min is not None and year_max is not None:
+        year_part = f"{year_min}-{year_max}"
+    elif year_min is not None:
+        year_part = f"after {year_min}"
+    elif year_max is not None:
+        year_part = f"before {year_max}"
+    else:
+        year_part = ""
+
+    if subject and year_part:
+        return f"{subject} {year_part}"
+    if subject:
+        return subject
+    if year_part:
+        return f"Tracks {year_part}"
+    return "Inspiration Filter"
+
+
 def _post_track_query(config: StudioConfig, filters: list[dict]) -> list[dict]:
     if not config.inspiration_server or not config.inspiration_api_key:
         raise InspirationError(
