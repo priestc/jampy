@@ -256,6 +256,41 @@ def _migrate_track_files(
                 take.filename = dest.name
 
 
+def _prune_unmigratable_files(session_dir: Path, log: LogFn) -> None:
+    """Remove any named pipe/socket/device file under session_dir —
+    shutil.copytree can't copy these (and would raise partway through,
+    aborting the whole migration run), and the only thing that leaves
+    one behind is a streaming session's scratch audio FIFO (see
+    streaming.py) that didn't get cleaned up, e.g. because the process
+    crashed or was killed mid-session — never real session content worth
+    preserving."""
+    for path in session_dir.rglob("*"):
+        if path.is_file() or path.is_dir() or path.is_symlink():
+            continue
+        log(f"    removing leftover '{path.relative_to(session_dir)}' (not a regular file, can't migrate it)")
+        path.unlink()
+
+
+def _copy_session_to_vault(session_dir: Path, dest: Path, log: LogFn) -> bool:
+    """Ensure `dest` holds a verified copy of `session_dir`, resuming
+    cleanly if a previous run got partway through and crashed (e.g. hit
+    an uncopyable file) — a `dest` that already exists but doesn't
+    verify is a prior attempt's leftovers, not something migrated
+    already, so it's discarded and redone rather than trusted as-is.
+    Returns whether `dest` ends up verified."""
+    if dest.exists() and _verify_copy(session_dir, dest):
+        log(f"  session '{session_dir.name}' already copied to vault.")
+        return True
+    if dest.exists():
+        log(f"  removing incomplete previous copy of '{session_dir.name}' and retrying.")
+        shutil.rmtree(dest, ignore_errors=True)
+    log(f"  moving session '{session_dir.name}' -> {dest}")
+    _prune_unmigratable_files(session_dir, log)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(session_dir, dest)
+    return _verify_copy(session_dir, dest)
+
+
 def migrate_projects_to_vault(config: StudioConfig, log: LogFn) -> tuple[int, int]:
     """One-time migration from the old per-project folder layout
     (<projects_dir>/<name>/{setlist.json, backing_tracks/,
@@ -266,8 +301,14 @@ def migrate_projects_to_vault(config: StudioConfig, log: LogFn) -> tuple[int, in
     index (record_inspiration_take) so they're immediately reusable from
     any other project.
 
-    Safe to re-run: a project already migrated (its flat .json already
-    exists) is skipped entirely.
+    Safe to re-run, including resuming a run that crashed partway
+    through one project's sessions: the setlist/track-file migration
+    step (which isn't safely re-runnable — see _migrate_track_files)
+    only happens once, guarded by the flat .json not existing yet: but
+    unlike a full "skip the whole project" check, an interrupted run
+    that already wrote the flat .json still has its remaining sessions
+    picked back up, and the old folder is only removed once every
+    session under it has been verified in the vault.
 
     Returns (projects_migrated, sessions_migrated)."""
     projects_dir = Path(config.projects_dir)
@@ -287,47 +328,46 @@ def migrate_projects_to_vault(config: StudioConfig, log: LogFn) -> tuple[int, in
         if not old_setlist_path.exists():
             continue
         new_setlist_path = projects_dir / f"{old_dir.name}.json"
+
         if new_setlist_path.exists():
-            log(f"Skipping '{old_dir.name}' — already migrated.")
-            continue
+            log(f"'{old_dir.name}': setlist already migrated — resuming any unfinished sessions.")
+        else:
+            log(f"Migrating project '{old_dir.name}'...")
+            from .project import Setlist
+            setlist = Setlist.from_dict(json.loads(old_setlist_path.read_text()))
 
-        log(f"Migrating project '{old_dir.name}'...")
-        from .project import Setlist
-        setlist = Setlist.from_dict(json.loads(old_setlist_path.read_text()))
+            old_backing_dir = old_dir / "backing_tracks"
+            old_takes_dir = old_dir / "completed_takes"
+            for track in setlist.tracks:
+                _migrate_track_files(track, old_backing_dir, old_takes_dir, new_backing_dir, new_takes_dir, log)
+                if not track.is_inspiration_filter and track.inspiration_track_id:
+                    for instrument, take in track.preferred_takes.items():
+                        record_inspiration_take(
+                            root, track.inspiration_track_id, track.name, track.backing_track,
+                            track.duration_seconds, instrument, take,
+                        )
 
-        old_backing_dir = old_dir / "backing_tracks"
-        old_takes_dir = old_dir / "completed_takes"
-        for track in setlist.tracks:
-            _migrate_track_files(track, old_backing_dir, old_takes_dir, new_backing_dir, new_takes_dir, log)
-            if not track.is_inspiration_filter and track.inspiration_track_id:
-                for instrument, take in track.preferred_takes.items():
-                    record_inspiration_take(
-                        root, track.inspiration_track_id, track.name, track.backing_track,
-                        track.duration_seconds, instrument, take,
-                    )
+            atomic_write_text(new_setlist_path, json.dumps(setlist.to_dict(), indent=2))
+            projects_migrated += 1
 
-        atomic_write_text(new_setlist_path, json.dumps(setlist.to_dict(), indent=2))
-
+        all_sessions_ok = True
         old_sessions_dir = old_dir / "sessions"
         if old_sessions_dir.exists():
             for session_dir in sorted(old_sessions_dir.iterdir()):
                 if not session_dir.is_dir():
                     continue
                 dest = vault_session_dir(config, old_dir.name, session_dir.name)
-                if dest.exists():
-                    log(f"  skipping session '{session_dir.name}' — already in the vault.")
-                    continue
-                log(f"  moving session '{session_dir.name}' -> {dest}")
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(session_dir, dest)
-                if _verify_copy(session_dir, dest):
+                if _copy_session_to_vault(session_dir, dest, log):
                     sessions_migrated += 1
                     sync_and_maybe_prune(config, dest, log=log)
                 else:
                     log(f"  WARNING: verification failed for session '{session_dir.name}' — left both copies in place.")
-                    continue
-        shutil.rmtree(old_dir)
-        projects_migrated += 1
+                    all_sessions_ok = False
+
+        if all_sessions_ok:
+            shutil.rmtree(old_dir)
+        else:
+            log(f"'{old_dir.name}': left in place (old folder) — re-run once the warning above is resolved.")
 
     # Whatever backing tracks/takes just landed locally from every migrated
     # project get the same remote treatment a live session's files would —
