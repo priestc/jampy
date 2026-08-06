@@ -136,6 +136,10 @@ class Project:
         self.name = path.name
         self.backing_tracks_dir = path / "backing_tracks"
         self.completed_takes_dir = path / "completed_takes"
+        # Legacy: recorded sessions now live in the Studio Session Vault
+        # (see takeloom/vault.py), not here — this is only kept around for
+        # migrate_projects_to_vault() to find sessions recorded before the
+        # vault existed. Never created for a new project (see create()).
         self.sessions_dir = path / "sessions"
         self.setlist_path = path / "setlist.json"
         self.setlist = Setlist()
@@ -145,7 +149,6 @@ class Project:
         ensure_dir(self.path)
         ensure_dir(self.backing_tracks_dir)
         ensure_dir(self.completed_takes_dir)
-        ensure_dir(self.sessions_dir)
         self.save_setlist()
 
     @classmethod

@@ -33,6 +33,14 @@ takeloom setup-instruments         # assign instruments to input channels
 `setup-recording-devices` also lets you pick a camera. If one is configured, every session
 records video alongside the audio (see [Recording Session](#recording-session)).
 
+`setup-studio` also configures the **Studio Session Vault** — where recorded sessions are
+stored, kept separate from a project (which is really just its setlist, backing tracks, and
+completed takes — see [Project Structure](#project-structure)). Three modes: local only
+(default, under `~/Documents`), remote only (pushed to the backup server and removed
+locally once that's verified), or both (pushed but also kept locally). If you have sessions
+recorded before the vault existed, run `takeloom migrate-sessions-to-vault` once to move
+them in — safe to re-run, already-migrated sessions are skipped.
+
 ### Graphical Interface
 
 ```bash
@@ -110,7 +118,8 @@ steps, and why it can't just be a one-click sign-in.
 
 ## Project Structure
 
-Each project creates this directory layout:
+A project is just a setlist and its outputs — nothing session-shaped lives here. Each
+project creates this directory layout:
 
 ```
 My Album/
@@ -118,17 +127,27 @@ My Album/
 ├── backing_tracks/
 │   ├── song1.mp3
 │   └── song2.flac
-├── completed_takes/
-│   ├── song1 - guitar - take1.flac
-│   ├── song1 - bass - take1.flac
-│   └── song2 - guitar - take2.flac
-└── sessions/
+└── completed_takes/
+    ├── song1 - guitar - take1.flac
+    ├── song1 - bass - take1.flac
+    └── song2 - guitar - take2.flac
+```
+
+- `completed_takes/` — individual per-song recordings, one file per take
+- Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
+
+Recorded sessions themselves live separately, in the Studio Session Vault (see
+[Studio Setup](#studio-setup)):
+
+```
+<vault>/
+└── My Album/
     └── 2025-01-15_14-30-00_guitar/
         ├── session.flac
         ├── session_video.mp4
         └── session_log.json
 ```
 
-- `completed_takes/` — individual per-song recordings, one file per take
-- `sessions/` — continuous raw recording (`session.flac`) spanning the full session, plus the session log with musician, studio, and event data. `session_video.mp4` is only present when a camera is configured.
-- Existing take files are never deleted. New takes increment the take number and replace the preferred take in the setlist.
+- `session.flac` — the continuous raw recording spanning the full session
+- `session_log.json` — musician, studio, and event data; what post-session processing replays to find completed takes and copy them into the project's `completed_takes/`
+- `session_video.mp4` is only present when a camera is configured

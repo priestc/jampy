@@ -53,3 +53,23 @@ def sync_up(project_path: Path, remote: str) -> None:
         click.echo("Warning: rsync not found. Skipping sync.")
     except Exception as e:
         click.echo(f"Warning: sync up error: {e}")
+
+
+def sync_vault_session_up(local_dir: Path, vault_relative: str, remote: str) -> bool:
+    """Upload one Studio Session Vault session's directory to the remote
+    backup server, preserving its path relative to the vault root (e.g.
+    "My Album/2026-08-05_14-30-00_bass") rather than just its basename —
+    unlike sync_up/sync_down, which are keyed by a project's own bare
+    directory name. Returns whether it succeeded rather than only
+    click.echoing a warning: the vault's "remote" mode (see
+    takeloom/vault.py) needs a real success signal to decide whether it's
+    safe to delete the local copy afterward, and this is called from
+    backend.py's background processing thread — not a CLI context — so it
+    reports through its own return value instead of stdout."""
+    dest = _remote_path(remote, vault_relative) + "/"
+    cmd = ["rsync", "-avz", "--checksum", f"{local_dir}/", dest]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return result.returncode == 0
+    except (FileNotFoundError, OSError):
+        return False

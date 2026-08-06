@@ -2146,7 +2146,8 @@ class LocalBackend(Backend):
         engine.start()
 
         session_name = wall_timestamp().replace(":", "-").replace(" ", "_")
-        session_dir = ensure_dir(project.sessions_dir / f"{session_name}_{inst.name}")
+        from .vault import vault_session_dir
+        session_dir = ensure_dir(vault_session_dir(config, project.name, f"{session_name}_{inst.name}"))
         session_flac = session_dir / "session.flac"
         engine.start_session_recording(session_flac)
 
@@ -2347,6 +2348,16 @@ class LocalBackend(Backend):
             })
             return
         self._emit("recording_status", {"phase": "idle", "status": summary})
+
+        # Only after splicing has safely pulled every completed take out
+        # into its project — sync_and_maybe_prune can delete session_dir
+        # entirely in "remote" vault mode, which splicing still needs to
+        # read from above.
+        from .vault import sync_and_maybe_prune
+        sync_and_maybe_prune(
+            config, session.session_dir,
+            log=lambda msg: self._emit("recording_status", {"phase": "idle", "status": msg}),
+        )
 
     def is_session_active(self) -> bool:
         return self._active_session is not None

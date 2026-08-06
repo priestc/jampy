@@ -83,7 +83,16 @@ class StudioConfig:
     output_device: str = ""
     output_channels: int = 2
     projects_dir: str = str(Path.home() / "Takeloom Projects")
-    backup_server: str = ""  # e.g. "user@host:/path/to/backups"
+    # Studio Session Vault: where continuous session recordings (session.
+    # flac, session_video.mp4, session_log.json, ...) are stored, separate
+    # from a project (setlist.json, backing_tracks/, completed_takes/ —
+    # the actual song-level outputs) — see takeloom/vault.py.
+    # "local" | "remote" | "both". "remote" pushes to backup_server (below)
+    # and then deletes the local copy once that's verified; "both" pushes
+    # but keeps the local copy too; "local" never syncs.
+    session_vault_mode: str = "local"
+    session_vault_path: str = str(Path.home() / "Documents" / "Takeloom Studio Vault")
+    backup_server: str = ""  # e.g. "user@host:/path/to/backups" — also the Vault's remote destination
     inspiration_server: str = ""  # e.g. "http://myserver:8000"
     inspiration_api_key: str = ""
     inspiration_volume: float = 1.0
@@ -141,6 +150,10 @@ class StudioConfig:
             errors.append("Output channels must be >= 1")
         if self.streaming_enabled and not self.youtube_stream_key.strip():
             errors.append("Streaming is enabled but no YouTube stream key is set.")
+        if self.session_vault_mode not in ("local", "remote", "both"):
+            errors.append(f"Invalid vault mode: {self.session_vault_mode}. Must be 'local', 'remote', or 'both'.")
+        if self.session_vault_mode in ("remote", "both") and not self.backup_server.strip():
+            errors.append(f"Vault mode is '{self.session_vault_mode}' but no backup server is set.")
         return errors
 
     def get_instrument(self, name: str) -> Instrument | None:

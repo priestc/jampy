@@ -545,6 +545,31 @@ def sync_pull() -> None:
     sync_down(project.path, remote)
 
 
+@main.command(name="migrate-sessions-to-vault")
+def migrate_sessions_to_vault_command() -> None:
+    """One-time migration: move every project's recorded sessions out of
+    its own sessions/ folder into the Studio Session Vault (see 'takeloom
+    setup-studio'). Going forward, new sessions are recorded straight into
+    the vault — this is only for sessions recorded before that existed.
+
+    Safe to re-run: a session already migrated is skipped, not re-copied.
+    """
+    config = StudioConfig.load()
+    if not config.session_vault_path:
+        click.echo("Error: no vault path configured. Run 'takeloom setup-studio' first.", err=True)
+        raise SystemExit(1)
+    if config.session_vault_mode in ("remote", "both") and not config.backup_server:
+        click.echo(
+            f"Warning: vault mode is '{config.session_vault_mode}' but no backup server is configured — "
+            "migrated sessions will only be moved locally.",
+        )
+
+    from .vault import migrate_projects_to_vault
+    click.echo(f"Migrating sessions into vault: {config.session_vault_path}\n")
+    migrated, projects_touched = migrate_projects_to_vault(config, log=click.echo)
+    click.echo(f"\nDone: moved {migrated} session(s) across {projects_touched} project(s).")
+
+
 @main.command()
 def update_setlist() -> None:
     """Scan backing_tracks/ and update setlist.json in the current directory."""
