@@ -47,6 +47,11 @@ class RecordFrame(ttk.Frame):
 
         self._selected_track: TrackEntry | None = None
         self._selected_track_index: int | None = None
+        # Index the current click-and-drag started at, and whether it's
+        # actually moved a track (vs. just being a plain click) — see
+        # _on_setlist_drag_start/_motion/_end.
+        self._drag_index: int | None = None
+        self._drag_moved = False
 
         # "idle" (no session) | "waiting" (session open, track cued or
         # between songs) | "recording" (backing playing). Non-idle means a
@@ -428,6 +433,9 @@ class RecordFrame(ttk.Frame):
         self.setlist_listbox.bind("<Button-3>", self._on_setlist_right_click)
         self.setlist_listbox.bind("<Button-2>", self._on_setlist_right_click)
         self.setlist_listbox.bind("<Control-Button-1>", self._on_setlist_right_click)
+        self.setlist_listbox.bind("<ButtonPress-1>", self._on_setlist_drag_start)
+        self.setlist_listbox.bind("<B1-Motion>", self._on_setlist_drag_motion)
+        self.setlist_listbox.bind("<ButtonRelease-1>", self._on_setlist_drag_end)
 
     def _track_display(self, track: TrackEntry, inst_name: str) -> str:
         dur = format_duration(track.duration_seconds)
@@ -586,6 +594,34 @@ class RecordFrame(ttk.Frame):
         self._selected_track_index = sel[0]
         self.selection_var.set(f"Selected: {self._selected_track.name}")
         self._update_start_button_state()
+
+    def _on_setlist_drag_start(self, event: object) -> None:
+        if self._phase != "idle" or not self._setlist:
+            return  # don't let the setlist reorder out from under an active take
+        self._drag_index = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
+        self._drag_moved = False
+
+    def _on_setlist_drag_motion(self, event: object) -> None:
+        if self._drag_index is None or not self._setlist or not self._setlist.tracks:
+            return
+        target = self.setlist_listbox.nearest(event.y)  # type: ignore[attr-defined]
+        target = max(0, min(target, len(self._setlist.tracks) - 1))
+        if target == self._drag_index:
+            return
+        self._setlist.move_track(self._drag_index, target)
+        self._drag_index = target
+        self._drag_moved = True
+        if self._selected_track_index is not None:
+            self._selected_track_index = target
+        self._refresh_setlist()
+        self.setlist_listbox.selection_clear(0, tk.END)
+        self.setlist_listbox.selection_set(target)
+
+    def _on_setlist_drag_end(self, _event: object = None) -> None:
+        if self._drag_moved:
+            self._save_setlist_and_refresh()
+        self._drag_index = None
+        self._drag_moved = False
 
     def _on_setlist_right_click(self, event: object) -> None:
         if self._phase != "idle" or not self._setlist:
