@@ -33,7 +33,7 @@ def derive_filter_label(filter_criteria: dict) -> str:
     subject = " - ".join(p for p in (artist, genre) if p)
 
     if year_min is not None and year_max is not None:
-        year_part = f"{year_min}-{year_max}"
+        year_part = f"from {year_min}" if year_min == year_max else f"{year_min}-{year_max}"
     elif year_min is not None:
         year_part = f"after {year_min}"
     elif year_max is not None:
