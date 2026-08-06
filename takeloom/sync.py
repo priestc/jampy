@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -10,11 +11,43 @@ import click
 
 
 def _remote_path(remote: str, project_name: str) -> str:
-    """Join remote base and project name, handling host:path format."""
+    """Join remote base and project name, handling host:path format.
+
+    Backslash-escapes spaces in the path portion (never the host). rsync
+    forwards this argument to the remote shell over ssh, and the rsync
+    client bundled with macOS (an openrsync build that reports itself as
+    "rsync version 2.6.9 compatible" and doesn't support --protect-args)
+    does not shell-quote it — an unescaped space gets split into
+    separate arguments on the remote end, silently truncating the
+    destination path (e.g. ".../Takeloom Studio Vault/sessions/..."
+    becomes just ".../Takeloom", with everything after the space lost —
+    this is exactly what happened before this fix, more than once)."""
     if ":" in remote:
         host, path = remote.split(":", 1)
-        return f"{host}:{os.path.join(path, project_name)}"
+        joined = os.path.join(path, project_name)
+        return f"{host}:{joined.replace(' ', chr(92) + ' ')}"
     return os.path.join(remote, project_name)
+
+
+def _ensure_remote_dir(remote: str, project_name: str) -> None:
+    """mkdir -p the destination directory on the remote host before an
+    upload. This rsync client doesn't support --mkpath and won't create
+    more than one missing intermediate directory level on its own, so a
+    nested vault destination (e.g. "sessions/Album1/2026-.../") fails
+    outright unless something else creates "sessions/Album1/" first.
+    Best-effort: if this fails, the rsync call right after it will
+    surface the real error."""
+    if ":" not in remote:
+        return
+    host, path = remote.split(":", 1)
+    remote_dir = os.path.join(path, project_name)
+    try:
+        subprocess.run(
+            ["ssh", host, f"mkdir -p {shlex.quote(remote_dir)}"],
+            capture_output=True, timeout=15,
+        )
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
 
 
 def sync_down(project_path: Path, remote: str) -> None:
@@ -40,6 +73,7 @@ def sync_up(project_path: Path, remote: str) -> None:
     """Upload project to the remote backup server."""
     project_name = project_path.name
     source = f"{project_path}/"
+    _ensure_remote_dir(remote, project_name)
     dest = _remote_path(remote, project_name) + "/"
     cmd = ["rsync", "-avz", "--checksum", source, dest]
     click.echo(f"$ {' '.join(cmd)}")
@@ -66,6 +100,7 @@ def sync_vault_session_up(local_dir: Path, vault_relative: str, remote: str) -> 
     safe to delete the local copy afterward, and this is called from
     backend.py's background processing thread — not a CLI context — so it
     reports through its own return value instead of stdout."""
+    _ensure_remote_dir(remote, vault_relative)
     dest = _remote_path(remote, vault_relative) + "/"
     cmd = ["rsync", "-avz", "--checksum", f"{local_dir}/", dest]
     try:
