@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from ..backend import BackendError
 from ..config import Instrument, InputLabel, StudioConfig
@@ -25,10 +26,17 @@ FIELDS = [
     ("studio_name", "Studio name"),
     ("studio_location", "Studio location"),
     ("studio_musician", "Studio musician (default performer)"),
-    ("backup_server", "Backup server (user@host:/path)"),
-    ("session_vault_path", "Studio Session Vault path"),
     ("inspiration_server", "Inspiration server URL"),
     ("inspiration_api_key", "Inspiration API key"),
+]
+
+# Rendered in their own "Vault" section (see _build_vault_section) rather
+# than the plain FIELDS loop above, since local_vault gets a folder-picker
+# button alongside its Entry and the whole group needs its own heading —
+# _on_save still writes both back from self._vars, same as any FIELDS entry.
+VAULT_FIELDS = [
+    ("session_vault_path", "Local vault"),
+    ("backup_server", "Remote vault (user@host:/path)"),
 ]
 
 _VAULT_MODE_LABELS = [("local", "Local only"), ("remote", "Remote only"), ("both", "Both")]
@@ -203,25 +211,10 @@ class StudioSetupFrame(ttk.Frame):
             entry.grid(row=row, column=1, sticky="ew", pady=4)
             self._vars[attr] = var
             row += 1
-            if attr == "session_vault_path":
-                ttk.Label(self, text="Vault storage").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
-                self.vault_mode_var = tk.StringVar(value=self._current_vault_mode_label())
-                ttk.Combobox(
-                    self, textvariable=self.vault_mode_var, values=[label for _v, label in _VAULT_MODE_LABELS],
-                    state="readonly", width=16,
-                ).grid(row=row, column=1, sticky="w", pady=4)
-                row += 1
-                ttk.Label(
-                    self,
-                    text="Where recorded sessions (the continuous audio/video, not the setlist itself) are "
-                         "stored. \"Remote only\" pushes each session to the backup server above and removes "
-                         "the local copy once that's verified; \"Both\" pushes but keeps the local copy too.",
-                    foreground="#666666", wraplength=440, justify="left",
-                ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
-                row += 1
 
         self.columnconfigure(1, weight=1)
 
+        row = self._build_vault_section(row)
         row = self._build_input_labels(row)
         row = self._build_instruments(row)
 
@@ -235,6 +228,56 @@ class StudioSetupFrame(ttk.Frame):
         button_row.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
         self.save_button = ttk.Button(button_row, text="Save", command=self._on_save)
         self.save_button.pack(side="right")
+
+    def _build_vault_section(self, row: int) -> int:
+        ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
+        row += 1
+
+        ttk.Label(self, text="Vault", font=("TkDefaultFont", 11, "bold")).grid(
+            row=row, column=0, columnspan=2, sticky="w"
+        )
+        row += 1
+
+        for attr, label in VAULT_FIELDS:
+            ttk.Label(self, text=label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+            var = tk.StringVar(value=getattr(self.config_obj, attr))
+            self._vars[attr] = var
+            if attr == "session_vault_path":
+                path_row = ttk.Frame(self)
+                path_row.grid(row=row, column=1, sticky="ew")
+                path_row.columnconfigure(0, weight=1)
+                ttk.Entry(path_row, textvariable=var).grid(row=0, column=0, sticky="ew")
+                ttk.Button(path_row, text="Browse...", command=self._on_browse_local_vault).grid(
+                    row=0, column=1, padx=(6, 0)
+                )
+            else:
+                ttk.Entry(self, textvariable=var, width=42).grid(row=row, column=1, sticky="ew")
+            row += 1
+
+        ttk.Label(self, text="Vault storage").grid(row=row, column=0, sticky="w", padx=(0, 8), pady=4)
+        self.vault_mode_var = tk.StringVar(value=self._current_vault_mode_label())
+        ttk.Combobox(
+            self, textvariable=self.vault_mode_var, values=[label for _v, label in _VAULT_MODE_LABELS],
+            state="readonly", width=16,
+        ).grid(row=row, column=1, sticky="w", pady=4)
+        row += 1
+        ttk.Label(
+            self,
+            text="Where recorded sessions (the continuous audio/video, not the setlist itself) are stored. "
+                 "\"Remote only\" pushes each session to the remote vault above and removes the local copy "
+                 "once that's verified; \"Both\" pushes but keeps the local copy too.",
+            foreground="#666666", wraplength=440, justify="left",
+        ).grid(row=row, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        row += 1
+        return row
+
+    def _on_browse_local_vault(self) -> None:
+        initial = self._vars["session_vault_path"].get().strip()
+        chosen = filedialog.askdirectory(
+            title="Choose Local Vault Folder", initialdir=initial or str(Path.home()), parent=self,
+        )
+        if chosen:
+            self._vars["session_vault_path"].set(chosen)
 
     def _build_input_labels(self, row: int) -> int:
         ttk.Separator(self, orient="horizontal").grid(row=row, column=0, columnspan=2, sticky="ew", pady=10)
@@ -376,6 +419,8 @@ class StudioSetupFrame(ttk.Frame):
 
     def _on_save(self) -> None:
         for attr, _label in FIELDS:
+            setattr(self.config_obj, attr, self._vars[attr].get())
+        for attr, _label in VAULT_FIELDS:
             setattr(self.config_obj, attr, self._vars[attr].get())
         for value, label in _VAULT_MODE_LABELS:
             if label == self.vault_mode_var.get():
