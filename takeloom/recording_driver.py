@@ -124,13 +124,20 @@ class RecordingDeckDriver:
         try:
             if key == "r":
                 if self.phase == "idle":
-                    self._start_recording()
+                    self._start_recording(streaming=False)
                 elif self.phase == "waiting":
                     self._backend.unpause_recording()
                 elif self.phase == "recording":
                     self._backend.stop_recording()
+            elif key == "s":
+                if self.phase == "idle":
+                    self._start_recording(streaming=True)
             elif key == "n":
-                self._next_track()
+                # Only meaningful with a session already open — idx 2 isn't
+                # part of the idle layout (RECORDING_IDLE_BUTTONS), so there's
+                # no "start via Next" shortcut anymore; use "r"/"s" instead.
+                if self.phase != "idle":
+                    self._backend.next_track()
             elif key == "d":
                 if self.phase in ("waiting", "recording"):
                     self._backend.redraw_current_track()
@@ -138,7 +145,10 @@ class RecordingDeckDriver:
                 if self.phase == "recording":
                     self._backend.restart_take()
             elif key == "m":
-                self._toggle_monitoring_mode()
+                # Monitor toggle (idx 3) is likewise only part of the active
+                # layout — nothing to toggle while idle.
+                if self.phase != "idle":
+                    self._toggle_monitoring_mode()
             elif key in ("l", "u", "[", "]", ",", "."):
                 delta = 5 if key in ("u", "]", ".") else -5
                 if key in ("[", "]"):
@@ -150,34 +160,22 @@ class RecordingDeckDriver:
         except BackendError as e:
             self._log(f"StreamDeck: {e}")
 
-    def _start_recording(self) -> None:
-        req = self._resolve_start_request()
-        if req is not None:
-            self._backend.start_recording(req)
-
-    def _next_track(self) -> None:
-        """Next: always available. With a session open (waiting or
-        recording), the backend advances it — skipping the current song if
-        one is playing. While idle, this starts a session one track past
-        wherever resolve_start_request() currently points, playing
-        immediately (Next means "go", unlike the record key's cue-first
-        start)."""
-        if self.phase != "idle":
-            self._backend.next_track()
-            return
+    def _start_recording(self, streaming: bool) -> None:
+        """Start a session, forcing config.streaming_enabled to match which
+        idle-layout button ("Start Local"/"Start Streaming") was pressed —
+        see RECORDING_IDLE_BUTTONS — rather than starting whatever the
+        Streaming settings tab last happened to be left at. Everything else
+        about the session is identical either way; start_recording() itself
+        decides whether streaming actually happens (e.g. it still needs a
+        camera and a YouTube stream key configured)."""
         req = self._resolve_start_request()
         if req is None:
             return
-        index = self._backend.next_untaken_track_index(
-            req.project_name, req.instrument_name, req.track_index + 1,
-        )
-        if index is None:
-            self._log(f"No more tracks in '{req.project_name}' need a take for '{req.instrument_name}'.")
-            return
-        self._backend.start_recording(StartRecordingRequest(
-            project_name=req.project_name, instrument_name=req.instrument_name, track_index=index,
-        ))
-        self._backend.unpause_recording()
+        config = self._backend.get_config()
+        if config.streaming_enabled != streaming:
+            config.streaming_enabled = streaming
+            self._backend.save_config(config)
+        self._backend.start_recording(req)
 
     def _toggle_monitoring_mode(self) -> None:
         current = self._backend.get_monitoring_mode()
@@ -195,6 +193,14 @@ class RecordingDeckDriver:
             if "phase" in data:
                 self.phase = data["phase"]
                 self.streamdeck.update_recording_page(self.phase, self.video_check_phase)
+                # update_recording_page blanks every key the idle layout
+                # doesn't use whenever phase crosses the idle boundary —
+                # including the monitor toggle (idx 3), which only exists
+                # in the active layout — so re-paint it every time a phase
+                # change might have just swapped layouts; connect()'s
+                # initial _refresh_monitoring_mode() alone isn't enough
+                # once a session has opened and closed at least once.
+                self._refresh_monitoring_mode()
         elif event == "video_check_status":
             # RemoteServer never broadcasts the raw video_check_status a
             # server-side check emits (its result_path only means anything

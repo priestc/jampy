@@ -152,6 +152,18 @@ _RECORDING_REDRAW: tuple = (10, "dice", "Redraw", "d", None, (150, 90, 220), (15
 # filter (index 10 is out of range for an 8-key deck).
 _RECORDING_REDRAW_DIAL: tuple = (4, "dice", "Redraw", "d", None, (150, 90, 220), (150, 90, 220))
 
+# The idle-only layout: two explicit "how do you want to start" choices
+# instead of a single Start button plus a separate settings-tab checkbox,
+# so streaming-vs-not is decided at the moment a session actually starts.
+# Both key indices are reused by the active layout below once a session
+# opens (0 becomes the Start/Unpause/Stop toggle, 1 becomes Restart) —
+# update_recording_page swaps the whole button set the moment phase
+# crosses the idle boundary in either direction, so the two never
+# coexist on the deck.
+_RECORDING_START_LOCAL: tuple = (0, "record", "Start Local", "r", None, (0, 200, 0), (0, 200, 0))
+_RECORDING_START_STREAMING: tuple = (1, "record", "Start Streaming", "s", None, (230, 0, 120), (230, 0, 120))
+RECORDING_IDLE_BUTTONS: list[tuple] = [_RECORDING_START_LOCAL, _RECORDING_START_STREAMING]
+
 # Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
 # Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
 # hardware direct monitor path used while actually laying down a take);
@@ -159,8 +171,9 @@ _RECORDING_REDRAW_DIAL: tuple = (4, "dice", "Redraw", "d", None, (150, 90, 220),
 LIVE_MONITOR_COLOR = (255, 140, 0)
 PRODUCTION_MONITOR_COLOR = (0, 160, 200)
 
-# RECORDING_BUTTONS/RECORDING_VOLUME_BUTTONS are public (no leading
-# underscore): the Tk UI's on-screen emulator (ui/streamdeck_emulator.py)
+# RECORDING_BUTTONS/RECORDING_VOLUME_BUTTONS (the active, in-session
+# layout) are public (no leading underscore), same as RECORDING_IDLE_
+# BUTTONS above: the Tk UI's on-screen emulator (ui/streamdeck_emulator.py)
 # draws the exact same button set as the physical device from these tables,
 # always using _RECORDING_REDRAW's key index 10 since the emulator has
 # room for it regardless of what physical deck (if any) is connected.
@@ -355,6 +368,7 @@ class StreamDeckController:
         self._device_key: str | None = None
         self._has_dials = False
         self._buttons: list[tuple] = []
+        self._idle_layout = True  # tracks which of RECORDING_IDLE_BUTTONS/_active_recording_buttons() is live
         self._dial_map: dict[int, tuple[str, str, str]] = dict(_SESSION_DIAL_MAP)
         self._lock = threading.Lock()
         # Only set when a device was actually found but failed to open/
@@ -448,36 +462,50 @@ class StreamDeckController:
         self._dial_map = dict(_INSPIRATION_DIAL_MAP)
 
     def use_recording_layout(self) -> None:
-        """Switch to the shared recording-context layout — used identically
-        by the Tk UI, headless `takeloom server`, and the CLI: a Record/
-        Unpause/Stop toggle, Next Track (always available — advances to the
-        next untaken track, discarding an in-progress take first if one's
-        active), Restart (dimmed unless actually recording), the Live/
-        Production monitor toggle, and volume controls (dials if available,
-        else buttons). Buttons whose index doesn't fit the connected deck
-        are dropped rather than drawn out of range (e.g. the 6-key Mini)."""
-        self._buttons = list(RECORDING_BUTTONS)
-        if self._has_dials:
-            self._buttons = [_RECORDING_REDRAW_DIAL if btn[0] == 10 else btn for btn in self._buttons]
-        else:
-            self._buttons += RECORDING_VOLUME_BUTTONS
+        """Enter the shared recording context — used identically by the Tk
+        UI, headless `takeloom server`, and the CLI. Starts on the idle
+        two-button layout (RECORDING_IDLE_BUTTONS: "Start Local" / "Start
+        Streaming"); update_recording_page swaps to the full in-session
+        layout — Record/Unpause/Stop toggle, Next Track (always available —
+        advances to the next untaken track, discarding an in-progress take
+        first if one's active), Restart (dimmed unless actually recording),
+        the Live/Production monitor toggle, and volume controls (dials if
+        available, else buttons) — once a session actually opens, and back
+        again once it ends. Buttons whose index doesn't fit the connected
+        deck are dropped rather than drawn out of range (e.g. the 6-key
+        Mini)."""
         self._dial_map = dict(_SESSION_DIAL_MAP)
+        self._idle_layout = True
+        self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
+
+    def _active_recording_buttons(self) -> list[tuple]:
+        buttons = list(RECORDING_BUTTONS)
+        if self._has_dials:
+            return [_RECORDING_REDRAW_DIAL if btn[0] == 10 else btn for btn in buttons]
+        return buttons + RECORDING_VOLUME_BUTTONS
+
+    def _apply_layout(self, buttons: list[tuple], skip_indices: frozenset) -> None:
+        """Swap in a new key layout: blank every key the deck isn't using —
+        on a dial deck (e.g. the Stream Deck Plus) that's most of them, and
+        left untouched they'd keep showing whatever the previous layout (or
+        the device's own default/branded image) put there instead of
+        looking deliberately off — then paint every used key except the
+        ones the caller is about to paint itself with phase-specific
+        content (skip_indices: the session toggle, and in the active
+        layout, the monitor toggle)."""
+        self._buttons = buttons
         if not self.connected:
             return
         key_count = getattr(self._deck, "KEY_COUNT", 0)
         self._buttons = [btn for btn in self._buttons if btn[0] < key_count]
         with self._lock:
-            # Blank every key this layout doesn't use — on a dial deck (e.g. the
-            # Stream Deck Plus) that's most of them, and left untouched they'd
-            # keep showing the device's own default/branded image instead of
-            # looking deliberately off.
             used_indices = {btn[0] for btn in self._buttons}
             for idx in range(key_count):
                 if idx not in used_indices:
                     self._deck.set_key_image(idx, self._make_key_image(None, None, (0, 0, 0)))
             for btn in self._buttons:
                 idx, icon, _label, _key, _active_state, _active_color, _dim_color = btn
-                if idx in (0, RECORDING_MONITOR_TOGGLE_KEY_INDEX) or icon is None:
+                if idx in skip_indices or icon is None:
                     continue
                 # Freshly applying the layout with no phase known yet — treat
                 # as "idle" (dimmed) until the first update_recording_page().
@@ -488,17 +516,30 @@ class StreamDeckController:
 
     def update_recording_page(self, phase: str, video_check_phase: str = "idle") -> None:
         """Refresh the session toggle and dim/light Next/Restart/volume for
-        the current phase. The toggle is dimmed while a Video Check —
-        triggered from the Tk UI or a Remote client; there's no Stream Deck
-        button for it — holds the audio/camera hardware, since the two are
-        mutually exclusive at the backend level. `phase` is one of
-        "idle"/"waiting"/"recording"; `video_check_phase` is
-        "idle"/"recording". Shared verbatim by the Tk UI, headless server,
-        and CLI drivers (and mirrored on-screen by the Tk UI's emulator via
-        the same recording_toggle_visual()/button_visual() helpers). The
-        monitor-mode toggle key (index 3) is refreshed separately — see
-        update_monitoring_mode()."""
+        the current phase, swapping the whole button layout the moment
+        phase crosses the idle boundary in either direction — idle shows
+        only the two Start buttons (RECORDING_IDLE_BUTTONS), anything else
+        shows the full in-session layout (_active_recording_buttons()). The
+        toggle is dimmed while a Video Check — triggered from the Tk UI or
+        a Remote client; there's no Stream Deck button for it — holds the
+        audio/camera hardware, since the two are mutually exclusive at the
+        backend level. `phase` is one of "idle"/"waiting"/"recording";
+        `video_check_phase` is "idle"/"recording". Shared verbatim by the
+        Tk UI, headless server, and CLI drivers (and mirrored on-screen by
+        the Tk UI's emulator via the same recording_toggle_visual()/
+        button_visual() helpers). The monitor-mode toggle key (index 3) is
+        refreshed separately — see update_monitoring_mode() — and only
+        exists in the active layout."""
         if not self.connected:
+            return
+        is_idle = phase == "idle"
+        if is_idle != self._idle_layout:
+            self._idle_layout = is_idle
+            if is_idle:
+                self._apply_layout(list(RECORDING_IDLE_BUTTONS), skip_indices=frozenset())
+                return
+            self._apply_layout(self._active_recording_buttons(), skip_indices=frozenset({0, RECORDING_MONITOR_TOGGLE_KEY_INDEX}))
+        if is_idle:
             return
         record_icon, record_label, record_color = recording_toggle_visual(phase, video_check_phase)
         with self._lock:

@@ -19,6 +19,7 @@ from PIL import ImageTk
 
 from ..streamdeck_controller import (
     RECORDING_BUTTONS,
+    RECORDING_IDLE_BUTTONS,
     RECORDING_MONITOR_TOGGLE_KEY_INDEX,
     RECORDING_VOLUME_BUTTONS,
     button_visual,
@@ -34,6 +35,12 @@ from .platform_style import scaled_px
 _KEY_SIZE = scaled_px(68)
 _COLS = 5
 _ALL_BUTTONS: list[tuple] = list(RECORDING_BUTTONS) + list(RECORDING_VOLUME_BUTTONS)
+# Keys 0 and 1 are shared between the idle layout ("Start Local"/"Start
+# Streaming") and the active in-session layout (the toggle/Restart) — see
+# streamdeck_controller.py's RECORDING_IDLE_BUTTONS. Every other key only
+# exists once a session is open, so those widgets are grid_remove()'d
+# while idle rather than just repainted blank — see _redraw().
+_ACTIVE_ONLY_INDICES = {btn[0] for btn in _ALL_BUTTONS} - {btn[0] for btn in RECORDING_IDLE_BUTTONS}
 
 
 class StreamDeckEmulator(ttk.Frame):
@@ -71,6 +78,18 @@ class StreamDeckEmulator(ttk.Frame):
         self._buttons[idx].configure(image=photo)
 
     def _redraw(self) -> None:
+        is_idle = self._phase == "idle"
+        for idx in _ACTIVE_ONLY_INDICES:
+            if is_idle:
+                self._buttons[idx].grid_remove()
+            else:
+                self._buttons[idx].grid()
+        if is_idle:
+            for btn in RECORDING_IDLE_BUTTONS:
+                idx, icon, label, _key, _active_state, color, _dim_color = btn
+                self._set_face(idx, icon, label, color)
+            return
+
         icon, label, color = recording_toggle_visual(self._phase, self._video_check_phase)
         self._set_face(0, icon, label, color)
         for btn in _ALL_BUTTONS:

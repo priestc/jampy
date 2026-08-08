@@ -836,21 +836,22 @@ class RecordFrame(ttk.Frame):
 
     def _on_emulator_key(self, key: str) -> None:
         """Dispatch a click on the on-screen Stream Deck emulator. "r"
-        (Start/Unpause/Stop) reuses this frame's own request-building and
-        loading-state handling verbatim — same as a mouse click on the old
-        ttk button did — since it's the one key with real Tk-side UI state
-        to manage. Every other key (Next/Restart/Monitor/volume) has no Tk
-        equivalent of its own and goes straight through the shared driver,
-        exactly like a physical Stream Deck press does (see
-        _on_streamdeck_key)."""
-        if key == "r":
-            self._on_toggle_recording()
+        (Start Local/Unpause/Stop) and "s" (Start Streaming, only
+        meaningful while idle — see RECORDING_IDLE_BUTTONS) reuse this
+        frame's own request-building and loading-state handling verbatim —
+        same as a mouse click on the old ttk button did — since they're the
+        keys with real Tk-side UI state to manage. Every other key (Next/
+        Restart/Monitor/volume) has no Tk equivalent of its own and goes
+        straight through the shared driver, exactly like a physical Stream
+        Deck press does (see _on_streamdeck_key)."""
+        if key in ("r", "s"):
+            self._on_toggle_recording(streaming=(key == "s"))
         else:
             self._streamdeck_driver.handle_key(key)
 
-    def _on_toggle_recording(self) -> None:
+    def _on_toggle_recording(self, streaming: bool = False) -> None:
         if self._phase == "idle":
-            self._start_recording()
+            self._start_recording(streaming=streaming)
         elif self._phase == "waiting":
             self._unpause_recording()
         elif self._phase == "recording":
@@ -873,21 +874,32 @@ class RecordFrame(ttk.Frame):
         messagebox.showerror("Cannot start", "Select a track from the Setlist first.")
         return None
 
-    def _start_recording(self) -> None:
+    def _start_recording(self, streaming: bool = False) -> None:
         req = self._build_selected_request()
         if req is None:
             return
 
         self.streamdeck_emulator.set_key_enabled(0, False)
+        self.streamdeck_emulator.set_key_enabled(1, False)
         self._set_controls_enabled(False)
         self.status_var.set("Loading...")
-        # start_recording() opens the session itself when none is active —
-        # a mouse click here behaves exactly like a physical Stream Deck
-        # press does (see the recording section of backend.py).
         backend = self.app_state.backend
-        self._run_backend(
-            lambda: backend.start_recording(req), lambda _result, error: self._on_start_result(error)
-        )
+
+        def do_start():
+            # Force config.streaming_enabled to match which idle-layout
+            # button ("Start Local"/"Start Streaming") was pressed, rather
+            # than starting whatever the Streaming settings tab last
+            # happened to be left at — everything else about the session is
+            # identical either way; start_recording() itself opens the
+            # session, same as a physical Stream Deck press does (see the
+            # recording section of backend.py).
+            config = backend.get_config()
+            if config.streaming_enabled != streaming:
+                config.streaming_enabled = streaming
+                backend.save_config(config)
+            backend.start_recording(req)
+
+        self._run_backend(do_start, lambda _result, error: self._on_start_result(error))
 
     def _on_start_result(self, error: str | None) -> None:
         # On success, the "recording_status" event the backend emits before
@@ -898,6 +910,7 @@ class RecordFrame(ttk.Frame):
             self._set_controls_enabled(True)
             self.status_var.set("")
             self.streamdeck_emulator.set_key_enabled(0, True)
+            self.streamdeck_emulator.set_key_enabled(1, True)
             self._update_start_button_state()
 
     def _unpause_recording(self) -> None:
