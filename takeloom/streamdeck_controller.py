@@ -144,6 +144,13 @@ _RECORDING_MONITOR_TOGGLE: tuple = (
 # advances to the next actual setlist position, this replaces whatever's
 # currently loaded with a different random draw from the same filter.
 _RECORDING_REDRAW: tuple = (10, "dice", "Redraw", "d", None, (150, 90, 220), (150, 90, 220))
+# On a dial deck (e.g. the Stream Deck Plus, KEY_COUNT=8) the volume-button
+# block (4-9) is never drawn — dials handle volume instead, see
+# use_recording_layout — so key 4 sits free. use_recording_layout swaps
+# this in for _RECORDING_REDRAW on dial decks so Redraw actually reaches
+# the physical keys instead of being silently dropped by the key_count
+# filter (index 10 is out of range for an 8-key deck).
+_RECORDING_REDRAW_DIAL: tuple = (4, "dice", "Redraw", "d", None, (150, 90, 220), (150, 90, 220))
 
 # Colors for the monitor-mode toggle — see update_monitoring_mode(). Live
 # Monitor reuses Restart's "hot/active" orange (it's the same zero-latency
@@ -154,13 +161,15 @@ PRODUCTION_MONITOR_COLOR = (0, 160, 200)
 
 # RECORDING_BUTTONS/RECORDING_VOLUME_BUTTONS are public (no leading
 # underscore): the Tk UI's on-screen emulator (ui/streamdeck_emulator.py)
-# draws the exact same button set as the physical device from these tables.
-# Redraw sits at key index 10, past the volume block below (4-9) rather
-# than shifting any of them — decks too small to have a key 10 (e.g. the
-# 4-key/dial Stream Deck Plus, the 6-key Mini) just drop it via
-# use_recording_layout's key_count filtering, same as any other button
-# that doesn't fit; the Tk UI's on-screen emulator always has room for it
-# regardless of what physical deck (if any) is connected.
+# draws the exact same button set as the physical device from these tables,
+# always using _RECORDING_REDRAW's key index 10 since the emulator has
+# room for it regardless of what physical deck (if any) is connected.
+# On the real device, key 10 is past the volume block below (4-9) so it
+# doesn't shift any of them — decks too small to have a key 10 at all
+# (e.g. the 6-key Mini) just drop it via use_recording_layout's key_count
+# filtering, same as any other button that doesn't fit; dial decks (e.g.
+# the Stream Deck Plus) instead get it remapped to key 4 — see
+# _RECORDING_REDRAW_DIAL above.
 RECORDING_BUTTONS: list[tuple] = [
     _RECORDING_TOGGLE, _RECORDING_NEXT, _RECORDING_RESTART, _RECORDING_MONITOR_TOGGLE, _RECORDING_REDRAW,
 ]
@@ -448,7 +457,9 @@ class StreamDeckController:
         else buttons). Buttons whose index doesn't fit the connected deck
         are dropped rather than drawn out of range (e.g. the 6-key Mini)."""
         self._buttons = list(RECORDING_BUTTONS)
-        if not self._has_dials:
+        if self._has_dials:
+            self._buttons = [_RECORDING_REDRAW_DIAL if btn[0] == 10 else btn for btn in self._buttons]
+        else:
             self._buttons += RECORDING_VOLUME_BUTTONS
         self._dial_map = dict(_SESSION_DIAL_MAP)
         if not self.connected:
